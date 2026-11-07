@@ -113,17 +113,18 @@ CeraUI:
   # (standby/suspension bands, backup source modes, failover policy) on engine 2026.9.7.
   # v2026.9.5: unified device update orchestrator, validated on both bench boards.
   # v2026.10.0: released update-system fixes; package installation is not image qualification.
-  pin: v2026.11.0
-  # Device deb: ceralive-device 2026.11.0-20261105T023023.c8387c1 (amd64) /
-  #   2026.11.0-20261105T023029.c8387c1 (arm64); see first-party-deb-versions.txt.
-  # Tag commit: c8387c14e9c4b28b62aadd7f6125689b5b0fb100.
+  # v2026.11.1: refreshes a stale healthy-state record before a kernel stage.
+  pin: v2026.11.1
+  # Device deb: ceralive-device 2026.11.1-20261106T235637.77fae5e (amd64) /
+  #   2026.11.1-20261106T235641.77fae5e (arm64); see first-party-deb-versions.txt.
+  # Tag commit: 77fae5eb21d3e6b7125325dcbc4d1fcbe09638a4.
   # Authenticated release downloads independently matched their SHA-256 sidecars:
-  #   amd64 c53b56a7318a5dd90837aea5961108a64ddab998a7f358d9e06bc96c2ba73c96,
-  #   arm64 436fadceadbf7e5cdcf4e83df9c37daf9dd99e617eaa9290c7773dada9426cf6.
+  #   amd64 8d86a82e3ea511b419fe44816bfc84bd4db1faf3f6300f9bfb057f5a67b82fc3,
+  #   arm64 7d61d045de202c082373b7d85c8e481e4b58e02425c8a2880b0239087bcf378b.
   # Both Debian control identities and GitHub asset digests match these downloads.
   # APT serving and hardware were not checked for this pin; the release catalog
   # refresh remains a separate final commit before release admission.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.0
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.1
   # Historical receipt for 2026.9.3 follows (not the active artifact):
   #   2026.9.3-20260920T155651.ec522ad (amd64) /
   #   2026.9.3-20260920T155654.ec522ad (arm64). Both release assets were downloaded

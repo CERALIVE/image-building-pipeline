@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.11.0's unified update orchestrator.
+channel publisher and pins stable CeraUI v2026.11.1's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -261,15 +261,15 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects stable CeraUI **v2026.11.0**
-(tag commit `c8387c14e9c4b28b62aadd7f6125689b5b0fb100`), published
-2026-11-05T02:32:20Z. The exact Debian versions are
-`2026.11.0-20261105T023029.c8387c1` (arm64) and
-`2026.11.0-20261105T023023.c8387c1` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.11.0`. Downloaded asset hashes match both SHA-256 sidecars
+The current image pin selects stable CeraUI **v2026.11.1**
+(tag commit `77fae5eb21d3e6b7125325dcbc4d1fcbe09638a4`), published
+2026-11-06T23:58:19Z. The exact Debian versions are
+`2026.11.1-20261106T235641.77fae5e` (arm64) and
+`2026.11.1-20261106T235637.77fae5e` (amd64), with repo-local provenance
+`CeraUI.pin: v2026.11.1`. Downloaded asset hashes match both SHA-256 sidecars
 and GitHub asset digests, and Debian control fields confirm both identities.
 APT serving, installation and hardware were not checked for this pin. See the
-[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-11-05).
+[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-11-06).
 The committed release catalog is unchanged pending a separate final refresh
 commit after the owner decides the prerequisite PR merge order. Pinning is not
 image qualification or OS stable/beta authorization; OS 2026.10.97 remains

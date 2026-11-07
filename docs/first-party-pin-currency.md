@@ -302,11 +302,11 @@ all other pins remain unchanged; no timestamp was invented, rollback exception
 added or size budget changed. Neither architecture was installed or tested on
 hardware. This pin change publishes no image or kernel and changes no channel pointer.
 
-## CeraUI pin receipt — 2026-11-05
+## CeraUI pin receipt — 2026-11-06
 
-The image selects stable [CeraUI v2026.11.0](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.0),
-published 2026-11-05T02:32:20Z, tag commit
-`c8387c14e9c4b28b62aadd7f6125689b5b0fb100`. Authenticated release metadata
+The image selects stable [CeraUI v2026.11.1](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.1),
+published 2026-11-06T23:58:19Z, tag commit
+`77fae5eb21d3e6b7125325dcbc4d1fcbe09638a4`. Authenticated release metadata
 confirms a published, non-draft, non-prerelease release. Both Debian assets and
 their SHA-256 sidecars were downloaded into an empty directory outside the
 repository. Independent `sha256sum -c` checks and GitHub asset digests agree;
@@ -315,8 +315,8 @@ architectures.
 
 | Architecture | Debian control version | Release asset SHA-256 = sidecar SHA-256 = GitHub asset digest |
 |---|---|---|
-| arm64 | `2026.11.0-20261105T023029.c8387c1` | `436fadceadbf7e5cdcf4e83df9c37daf9dd99e617eaa9290c7773dada9426cf6` |
-| amd64 | `2026.11.0-20261105T023023.c8387c1` | `c53b56a7318a5dd90837aea5961108a64ddab998a7f358d9e06bc96c2ba73c96` |
+| arm64 | `2026.11.1-20261106T235641.77fae5e` | `7d61d045de202c082373b7d85c8e481e4b58e02425c8a2880b0239087bcf378b` |
+| amd64 | `2026.11.1-20261106T235637.77fae5e` | `8d86a82e3ea511b419fe44816bfc84bd4db1faf3f6300f9bfb057f5a67b82fc3` |
 
 The manifest's architecture selectors and repo-local provenance registry name
 these exact release assets. The existing package-contract test independently
