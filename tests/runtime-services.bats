@@ -1151,18 +1151,46 @@ EOF
   [ "$(cut -d' ' -f1 "$root/run/nopartner")" = 2 ]
 }
 
-@test "typec policy: a partner appearing resets the no-partner try count" {
+@test "typec policy: a partner that stays up for a minute resets the no-partner try count" {
   local root="$BATS_TEST_TMPDIR/rock"
   typec_rock_fixture "$root"
-  rm -rf "$root/typec/port0-partner"
+  mkdir -p "$root/run"
+  printf '2 %s\n' "$(( $(date +%s) - 120 ))" >"$root/run/nopartner"
   export CERALIVE_TYPEC_MODE=recheck
-  run run_typec_rock
-  [ -e "$root/run/nopartner" ]
 
-  mkdir -p "$root/typec/port0-partner"
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ ! -e "$root/run/nopartner" ]
+}
+
+@test "typec policy: a partner that reappears right after a cycle keeps the try count" {
+  local root="$BATS_TEST_TMPDIR/rock" stamp
+  typec_rock_fixture "$root"
+  mkdir -p "$root/run"
+  stamp="$(date +%s)"
+  printf '2 %s\n' "$stamp" >"$root/run/nopartner"
+  export CERALIVE_TYPEC_MODE=recheck
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/run/nopartner")" = "2 $stamp" ]
+}
+
+@test "typec policy: a flapping front charger runs out of no-partner tries" {
+  local root="$BATS_TEST_TMPDIR/rock" n
+  typec_rock_fixture "$root"
+  export CERALIVE_TYPEC_MODE=recheck CERALIVE_TYPEC_NOPARTNER_SPACING=0 CERALIVE_TYPEC_NOPARTNER_MAX=3
+
+  for n in 1 2 3 4 5 6; do
+    rm -rf "$root/typec/port0-partner"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+    mkdir -p "$root/typec/port0-partner"
+    run run_typec_rock
+    [ "$status" -eq 0 ]
+  done
+  [ "$(grep -c '^source$' "$root/iio/writes")" -le 9 ]
+  [ "$(cut -d' ' -f1 "$root/run/nopartner")" = 3 ]
 }
 
 @test "typec policy: Rock no-partner recheck without back power performs zero connector writes" {
@@ -1262,7 +1290,7 @@ SH
   grep -Fxq 'ExecStart=/usr/local/sbin/ceralive-typec-policy' "$service"
   run grep -Fxq '[Install]' "$service"
   [ "$status" -ne 0 ]
-  grep -Fxq 'OnBootSec=10s' "$timer"
+  grep -Fxq 'OnBootSec=8s' "$timer"
   grep -Fxq 'OnUnitActiveSec=10s' "$timer"
   grep -Fxq 'AccuracySec=1s' "$timer"
   grep -Fxq 'Unit=ceralive-typec-recheck.service' "$timer"

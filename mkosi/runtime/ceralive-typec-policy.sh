@@ -119,7 +119,15 @@ rock_back_power_correction() {
     fi
   fi
   if [[ -e "${PARTNER_DIR}" ]]; then
-    rm -f "${RUN_DIR}/nopartner"
+    # A partner that reappears right after our cycle (a plain charger flaps) must
+    # not earn fresh tries; only one that has stayed up for a minute does.
+    if [[ -r "${RUN_DIR}/nopartner" ]]; then
+      read -r tries last <"${RUN_DIR}/nopartner"
+      if [[ ! "${last}" =~ ^[0-9]+$ ]] || (( $(date +%s) - last >= 60 )); then
+        rm -f "${RUN_DIR}/nopartner"
+      fi
+      tries=0 last=0
+    fi
     [[ ! -e "${RUN_DIR}/failed" ]] || return 0
   else
     # A camera that advertises Rp but never drives VBUS leaves tcpm waiting in
