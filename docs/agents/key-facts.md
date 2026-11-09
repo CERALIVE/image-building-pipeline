@@ -3880,6 +3880,9 @@ packages land in the slot's `/var/cache/apt/archives`, and the app layer inherit
 redirect: a bare `apt-get clean` there cleans the `/data` path and exits 0. The app
 layer's `clean_apt_archives` therefore names `/var/cache/apt/archives` explicitly and
 fails the build if a `.deb` remains (`tests/app-apt-archives-clean.test.sh`).
+The same layer removes the build's apt/dpkg/alternatives logs from `/var/log` after its
+last transaction (`drop_build_package_logs`, `tests/app-build-logs-dropped.test.sh`):
+nothing reads them, and first boot would otherwise seed them onto `/data/log`.
 
 **Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
 RESOLVED package membership, never a blind architecture check.**
