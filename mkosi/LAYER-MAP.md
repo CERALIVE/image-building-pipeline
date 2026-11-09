@@ -13,7 +13,7 @@ base  ──▶ platform ──▶ runtime ──▶ app  ──▶ disk     (De
  │          │            │           └─ first-party apps (Stage 3 — PLACEHOLDER today)
  │          │            └────────────── OS runtime + RAUC infra (arch-IDENTICAL)
  │          └─────────────────────────── board/SoC BSP + HW-accel (the ONLY arch-specific layer)
- └────────────────────────────────────── minimal Debian bookworm (systemd/udev/ssh/dbus)
+ └────────────────────────────────────── minimal Debian trixie (systemd/udev/ssh/dbus)
 ```
 
 `mkosi build` builds the rootfs chain in order (top-level `Dependencies=app`); the
@@ -26,7 +26,7 @@ RK3588 A/B selector, and emits the signed RAUC bundle.
 
 ## Layer 1 — BASE (`mkosi.images/base/`)
 
-**What:** the irreducible minimal Debian bookworm rootfs tree.
+**What:** the irreducible minimal Debian trixie rootfs tree.
 
 | Contents | |
 |---|---|
@@ -83,7 +83,7 @@ runtime package is installed in the App layer, never in the BSP.
 | Debug-image-only package delta | `manifests/packages/development.delta.list` — resolved ONLY when `CERALIVE_DEBUG_IMAGE=1` |
 | **CeraLive SRT transport library** `libsrt1.5-ceralive` | first-party staging, installed in App |
 | RAUC A/B client `rauc` + `u-boot-tools` | shared.list (decisions.md Task 5) |
-| `rauc-hawkbit-updater` | **commented PLACEHOLDER** in shared.list (Stage 4 OTA; backport `.deb`, not in bookworm) |
+| `rauc-hawkbit-updater` | **commented PLACEHOLDER** in shared.list (Stage 4 OTA; backport `.deb` rebuilt for trixie, which has no package) |
 | System config (`mkosi.postinst.chroot`) | ceralive user+groups, deb822 apt sources, mTLS+GPG `apt.ceralive.tv` repo, udev hardware-access rules, streaming sysctl, NetworkManager, **SRTLA source-policy routing**, services, Avahi-arbitrated deterministic hostname |
 
 **Package source of truth = `shared.list`.** There is no inline hardcoded package
