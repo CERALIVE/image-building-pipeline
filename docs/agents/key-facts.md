@@ -3875,6 +3875,11 @@ same glob list.
 `partial/` subdir), so downloaded `.deb`s persist across reboots and future
 software updates instead of the rootfs slot's own (small, RAUC-swapped)
 `/var/cache/apt/archives`.
+The runtime layer downloads `shared.list` BEFORE it writes that file, so those
+packages land in the slot's `/var/cache/apt/archives`, and the app layer inherits the
+redirect: a bare `apt-get clean` there cleans the `/data` path and exits 0. The app
+layer's `clean_apt_archives` therefore names `/var/cache/apt/archives` explicitly and
+fails the build if a `.deb` remains (`tests/app-apt-archives-clean.test.sh`).
 
 **Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
 RESOLVED package membership, never a blind architecture check.**

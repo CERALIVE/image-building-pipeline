@@ -179,9 +179,28 @@ assert_sysext_binaries() {
   log "sysext-class binaries verified present (cerastream / srtla_send where staged)"
 }
 
+# The directory the rootfs slot actually ships its downloaded .debs in. The runtime
+# layer installs shared.list into apt's DEFAULT archive directory, and only AFTER
+# that writes /etc/apt/apt.conf.d/81ceralive-cache, which sends the DEVICE's apt to
+# /data/ceralive/apt-archives/. This layer inherits that file, so a bare
+# `apt-get clean` here follows the redirect, cleans a /data directory that does not
+# exist in the build tree, exits 0 and leaves every package in the slot.
+SHIPPED_APT_ARCHIVES="${SHIPPED_APT_ARCHIVES:-/var/cache/apt/archives}"
+
+# clean_apt_archives — empty the shipped archive directory regardless of the
+# Dir::Cache::archives the image configures for the device, then fail the build if
+# any package is still there.
+clean_apt_archives() {
+  local dir="${SHIPPED_APT_ARCHIVES%/}"
+  apt-get -o "Dir::Cache::archives=${dir}/" clean
+  if compgen -G "${dir}/*.deb" >/dev/null; then
+    die "downloaded packages remain in ${dir} after apt-get clean — they would ship in the image"
+  fi
+}
+
 clean_package_download_metadata() {
   log "removing build-time apt package indexes and downloaded archives"
-  apt-get clean
+  clean_apt_archives
   rm -rf /var/lib/apt/lists/* /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
   mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial
 }
