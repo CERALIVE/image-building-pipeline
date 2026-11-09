@@ -3513,6 +3513,11 @@ The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `common.sh::resolve_source_date_epoch`). Factory assembly and the OS-bundle
 producer share `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
 deterministic UUID/hash seed, `mkfs.ext4 -d`, and the 512 MiB/inode reserve check.
+Every slot image is formatted with ONE label-independent checksum and hash seed
+(`slot_image_seed_uuid`, `metadata_csum_seed`) and gets its label-derived UUID from
+`tune2fs -U` afterwards, so factory slots and the OTA image of one tree differ only
+in superblock blocks (`tests/slot-image-identity.test.sh`); that is what lets RAUC
+adaptive `block-hash-index` updates reuse the slot's inode tables and directories.
 Factory slots start with their own labels; the bundle's neutral-labelled image is
 relabelled after install from the written partition's own GPT PARTLABEL. The signed
 verity `.raucb` container is **not bit-reproducible**: native RAUC signing produces
