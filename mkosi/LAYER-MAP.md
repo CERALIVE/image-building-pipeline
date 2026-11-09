@@ -209,7 +209,8 @@ The default `mkosi build` stops at the `app` rootfs tree (the parity gate runs o
 
 `systemd-repart` lays down geometry and empty filesystems. The surrounding assembler
 populates A and B from the app tree, writes the boot artifacts, and pairs the image
-with a signed plain-format `*.raucb`. FS is **ext4** per the frozen contract.
+with a signed `*.raucb`: `format=verity`, `rootfs.ext4` and `adaptive=block-hash-index`
+(`lib/build-bundle.sh`). FS is **ext4** per the frozen contract.
 
 ---
 
@@ -234,7 +235,6 @@ family manifest differs.
 | Chroot **customization modules** (board capture/quirk udev rules, per-board hooks driven by manifest `quirks:`) | **task 20** |
 | First-party app install (cerastream / srtla / CeraUI `.deb`s) | **Stage 3 (tasks 22-23)** |
 | `rauc-hawkbit-updater` active install (backport `.deb` + apt.ceralive.tv serving) | **Stage 4 OTA** |
-| dm-verity bundle format | future hardening; current signed bundles use `format=plain` |
 
 `Format=disk` partition **layout** is DONE (task 25 — Layer 5 above): the frozen
 D4 geometry (16 MB gap + boot + rootfs_a/b + data), factory population, slot
