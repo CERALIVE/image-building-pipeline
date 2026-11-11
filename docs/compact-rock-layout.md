@@ -7,6 +7,10 @@ Labels, partition types, boot selection and independent A/B rollback are unchang
 The committed v2 repart definitions remain intact; the assembler stages the
 ROCK size overrides. The shared layout helper sizes both factory and signed
 verity/adaptive RAUC rootfs images at 2560 MiB so updates fit either slot.
+The bundle inspector derives the exact required full-slot size from the
+authenticated compatible using the same helper, independently of ambient build
+board settings. Verity, adaptive-index, root-image filename and exact-size checks
+remain strict for both compact ROCK and existing 4096 MiB board profiles.
 
 Sizing basis: measured original used bytes 2,580,779,008 minus 193,695,744
 package archives minus 586,989,568 excluded firmware = 1,800,093,696 bytes
