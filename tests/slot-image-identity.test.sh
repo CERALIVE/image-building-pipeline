@@ -172,6 +172,12 @@ SLOT_TEST_REAL_MKFS="$(command -v mkfs.ext4)"
 SLOT_TEST_REAL_TUNE="$(command -v tune2fs)"
 export SLOT_TEST_REAL_MKFS SLOT_TEST_REAL_TUNE
 export SLOT_TEST_CONTAINER_CALLS="${work}/container-calls.jsonl"
+SLOT_TEST_REAL_BASH="$(command -v bash)"
+SLOT_TEST_REAL_LN="$(command -v ln)"
+export SLOT_TEST_REAL_BASH SLOT_TEST_REAL_LN
+export SLOT_TEST_FORMATTER="${shim}/formatter"
+export SLOT_TEST_APT="${shim}/apt-get"
+export SLOT_TEST_APT_CALLS="${work}/apt-calls.txt"
 cat >"${shim}/tar" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -199,11 +205,21 @@ done
 [[ -d "$tree" && -d "$out" && "$1" == bash ]]
 env -u FS_SEED -u FS_UUID -u FS_LABEL "${envs[@]}" \
   SLOT_TEST_TREE="$tree" SLOT_TEST_OUT="$out" python3 - "$@" <<'PY'
-import json, os, sys
+import json, os, sys, tempfile
 keys = ('FS_SEED', 'FS_UUID', 'FS_LABEL', 'E2FSPROGS_FAKE_TIME')
 with open(os.environ['SLOT_TEST_CONTAINER_CALLS'], 'a') as stream:
     stream.write(json.dumps({k: os.environ[k] for k in keys}) + '\n')
-os.execvp(sys.argv[1], sys.argv[1:])
+# Give the inline payload a real, isolated command search path, so a missing
+# formatter cannot accidentally resolve to the host's e2fsprogs installation.
+commands = tempfile.mkdtemp(prefix='container-tools.', dir=os.environ['SLOT_TEST_OUT'])
+tools = dict(bash=os.environ['SLOT_TEST_REAL_BASH'], **{'apt-get': os.environ['SLOT_TEST_APT']})
+tools.update({name: os.environ['SLOT_TEST_FORMATTER'] for name in ('mkfs.ext4', 'tune2fs')
+              if name != os.environ.get('SLOT_TEST_MISSING_TOOL')})
+for name, source in tools.items():
+    os.symlink(source, os.path.join(commands, name))
+os.environ['PATH'] = commands
+os.environ['SLOT_TEST_COMMAND_BIN'] = commands
+os.execv(os.path.join(commands, sys.argv[1]), sys.argv[1:])
 PY
 SH
 cat >"${shim}/formatter" <<'SH'
@@ -224,7 +240,22 @@ for arg in "$@"; do
 done
 exec "$tool" "${args[@]}"
 SH
-chmod +x "${shim}/tar" "${shim}/docker" "${shim}/formatter"
+cat >"${shim}/apt-get" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$SLOT_TEST_APT_CALLS"
+case "$1" in
+  update) [[ "$*" == 'update -qq' ]] ;;
+  install)
+    [[ "$*" == 'install -y --no-install-recommends -o Dpkg::Options::=--force-unsafe-io e2fsprogs' ]]
+    for tool in mkfs.ext4 tune2fs; do
+      [[ -e "$SLOT_TEST_COMMAND_BIN/$tool" ]] \
+        || "$SLOT_TEST_REAL_LN" -s "$SLOT_TEST_FORMATTER" "$SLOT_TEST_COMMAND_BIN/$tool"
+    done ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "${shim}/tar" "${shim}/docker" "${shim}/formatter" "${shim}/apt-get"
 ln -s formatter "${shim}/mkfs.ext4"
 ln -s formatter "${shim}/tune2fs"
 
@@ -243,14 +274,35 @@ for label in rootfs_a rootfs_b rootfs; do
   case "$label" in rootfs_a) native="$img_a" ;; rootfs_b) native="$img_b" ;; rootfs) native="$img_ota" ;; esac
   assert_eq "container ${label} matches native bytes" "$(sha256sum <"${native}")" "$(sha256sum <"${container_img}")"
 done
+[[ ! -e "$SLOT_TEST_APT_CALLS" ]] \
+  && ok 'container with both formatters does not install packages' || bad 'complete container unnecessarily installs packages'
+
+for missing in tune2fs mkfs.ext4; do
+  container_img="${work}/missing-${missing}.ext4"
+  export SLOT_TEST_APT_CALLS="${work}/apt-missing-${missing}.txt"
+  if ! PATH="${shim}:${PATH}" MKOSI_BUILDER_IMAGE=identity-container-contract \
+      SLOT_TEST_MISSING_TOOL="${missing}" SLOT_IMAGE_LABEL=rootfs \
+      make_slot_image "${tree}" "${container_img}" >/dev/null 2>&1; then
+    bad "container missing ${missing} failed to provision e2fsprogs"
+    exit 1
+  fi
+  [[ "$(wc -l <"$SLOT_TEST_APT_CALLS")" -eq 2 ]] \
+    && ok "container missing ${missing} updates and installs e2fsprogs" || bad "missing ${missing} dependency provisioning differs"
+  assert_eq "container missing ${missing} final UUID" "$(det_uuid identity-test-rootfs)" "$(field 'Filesystem UUID' "${container_img}")"
+  assert_eq "container missing ${missing} checksum seed" "$(field 'Checksum seed' "${img_a}")" "$(field 'Checksum seed' "${container_img}")"
+  e2fsck -fn "${container_img}" >/dev/null 2>&1 \
+    && ok "container missing ${missing} passes e2fsck -fn" || bad "container missing ${missing} fails e2fsck -fn"
+  assert_eq "container missing ${missing} matches native bytes" "$(sha256sum <"${img_ota}")" "$(sha256sum <"${container_img}")"
+done
 if python3 - "$SLOT_TEST_CONTAINER_CALLS" "$(slot_image_seed_uuid)" "$SOURCE_DATE_EPOCH" \
-    "$(det_uuid identity-test-rootfs_a)" "$(det_uuid identity-test-rootfs_b)" "$(det_uuid identity-test-rootfs)" <<'PY'
+    "$(det_uuid identity-test-rootfs_a)" "$(det_uuid identity-test-rootfs_b)" "$(det_uuid identity-test-rootfs)" \
+    "$(det_uuid identity-test-rootfs)" "$(det_uuid identity-test-rootfs)" <<'PY'
 import json, sys
 path, seed, epoch, *uuids = sys.argv[1:]
 with open(path) as stream:
     calls = [json.loads(line) for line in stream]
-assert len(calls) == 3, calls
-for call, label, uuid in zip(calls, ('rootfs_a', 'rootfs_b', 'rootfs'), uuids):
+assert len(calls) == 5, calls
+for call, label, uuid in zip(calls, ('rootfs_a', 'rootfs_b', 'rootfs', 'rootfs', 'rootfs'), uuids):
     assert call == dict(FS_SEED=seed, FS_UUID=uuid, FS_LABEL=label, E2FSPROGS_FAKE_TIME=epoch), call
 PY
 then ok 'container receives the shared seed, final UUID, label and fixed clock for all three images'

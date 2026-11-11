@@ -92,7 +92,7 @@ make_slot_image() {
       -v "${tree}:/rootfs-tree:ro" -v "${img_dir}:/out" "${image}" \
       bash -euo pipefail -c '
         export DEBIAN_FRONTEND=noninteractive
-        if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+        if ! command -v mkfs.ext4 >/dev/null 2>&1 || ! command -v tune2fs >/dev/null 2>&1; then
           apt-get update -qq
           apt-get install -y --no-install-recommends \
             -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
