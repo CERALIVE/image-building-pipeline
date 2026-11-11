@@ -38,3 +38,24 @@ source mkosi/runtime/ceralive-slot-mirror-lib.sh
 # CSV and installed policy select the same globs for this board.
 [[ "$(prune_paths_csv)" == "$(prune_paths_read "$work/policy" | paste -sd,)" ]]
 echo 'firmware exclusion and retained-family controls pass'
+
+# Both consumers must refuse missing common/board policy, even in conditional
+# callers where errexit cannot propagate a failed read for us.
+mkdir -p "$work/reader/lib/shared" "$work/reader/manifests/boards"
+cp lib/shared/prune-paths-lib.sh "$work/reader/lib/shared/"
+(
+  unset CERALIVE_PRUNE_PATHS_MANIFEST
+  source "$work/reader/lib/shared/prune-paths-lib.sh"
+  for state in common board; do
+    if [[ "$state" == board ]]; then
+      printf '/example/*\n' >"$work/reader/manifests/prune-paths.list"
+    fi
+    for consumer in prune_paths_csv prune_paths_content; do
+      if "$consumer" >"$work/output" 2>"$work/error"; then
+        echo "unexpected policy success: $state $consumer" >&2; exit 1
+      fi
+      test -s "$work/error"
+    done
+  done
+  if CERALIVE_PRUNE_PATHS_MANIFEST="$work/missing" prune_paths_csv; then exit 1; fi
+)

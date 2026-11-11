@@ -32,7 +32,7 @@ prune_paths_manifest_file() {
 prune_paths_content() {
   local file="${1:-$(prune_paths_manifest_file)}" board_file
   [[ -f "${file}" ]] || { printf 'prune-paths-lib: manifest not found: %s\n' "${file}" >&2; return 1; }
-  cat "${file}"
+  cat "${file}" || return 1
   if [[ $# -eq 0 && -z "${CERALIVE_PRUNE_PATHS_MANIFEST:-}" && "${BOARD_ID:-}" == rock-5b-plus ]]; then
     board_file="$(dirname "${file}")/boards/rock-5b-plus.prune-paths.list"
     printf '\n'
@@ -59,7 +59,10 @@ prune_paths_read() {
 # shape). Empty input yields an empty string, never a trailing/leading comma.
 prune_paths_csv() {
   local -a globs=()
-  mapfile -t globs < <(prune_paths_read "$@")
+  local content
+  content="$(prune_paths_read "$@")" || return $?
+  [[ -n "${content}" ]] || { printf '\n'; return 0; }
+  mapfile -t globs <<<"${content}"
   (( ${#globs[@]} > 0 )) || { printf '\n'; return 0; }
   local IFS=,
   printf '%s\n' "${globs[*]}"
