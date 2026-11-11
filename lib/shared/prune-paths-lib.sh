@@ -26,28 +26,40 @@ prune_paths_manifest_file() {
   printf '%s\n' "$(CDPATH='' cd -- "${here}/../.." && pwd)/manifests/prune-paths.list"
 }
 
+# prune_paths_content [file] — one effective policy for RemoveFiles and device hooks.
+# Explicit test/operator manifests replace the policy; otherwise append only the
+# selected board's exclusions to the common list.
+prune_paths_content() {
+  local file="${1:-$(prune_paths_manifest_file)}" board_file
+  [[ -f "${file}" ]] || { printf 'prune-paths-lib: manifest not found: %s\n' "${file}" >&2; return 1; }
+  cat "${file}"
+  if [[ $# -eq 0 && -z "${CERALIVE_PRUNE_PATHS_MANIFEST:-}" && "${BOARD_ID:-}" == rock-5b-plus ]]; then
+    board_file="$(dirname "${file}")/boards/rock-5b-plus.prune-paths.list"
+    printf '\n'
+    cat "${board_file}" || return 1
+  fi
+}
+
 # prune_paths_read [file] — emit one glob per line, comments/blanks stripped.
 # Trailing/leading whitespace on a glob line is trimmed so a stray space
 # cannot silently produce a glob that matches nothing.
 prune_paths_read() {
-  local file="${1:-$(prune_paths_manifest_file)}"
-  [[ -f "${file}" ]] || { printf 'prune-paths-lib: manifest not found: %s\n' "${file}" >&2; return 1; }
-  local line
+  local content line
+  content="$(prune_paths_content "$@")" || return 1
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
     line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
     [[ -n "${line}" ]] || continue
     case "${line}" in \#*) continue ;; esac
     printf '%s\n' "${line}"
-  done <"${file}"
+  done <<<"${content}"
 }
 
 # prune_paths_csv [file] — the same globs, comma-joined (mkosi RemoveFiles=
 # shape). Empty input yields an empty string, never a trailing/leading comma.
 prune_paths_csv() {
-  local file="${1:-$(prune_paths_manifest_file)}"
   local -a globs=()
-  mapfile -t globs < <(prune_paths_read "${file}")
+  mapfile -t globs < <(prune_paths_read "$@")
   (( ${#globs[@]} > 0 )) || { printf '\n'; return 0; }
   local IFS=,
   printf '%s\n' "${globs[*]}"

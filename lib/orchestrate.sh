@@ -415,7 +415,7 @@ run_mkosi_build() {
   # a standalone `mkosi build` that bypasses this orchestrator: both writers
   # degrade gracefully — see setup_ceralive_repository()/install_apt_preferences().
   export CERALIVE_PRUNE_PATHS_B64
-  CERALIVE_PRUNE_PATHS_B64="$(base64 -w0 <"${PIPELINE_DIR}/manifests/prune-paths.list")"
+  CERALIVE_PRUNE_PATHS_B64="$(prune_paths_content | base64 -w0)"
   export CERALIVE_FIRST_PARTY_NAMES_B64
   CERALIVE_FIRST_PARTY_NAMES_B64="$(base64 -w0 <"${PIPELINE_DIR}/manifests/first-party-apt-names.txt")"
   # Stage 4 disk-assembly flag (manifest single_slot_fallback) consumed by
