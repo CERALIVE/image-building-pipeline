@@ -4,6 +4,8 @@ cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/bin"
+export CONTROL_CALLS="$work/control-calls"
+: >"$CONTROL_CALLS"
 cat >"$work/bin/findmnt" <<'SH'
 #!/bin/bash
 case "$*" in
@@ -29,6 +31,7 @@ esac
 SH
 cat >"$work/bin/systemctl" <<'SH'
 #!/bin/bash
+printf '%s\n' "$*" >>"$CONTROL_CALLS"
 case "$*" in
   *ceralive-grow-data.service) [[ ${GROW_STATE:-success} == success ]] ;;
   *systemd-growfs@data.service) [[ ${FS_STATE:-success} == success ]] ;;
@@ -40,6 +43,11 @@ cat >"$work/bin/stat" <<'SH'
 if [[ ${SMALL_FS:-0} == 1 ]]; then echo '65536 4096 60000'
 elif [[ ${LOW_FREE:-0} == 1 ]]; then echo '440000 4096 60000'
 else echo '440000 4096 300000'; fi
+SH
+cat >"$work/bin/dumpe2fs" <<'SH'
+#!/bin/bash
+if [[ ${SMALL_FS:-0} == 1 ]]; then echo 'Block count: 65536'; else echo 'Block count: 448000'; fi
+echo 'Block size: 4096'
 SH
 chmod +x "$work/bin/"*
 export PATH="$work/bin:$PATH"
@@ -97,4 +105,5 @@ done
 [[ "$selected" == AAABBBAA ]]
 grep -qx 'BOOT_A_LEFT=0' "$CERALIVE_BOOT_STATE_FILE"
 grep -qx 'BOOT_B_LEFT=0' "$CERALIVE_BOOT_STATE_FILE"
+! grep -Eq '^(reboot|restart|reset)( |$)' "$CONTROL_CALLS"
 echo 'capacity boundary, terminal refusal and finite boot-attempt regression pass'

@@ -34,9 +34,18 @@ case "$(lsblk -dnro PARTLABEL "$data")" in data|xdata) ;; *) refuse 'wrong data 
 [[ ",$(findmnt -nro OPTIONS /data)," == *,rw,* ]] || refuse '/data is not writable'
 partition_bytes=$(lsblk -bdnro SIZE "$data")
 read -r blocks block_size available < <(stat -f -c '%b %S %a' /data)
-[[ "$partition_bytes" =~ ^[0-9]+$ && "$blocks" =~ ^[0-9]+$ && "$block_size" =~ ^[0-9]+$ && "$available" =~ ^[0-9]+$ ]] || refuse 'invalid capacity inventory'
-# ext4 metadata accounts for a small difference; an old 256 MiB filesystem
-# inside a grown partition must never satisfy readiness.
-(( blocks * block_size >= partition_bytes * 95 / 100 )) || refuse 'filesystem has not filled the grown partition'
+[[ "$partition_bytes" =~ ^[1-9][0-9]{0,14}$ && "$blocks" =~ ^[0-9]{1,15}$ && "$block_size" =~ ^[1-9][0-9]{0,5}$ && "$available" =~ ^[0-9]{1,15}$ ]] || refuse 'invalid capacity inventory'
+# statfs excludes ext4 overhead from total blocks. Compare the superblock's
+# physical filesystem extent, not statfs payload capacity, to the partition.
+metadata=$(LC_ALL=C dumpe2fs -h "$data" 2>/dev/null) || refuse 'cannot read data filesystem geometry'
+read -r filesystem_blocks filesystem_block_size < <(awk -F: '
+  $1=="Block count" {blocks=$2; n++}
+  $1=="Block size" {size=$2; m++}
+  END {if(n==1 && m==1) print blocks,size}
+' <<<"$metadata") || refuse 'invalid data filesystem geometry'
+[[ "$filesystem_blocks" =~ ^[1-9][0-9]{0,14}$ && "$filesystem_block_size" =~ ^[1-9][0-9]{0,5}$ ]] || refuse 'invalid data filesystem geometry'
+case "$filesystem_block_size" in 1024|2048|4096|8192|16384|32768|65536) ;; *) refuse 'unsupported filesystem block size' ;; esac
+(( block_size == filesystem_block_size && filesystem_blocks <= partition_bytes / filesystem_block_size && available <= blocks && blocks <= filesystem_blocks )) || refuse 'inconsistent data filesystem geometry'
+(( filesystem_blocks * filesystem_block_size >= partition_bytes - 1048576 )) || refuse 'filesystem has not filled the grown partition'
 (( available * block_size >= CERALIVE_DATA_MIN_AVAILABLE_BYTES )) || capacity_refuse 'less than 1 GiB available for update staging'
 echo 'data readiness: partition/filesystem growth complete; update staging available'

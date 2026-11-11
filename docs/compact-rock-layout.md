@@ -68,7 +68,8 @@ Partition growth orders before `data.mount`; the fstab grows ext4 on mount.
 The readiness service waits for the mount and `systemd-growfs@data.service`.
 For compact 2560 MiB roots, health confirmation and application/RAUC update
 consumers require successful partition and filesystem growth, writable ext4 data
-on the boot disk, a filesystem filling at least 95% of the partition, and at least
+on the boot disk, a filesystem extent filling the partition within 1 MiB (from ext4 superblock
+geometry, not payload blocks excluding metadata), and at least
 1 GiB available for staging. Preflash refuses targets below the shared 7 GiB
 physical minimum even when the raw image fits; runtime readiness checks the same
 boot-disk minimum. At 7 GiB, the unchanged gap/boot/two roots and a conservative

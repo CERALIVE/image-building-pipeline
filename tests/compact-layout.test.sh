@@ -72,6 +72,9 @@ truncate -s "$minimum_data_bytes" "$work/data.ext4"
 resize2fs "$work/data.ext4" >/dev/null 2>&1
 source lib/shared/slot-reserve.sh
 reserve=$(slot_reserve_assert_ext4 "$work/data.ext4" data)
+metadata=$(dumpe2fs -h "$work/data.ext4" 2>/dev/null)
+read -r fs_blocks fs_block_size < <(awk -F: '$1=="Block count" {b=$2} $1=="Block size" {s=$2} END {print b,s}' <<<"$metadata")
+(( fs_blocks * fs_block_size >= minimum_data_bytes - 1048576 ))
 available=$(sed -n 's/.*field=bavail free=\([0-9]*\).*/\1/p' <<<"$reserve")
 (( available - 256 * 1024 * 1024 >= CERALIVE_DATA_MIN_AVAILABLE_BYTES ))
 printf 'minimum media data partition floor=%s; grown ext4 available=%s; factory payload budget=268435456\n' "$minimum_data_bytes" "$available"
