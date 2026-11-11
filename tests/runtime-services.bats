@@ -2959,6 +2959,40 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ "$status" -ne 0 ]
 }
 
+@test "pipewire: the HDMI-RX capture node follows the monotonic driver and never drives the graph" {
+  # The receiver's recovered audio clock is the source's, not the system's. As graph
+  # driver it clocks every reader at that foreign rate, which the stream engine's
+  # fixed-rate audio hand-over turns into A/V drift and dropped audio. As a follower
+  # of the stock monotonic Dummy-Driver the card is rate-matched by PipeWire instead.
+  local wp="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  local body="$BATS_TEST_TMPDIR/wp-follower-body"
+  grep -vE '^[[:space:]]*#' "$wp" >"$body"
+
+  # The rule lives in the ALSA monitor's rule list, between it and the BlueZ list.
+  local rule="$BATS_TEST_TMPDIR/wp-follower-rule"
+  awk '/^monitor\.alsa\.rules/{f=1} /^monitor\.bluez\.rules/{f=0} f' "$body" >"$rule"
+  grep -Fq 'node.name = "~alsa_input.platform-hdmi-receiver-sound.*"' "$rule"
+
+  # Both halves are required: the group joins the monotonic driver's graph, and the
+  # zero priority guarantees the card can never win driver election inside it.
+  run grep -cE '^[[:space:]]*node\.group[[:space:]]*=[[:space:]]*"pipewire\.dummy"$' "$rule"
+  [ "$output" -eq 1 ]
+  run grep -cE '^[[:space:]]*priority\.driver[[:space:]]*=[[:space:]]*0$' "$rule"
+  [ "$output" -eq 1 ]
+
+  # Scoped to the receiver card. A blanket follower rule would also resample
+  # microphones and USB cards that have no clock problem.
+  run grep -cE 'node\.group|priority\.driver' "$body"
+  [ "$output" -eq 2 ]
+  local scoped
+  scoped="$(awk '/node\.name = "~alsa_input\.platform-hdmi-receiver-sound\.\*"/{f=1} f&&/node\.group/{print "ok"; exit} f&&/^  \}/{exit}' "$rule")"
+  [ "$scoped" = "ok" ]
+
+  # Never by disabling the resampler or forcing a rate: rate matching IS the fix.
+  run grep -E 'resample\.disable|node\.force-rate|node\.lock-rate' "$body"
+  [ "$status" -ne 0 ]
+}
+
 @test "pipewire: the HDMI-RX profile rule selects the real input profile and NEVER pro-audio" {
   # An ACP profile set is built ONCE at device creation. A live OPi 5+ enumerated
   # `off`+`pro-audio` ONLY when the card was probed with no HDMI audio present, and
