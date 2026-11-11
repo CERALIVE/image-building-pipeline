@@ -45,7 +45,7 @@ idempotence and fail-closed malformed tables. It never builds/pulls a Docker ima
 After partition growth, the existing /data fstab x-systemd.growfs option grows
 ext4 on mount. The 256 MiB factory data is a transport minimum: OTA staging/log
 capacity comes from the expanded card, and growth failure must be resolved
-before updating. Physical first-boot and A/B qualification remain separate.
+before updating. Finite physical qualification is described below.
 
 Compatibility: installed devices retain their current partition geometry; this
 is not an in-place root repartitioning migration. They can receive the smaller
@@ -53,5 +53,36 @@ RAUC root image in their larger slots; only a fresh flash adopts smaller roots.
 The runtime rule can extend existing data into unused card space, but never
 shrinks or moves boot/root partitions. Old 4096 MiB full-slot bundles cannot fit
 the new 2560 MiB slots: use compact bundles for updates and rollback on fresh
-installs. Runtime growth, physical boot and RAUC update/reboot/rollback still
-require board validation before release.
+installs. Finite ROCK 5B+ qualification of the combined candidate passed automatic first
+and repeat growth, signed compact A/B install, health confirmation, operator
+rollback and persistent-data checks. This does not qualify interruption recovery,
+legacy-layout OTA filesystem expansion, other boards or sustained operation.
+
+
+## Data readiness and failure policy
+
+Partition growth orders before `data.mount`; the fstab grows ext4 on mount.
+The readiness service waits for the mount and `systemd-growfs@data.service`.
+For compact 2560 MiB roots, health confirmation and application/RAUC update
+consumers require successful partition and filesystem growth, writable ext4 data
+on the boot disk, a filesystem filling at least 95% of the partition, and at least
+1 GiB available for staging. This accommodates the measured 837,814,917-byte
+signed bundle; future larger updates need their own space checks. Legacy root
+partition sizes bypass this new gate rather than failing solely on repart.
+
+Failure or pending growth refuses mark-good and update owners, with an actionable
+journal error. SSH/rescue boot stays available. Inspect the growth and growfs
+journals, repair the cause, then reboot to retry the whole ordered sequence.
+A successful partition operation alone cannot certify filesystem growth.
+
+## Payload prerequisites and remaining qualification
+
+The measured build combines the ROCK firmware-policy reduction (586,989,568 bytes)
+and the package archive cleanup in [#241](https://github.com/CERALIVE/image-building-pipeline/pull/241)
+(193,695,744 bytes). A layout-only adoption is not the measured payload stack.
+Actual availability was 616,079,360 bytes (587.54 MiB), only 79,208,448 bytes
+(75.54 MiB) above the unchanged 512 MiB reserve floor. Gross headroom is not
+available update reserve. Rebuild the exact proposed stack and budget dependency
+growth; retain byte/inode gates. Interrupted GPT/ext4 expansion, power-cut recovery,
+legacy-layout OTA filesystem growth/mirroring and the new refusal/recovery path
+on physical hardware remain separate qualification steps.

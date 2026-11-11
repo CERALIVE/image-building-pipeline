@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared offline 4096 MiB ext4 slot writer. Sourced by factory assembly and OTA.
+# Shared offline profile-selected ext4 slot writer. Sourced by factory assembly and OTA.
 # SLOT_IMAGE_LABEL selects the initial filesystem label; the OTA image uses a
 # neutral label which the device post-install handler replaces from GPT.
 # shellcheck disable=SC2016 # Single-quoted script expands inside the container.
