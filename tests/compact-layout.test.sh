@@ -16,6 +16,18 @@ check_gpt_geometry "$work/disk" rock-5b-plus
 check_gpt_geometry "$work/disk" orange-pi-5-plus
 [[ "$FAILS" -eq 1 ]] # wrong board must reject the compact geometry
 FAILS=0
+# Transport minimum is not the supported physical media minimum.
+for target in 5923405824 7516192767; do
+  FAILS=0
+  check_target_capacity "$work/disk" "$target" rock-5b-plus
+  [[ "$FAILS" == 1 ]]
+done
+FAILS=0
+check_target_capacity "$work/disk" 7516192768 rock-5b-plus
+[[ "$FAILS" == 0 ]]
+# Other boards keep their image-fit rule.
+check_target_capacity "$work/disk" 5923405824 orange-pi-5-plus
+[[ "$FAILS" == 0 ]]
 # Mutating a root slot size still fails the compact gate.
 cp --sparse=always "$work/disk" "$work/bad"
 sgdisk -d 3 -n 3:5799936:+2559M -c 3:rootfs_b "$work/bad" >/dev/null
@@ -47,6 +59,22 @@ for n in 1 2 3 4; do
 done
 grow_data_definitions "$work/defs" data <"$work/table"
 start=$(part_field "$work/disk" 4 'First sector')
+# Grow the actual GPT at the physical minimum before retaining the 8 GiB case.
+truncate -s "$CERALIVE_COMPACT_MIN_MEDIA_BYTES" "$work/disk"
+systemd-repart --offline=yes --definitions="$work/defs" --empty=refuse --dry-run=no --discard=no "$work/disk"
+minimum_data_bytes=$(( (7168 - 16 - 256 - 2 * 2560 - 1) * 1024 * 1024 ))
+[[ "$(part_field "$work/disk" 4 'Partition size')" -ge "$((minimum_data_bytes / 512))" ]]
+# Real ext4 metadata/reservations after growing a factory-size filesystem at
+# that conservative floor must leave 1 GiB even after budgeting 256 MiB payload.
+truncate -s 256M "$work/data.ext4"
+mkfs.ext4 -q -F "$work/data.ext4"
+truncate -s "$minimum_data_bytes" "$work/data.ext4"
+resize2fs "$work/data.ext4" >/dev/null 2>&1
+source lib/shared/slot-reserve.sh
+reserve=$(slot_reserve_assert_ext4 "$work/data.ext4" data)
+available=$(sed -n 's/.*field=bavail free=\([0-9]*\).*/\1/p' <<<"$reserve")
+(( available - 256 * 1024 * 1024 >= CERALIVE_DATA_MIN_AVAILABLE_BYTES ))
+printf 'minimum media data partition floor=%s; grown ext4 available=%s; factory payload budget=268435456\n' "$minimum_data_bytes" "$available"
 truncate -s 8192M "$work/disk"
 systemd-repart --offline=yes --definitions="$work/defs" --empty=refuse --dry-run=no "$work/disk"
 for n in 1 2 3; do sgdisk -i "$n" "$work/disk" >"$work/after$n"; cmp "$work/before$n" "$work/after$n"; done

@@ -384,3 +384,16 @@ PY
   grep -q 'mark-good B' "$TEST_CALLS"
   [ -e "$CERALIVE_HEALTHY_STATE_FILE" ]
 }
+
+
+@test "terminal capacity refusal cannot confirm health or refresh boot attempts" {
+  export CERALIVE_DATA_READY_BIN="$BATS_TEST_TMPDIR/data-ready"
+  printf '#!/bin/sh\nexit 78\n' > "$CERALIVE_DATA_READY_BIN"
+  chmod +x "$CERALIVE_DATA_READY_BIN"
+  cp "$CERALIVE_BOOT_STATE_FILE" "$BATS_TEST_TMPDIR/old-boot-state"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  ! grep -q mark-good "$TEST_CALLS"
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+  cmp "$CERALIVE_BOOT_STATE_FILE" "$BATS_TEST_TMPDIR/old-boot-state"
+}

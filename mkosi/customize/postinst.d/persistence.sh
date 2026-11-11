@@ -96,6 +96,7 @@ RemainAfterExit=yes
 UNIT
     ln -sfn ../ceralive-grow-data.service /etc/systemd/system/local-fs-pre.target.wants/ceralive-grow-data.service
 
+    install -D -m 0644 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-capacity-lib.sh" /usr/libexec/ceralive/ceralive-data-capacity-lib.sh
     install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-ready.sh" /usr/libexec/ceralive/ceralive-data-ready
     cat >/etc/systemd/system/ceralive-data-ready.service <<'UNIT'
 [Unit]
@@ -107,6 +108,8 @@ After=ceralive-grow-data.service data.mount systemd-growfs@data.service
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/ceralive/ceralive-data-ready
+TimeoutStartSec=30s
+Restart=no
 RemainAfterExit=yes
 UNIT
     # Gate update owners without adding a hard SSH/rescue dependency.

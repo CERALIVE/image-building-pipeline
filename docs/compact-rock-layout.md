@@ -2,7 +2,10 @@
 
 Fresh ROCK 5B+ images use the existing 16 MiB loader gap, 256 MiB boot,
 two 2560 MiB ext4 root slots and a 256 MiB initial data partition, plus 1 MiB
-for GPT alignment/tail: 5649 MiB raw. Other boards keep the v2 geometry.
+for GPT alignment/tail: 5649 MiB raw. This is a transport size, not a supported
+physical media size. Compact installations require at least 7 GiB
+(7,516,192,768 bytes) of measured media capacity; a marketed card label is not
+proof of capacity. Other boards keep the v2 geometry.
 Labels, partition types, boot selection and independent A/B rollback are unchanged.
 The committed v2 repart definitions remain intact; the assembler stages the
 ROCK size overrides. The shared layout helper sizes both factory and signed
@@ -66,12 +69,26 @@ The readiness service waits for the mount and `systemd-growfs@data.service`.
 For compact 2560 MiB roots, health confirmation and application/RAUC update
 consumers require successful partition and filesystem growth, writable ext4 data
 on the boot disk, a filesystem filling at least 95% of the partition, and at least
-1 GiB available for staging. This accommodates the measured 837,814,917-byte
-signed bundle; future larger updates need their own space checks. Legacy root
+1 GiB available for staging. Preflash refuses targets below the shared 7 GiB
+physical minimum even when the raw image fits; runtime readiness checks the same
+boot-disk minimum. At 7 GiB, the unchanged gap/boot/two roots and a conservative
+1 MiB GPT/alignment allowance leave at least 1775 MiB for the grown data
+partition. The 256 MiB factory filesystem must grow to use it. This partition
+floor is not an available-byte promise for pre-existing user data: the live
+1 GiB availability check still applies. This accommodates the measured
+837,814,917-byte signed bundle; future larger updates need their own space checks. Legacy root
 partition sizes bypass this new gate rather than failing solely on repart.
 
 Failure or pending growth refuses mark-good and update owners, with an actionable
-journal error. The readiness gate adds no hard dependency from SSH or rescue,
+journal error. Capacity refusal exits 78 with a local-rescue action: use larger
+media or free data, then retry. The readiness service is a oneshot with no restart
+and a 30-second execution timeout; it never schedules a reboot or marks good.
+Undersized or full media stays unconfirmed until an operator repairs it.
+On operator-initiated reboots the existing selector spends the finite A/B attempt
+budgets (normally three each), then last-resort boots the head slot without
+refreshing the counters. This is not an automatic readiness-driven reboot or
+endless A/B alternation; last-resort boot can still remain unconfirmed and need
+local recovery. The readiness gate adds no hard dependency from SSH or rescue,
 but this does not guarantee remote recovery. Production images disable SSH by
 default. SSH requires prior operator enablement and a successful identity/key
 guard; that guard writes persistent key and authorization state on `/data`.

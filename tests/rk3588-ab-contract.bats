@@ -312,6 +312,7 @@ build_missing_artifact_image() {
   build_preflash_fixture
   local base="$BATS_FILE_TMPDIR/preflash" bytes
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
 
   run bash "$PREFLASH" \
     --image "$base/image.raw" --bundle "$base/update.raucb" \
@@ -341,6 +342,7 @@ build_missing_artifact_image() {
   build_preflash_fixture_variant armbian-symlink make_armbian_symlink_rootfs_tree
   local base="$BATS_FILE_TMPDIR/armbian-symlink" bytes
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
 
   run bash "$PREFLASH" \
     --image "$base/image.raw" --bundle "$base/update.raucb" \
@@ -356,6 +358,7 @@ build_missing_artifact_image() {
   build_preflash_fixture
   local base="$BATS_FILE_TMPDIR/preflash" bytes
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
 
   local corrupt="$BATS_TEST_TMPDIR/no-fit.raw"
   cp --sparse=always "$base/image.raw" "$corrupt"
@@ -373,6 +376,7 @@ build_missing_artifact_image() {
   build_preflash_fixture
   local base="$BATS_FILE_TMPDIR/preflash" bytes
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
   local artifact name corrupt
   for artifact in boot/Image boot/dtb/rockchip/rk3588-rock-5b-plus.dtb boot/initrd.img; do
     name="$(basename "$artifact")"
@@ -391,6 +395,7 @@ build_missing_artifact_image() {
   build_preflash_fixture
   local base="$BATS_FILE_TMPDIR/preflash" bytes corrupt
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
   corrupt="$BATS_TEST_TMPDIR/mismatched-root.raw"
   build_missing_artifact_image etc/rauc/ceralive-keyring.pem "$corrupt"
   run bash "$PREFLASH" \
@@ -405,6 +410,7 @@ build_missing_artifact_image() {
   build_preflash_fixture
   local base="$BATS_FILE_TMPDIR/preflash" bytes
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
 
   run bash "$PREFLASH" --self-test \
     --image "$base/image.raw" --bundle "$base/update.raucb" \
@@ -419,6 +425,7 @@ build_missing_artifact_image() {
   build_preflash_fixture
   local base="$BATS_FILE_TMPDIR/preflash" bytes corrupt state
   bytes="$(stat -c '%s' "$base/image.raw")"
+  (( bytes >= 7516192768 )) || bytes=7516192768
   corrupt="$BATS_TEST_TMPDIR/stale-state.raw"
   state="$BATS_TEST_TMPDIR/boot_state.txt"
   cp --sparse=always "$base/image.raw" "$corrupt"

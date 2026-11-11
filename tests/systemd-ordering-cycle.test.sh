@@ -442,6 +442,11 @@ import configparser
 from pathlib import Path
 import sys
 roots=[Path(p) for p in sys.argv[1:]]
+readiness=configparser.ConfigParser(interpolation=None)
+readiness.read(roots[0]/'ceralive-data-ready.service')
+assert readiness.get('Service','Type') == 'oneshot'
+assert readiness.get('Service','TimeoutStartSec') == '30s'
+assert readiness.get('Service','Restart') == 'no'
 def dependencies(unit):
     names=[unit]
     if '@' in unit:

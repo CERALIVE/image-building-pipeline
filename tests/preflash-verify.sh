@@ -654,12 +654,14 @@ check_rootfs_populated() {
 }
 
 check_target_capacity() {
-  local img="$1" target_bytes="$2" image_bytes
+  local img="$1" target_bytes="$2" board="$3" image_bytes required_bytes
   image_bytes="$(stat -c '%s' "${img}")"
-  if (( target_bytes >= image_bytes )); then
-    pass "Target media capacity: ${target_bytes} bytes >= image ${image_bytes} bytes"
+  required_bytes="$(BOARD_ID="$board" ceralive_min_media_bytes)"
+  (( required_bytes >= image_bytes )) || required_bytes="$image_bytes"
+  if (( target_bytes >= required_bytes )); then
+    pass "Target media capacity: ${target_bytes} bytes >= required ${required_bytes} bytes (image ${image_bytes})"
   else
-    fail "Target media capacity: ${target_bytes} bytes < image ${image_bytes} bytes"
+    fail "Target media capacity: ${target_bytes} bytes < required ${required_bytes} bytes (image ${image_bytes}); target is below image/profile minimum"
   fi
 }
 
@@ -706,7 +708,7 @@ run_gate() {
     check_boot_state     "${raw}" "${boot_off}"
     check_rootfs_populated "${raw}" 2 rootfs_a "${keyring}"
     check_rootfs_populated "${raw}" 3 rootfs_b "${keyring}"
-    check_target_capacity "${raw}" "${target_bytes}"
+    check_target_capacity "${raw}" "${target_bytes}" "${board}"
   fi
   [[ -f "${bundle}" ]] && check_rauc_bundle "${bundle}" "${board}" "${keyring}"
 
