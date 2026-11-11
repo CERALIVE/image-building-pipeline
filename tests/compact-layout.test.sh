@@ -31,11 +31,21 @@ check_gpt_geometry "$work/legacy" orange-pi-5-plus
 # Previous negative controls deliberately incremented FAILS.
 [[ "$FAILS" -eq 1 ]]
 FAILS=0
-for n in 1 2 3; do sgdisk -i "$n" "$work/disk" >"$work/before$n"; done
-start=$(part_field "$work/disk" 4 'First sector')
+# Retain the default host growth regression too; the opt-in suite additionally
+# exercises the target version and all supported layout forms.
+source mkosi/runtime/ceralive-grow-data.sh
 mkdir "$work/defs"
-# Lift the shipped definition (substitute only its chroot-rendered label).
-sed -n '/^\[Partition\]/,/^EOF/p' mkosi/customize/postinst.d/persistence.sh | sed '$d;s/${data_partlabel}/data/' >"$work/defs/40-data.conf"
+: >"$work/table"
+for n in 1 2 3 4; do
+  info=$(sgdisk -i "$n" "$work/disk")
+  label=$(sed -n "s/Partition name: '\(.*\)'/\1/p" <<<"$info")
+  type=$(sed -n 's/Partition GUID code: \([^ ]*\).*/\1/p' <<<"$info")
+  sectors=$(awk '/Partition size:/{print $3}' <<<"$info")
+  printf 'part %s %s %s %s\n' "$label" "$type" "$((sectors * 512))" "$n" >>"$work/table"
+  if (( n < 4 )); then printf '%s\n' "$info" >"$work/before$n"; fi
+done
+grow_data_definitions "$work/defs" data <"$work/table"
+start=$(part_field "$work/disk" 4 'First sector')
 truncate -s 8192M "$work/disk"
 systemd-repart --offline=yes --definitions="$work/defs" --empty=refuse --dry-run=no "$work/disk"
 for n in 1 2 3; do sgdisk -i "$n" "$work/disk" >"$work/after$n"; cmp "$work/before$n" "$work/after$n"; done
@@ -46,4 +56,4 @@ systemd-repart --offline=yes --definitions="$work/defs" --empty=refuse --dry-run
 sgdisk --backup="$work/gpt2" "$work/disk"
 cmp "$work/gpt1" "$work/gpt2"
 grep -q 'x-systemd.growfs' mkosi/customize/postinst.d/persistence.sh
-echo 'compact factory geometry, partition growth, preserved roots and idempotence pass'
+echo 'compact and legacy geometry acceptance, mutation rejection and CLI precedence pass'

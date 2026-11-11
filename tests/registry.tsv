@@ -227,3 +227,4 @@ tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	sup
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/compact-layout.test.sh	shell	integration	default-shell	Compact factory geometry and idempotent data-only partition expansion
+tests/grow-data-257.test.sh	shell	integration	opt-in	Target systemd 257 growth contract using an explicitly selected existing pipeline builder

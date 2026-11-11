@@ -17,15 +17,29 @@ future bundle builds that exceed that reserve fail rather than emitting an
 oversized update. This policy assumes the firmware and package-cache reductions
 are applied; a layout-only build may correctly fail the reserve gate.
 
-Before local mounts, ceralive-grow-data.service runs systemd-repart against the
-booted root's backing disk. Its dedicated definition matches only the existing
-linux-generic partition named data (or the explicit bench label), without Format,
-CopyFiles or root-slot definitions. The default unbounded SizeMaxBytes extends
-that final partition and relocates the backup GPT to the card end. The existing
-/data fstab x-systemd.growfs then grows ext4 on mount. The operation is idempotent
-and also works after cloning onto larger media. No filesystems are recreated.
-The 256 MiB factory data is a transport minimum: OTA bundle staging/log capacity
-comes from the expanded card, and a grow failure must be resolved before updating.
+Before local mounts, ceralive-grow-data.service runs the installed growth helper
+on the booted root's backing disk. It validates the entire existing partition
+sequence and types: boot, root A, optional root B, final data (also allowing the
+explicit bench labels). Unknown, missing, duplicate or reordered partitions are
+refused before invoking repart. Definitions are generated in /run in the same
+order, with boot/root minimum and maximum equal to their actual current sizes.
+Only data has no maximum. No Format, CopyFiles or Label is emitted: existing
+contents, labels and UUIDs are preserved. Both compact and legacy root sizes
+are accepted, and a single-slot disk never receives an invented B definition.
+
+This ordering matters on the target systemd 257: Label does not select existing
+partitions; matching is by type UUID and order, as documented in
+[repart.d v257](https://github.com/systemd/systemd/blob/v257/man/repart.d.xml).
+A sole linux-generic data definition would select root A. The opt-in regression
+`CERALIVE_REPART_TEST_IMAGE=<existing-pipeline-builder> tests/grow-data-257.test.sh`
+requires systemd 257 and tests compact A/B, legacy A/B, single-slot and bench
+images, unchanged boot/root GPT records, data filling the enlarged disk, repeat
+idempotence and fail-closed malformed tables. It never builds/pulls a Docker image.
+
+After partition growth, the existing /data fstab x-systemd.growfs option grows
+ext4 on mount. The 256 MiB factory data is a transport minimum: OTA staging/log
+capacity comes from the expanded card, and growth failure must be resolved
+before updating. Physical first-boot and A/B qualification remain separate.
 
 Compatibility: installed devices retain their current partition geometry; this
 is not an in-place root repartitioning migration. They can receive the smaller

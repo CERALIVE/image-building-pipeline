@@ -76,16 +76,9 @@ setup_data_persistence() {
   fi
 
   if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
-    mkdir -p /usr/lib/ceralive/repart.d /etc/systemd/system/local-fs-pre.target.wants
-    cat >/usr/lib/ceralive/repart.d/40-data.conf <<EOF
-[Partition]
-Type=linux-generic
-Label=${data_partlabel}
-SizeMinBytes=256M
-# Unbounded SizeMaxBytes (the default): consume the card's remaining capacity.
-# No Format or CopyFiles: grow the existing data partition without replacing it.
-EOF
-    cat >/etc/systemd/system/ceralive-grow-data.service <<'UNIT'
+    mkdir -p /etc/systemd/system/local-fs-pre.target.wants
+    install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-grow-data.sh" /usr/libexec/ceralive/ceralive-grow-data
+    cat >/etc/systemd/system/ceralive-grow-data.service <<UNIT
 [Unit]
 Description=Grow persistent data partition to the boot disk capacity
 DefaultDependencies=no
@@ -96,7 +89,7 @@ ConditionVirtualization=!container
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/systemd-repart --definitions=/usr/lib/ceralive/repart.d --empty=refuse --dry-run=no
+ExecStart=/usr/libexec/ceralive/ceralive-grow-data ${data_partlabel}
 RemainAfterExit=yes
 UNIT
     ln -sfn ../ceralive-grow-data.service /etc/systemd/system/local-fs-pre.target.wants/ceralive-grow-data.service
