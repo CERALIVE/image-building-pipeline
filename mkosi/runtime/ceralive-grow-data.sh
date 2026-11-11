@@ -37,18 +37,20 @@ grow_data_definitions() {
     || "$names" == "${prefix}boot ${prefix}rootfs_a ${data_label} " ]]
 }
 
+grow_data_is_block_device() { [[ -b "$1" ]]; }
+
 grow_data_main() {
   local data_label="$1" root parent disk table root_label prefix
   case "$data_label" in data) prefix="" ;; xdata) prefix=x ;; *) return 1 ;; esac
   root="$(findmnt -nro SOURCE /)"
   root="$(readlink -f "$root")"
-  [[ -b "$root" ]] || return 1
+  grow_data_is_block_device "$root" || return 1
   root_label="$(lsblk -dnro PARTLABEL "$root")"
   [[ "$root_label" == "${prefix}rootfs_a" || "$root_label" == "${prefix}rootfs_b" ]] || return 1
   parent="$(lsblk -dnro PKNAME "$root")"
   [[ "$parent" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
   disk="/dev/$parent"
-  [[ -b "$disk" ]] || return 1
+  grow_data_is_block_device "$disk" || return 1
   table="$(lsblk --bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN "$disk")"
   GROW_DATA_DEFS="$(mktemp -d /run/ceralive-grow-data.XXXXXX)"
   trap 'rm -rf -- "$GROW_DATA_DEFS"' EXIT
