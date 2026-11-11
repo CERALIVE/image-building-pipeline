@@ -69,17 +69,6 @@ sed '/^if \[\[ "${1:-}" == --partlabel-guard \]\]; then/,$d' mkosi/runtime/ceral
     if mark_good; then echo 'health consumer ignored incomplete growth'; exit 1; fi
   done
 )
-# The installed mount/grow/consumer graph must retain the gate even though
-# rescue boot uses nofail and a weak partition-growth pull-in.
-python3 - <<'CHECK'
-from pathlib import Path
-s=Path('mkosi/customize/postinst.d/persistence.sh').read_text()
-assert 'x-systemd.after=ceralive-grow-data.service' in s
-assert 'Before=local-fs-pre.target data.mount' in s
-assert 'After=ceralive-grow-data.service data.mount systemd-growfs@data.service' in s
-assert 'Requires=ceralive-data-ready.service' in s
-assert 'After=ceralive-data-ready.service' in s
-assert 'for consumer in ceralive-healthcheck ceralive rauc rauc-hawkbit-updater' in s
-assert 'ExecStartPre=/usr/libexec/ceralive/ceralive-data-ready' in s
-CHECK
-echo 'data readiness failure/pending/success, health refusal and consumer ordering pass'
+# Mount/grow/consumer sequencing is exercised dynamically by
+# systemd-ordering-cycle.test.sh using rendered installed units and drop-ins.
+echo 'data readiness failure/pending/success and health refusal pass'
