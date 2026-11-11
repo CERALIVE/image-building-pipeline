@@ -257,6 +257,15 @@ called "timeout 5" && pass "shutdown bounds NM cleanup" || fail "shutdown bounds
 [ -e "$(state_file portal-active)" ] && pass "shutdown retains portal marker" || fail "shutdown retains portal marker"
 [ -e "$(state_file force-provision)" ] && pass "shutdown retains force flag" || fail "shutdown retains force flag"
 
+reset_state
+make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' 'if [ "$1" = is-system-running ]; then echo "${STUB_SYSTEM_STATE:-running}"; fi' 'exit 0'
+STUB_SYSTEM_STATE=stopping bash "${PROVISION}" service-stop >/dev/null 2>&1
+! called "systemctl start" && pass "service shutdown never restarts CeraUI" || fail "service shutdown never restarts CeraUI"
+called "systemctl --no-block stop" && pass "service shutdown queues portal stop" || fail "service shutdown queues portal stop"
+reset_state
+STUB_SYSTEM_STATE=running bash "${PROVISION}" service-stop >/dev/null 2>&1
+called "systemctl start ceralive.service" && pass "manual unit stop restores CeraUI" || fail "manual unit stop restores CeraUI"
+
 echo
 if [ "${FAILED}" -eq 0 ]; then
   echo "RESULT: ALL PASS — captive portal + handoff + 4-condition teardown verified offline"

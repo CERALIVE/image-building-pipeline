@@ -20,7 +20,7 @@ ExecStart=/usr/local/sbin/ceralive-provision start
 # the next boot re-evaluates the trigger and a pending factory reset is not disarmed).
 # The Task 14 FULL teardown (delete profile, release wlan0, clear flags) is the
 # explicit `ceralive-provision teardown` verb, NOT this stop.
-ExecStop=/usr/local/sbin/ceralive-provision shutdown
+ExecStop=/usr/local/sbin/ceralive-provision service-stop
 # Grace window (<=90s) + NM AP bring-up must fit; never wedge boot on a slow NM.
 TimeoutStartSec=180
 TimeoutStopSec=10

@@ -208,8 +208,9 @@ hostname (`ceralive.local`, `ceralive2.local`, and so on).
 
 ### Shutdown cleanup
 
-The provisioning service uses a dedicated `shutdown` verb for ExecStop. Manual
-`stop` and `teardown` restore the application control plane; shutdown must not
+The provisioning service uses `service-stop` for ExecStop and checks the manager
+state. Manual unit stops and explicit `stop`/`teardown` restore the application
+control plane; shutdown cleanup must not
 start it while systemd is stopping it. Portal stop jobs are queued without
 waiting inside ExecStop, and NM link-down is bounded to five seconds (three
 seconds requested from nmcli). The unit has a ten-second stop budget. This

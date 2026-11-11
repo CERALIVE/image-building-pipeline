@@ -293,7 +293,7 @@ bring_up_ap() {
 # The AP profile + the /data flags are RETAINED so the next boot re-evaluates the
 # trigger; the factory-reset force flag is NOT cleared here. The portal listener is
 # stopped and the explicit manual `stop` verb restores CeraUI to port 80.
-# The service ExecStop uses `shutdown`, which must never start CeraUI.
+# The service ExecStop selects shutdown cleanup when the manager is stopping.
 stop_ap() {
   local shutdown="${1:-0}"
   log "stopping provisioning AP link (profile + flags retained; shutdown=${shutdown})"
@@ -391,6 +391,14 @@ connect_target() {
 main() {
   local cmd="${1:-start}"
   case "${cmd}" in
+    service-stop)
+      # A manual unit stop restores the control plane; a shutdown transaction
+      # must never synchronously start jobs it is trying to stop.
+      case "$("${SYSTEMCTL}" is-system-running 2>/dev/null || true)" in
+        running|degraded|starting) stop_ap ;;
+        *) stop_ap 1 ;;
+      esac
+      exit 0 ;;
     shutdown) stop_ap 1;     exit 0 ;;
     stop)     stop_ap;       exit 0 ;;
     teardown) teardown_ap 0; exit 0 ;;
