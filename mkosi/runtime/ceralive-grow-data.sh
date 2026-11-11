@@ -2,7 +2,7 @@
 # systemd 257 matches repart definitions by type and order, not Label.
 set -euo pipefail
 
-# Input: lsblk --bytes --raw --paths --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START (sorted by PARTN).
+# Input: lsblk --bytes --raw --paths --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START (arbitrary order).
 # Validate the entire known layout before permitting any disk mutation. Generate
 # one ordered definition per existing partition; never invent a missing B slot.
 grow_data_definitions() {
@@ -37,7 +37,7 @@ grow_data_definitions() {
       if [[ "$label" != "$data_label" ]]; then printf 'SizeMaxBytes=%s\n' "$bytes"; fi
       # No Format, CopyFiles or Label: preserve existing contents and identity.
     } >"$conf"
-  done
+  done < <(LC_ALL=C sort -k5,5n)
   [[ "$names" == "${prefix}boot ${prefix}rootfs_a ${prefix}rootfs_b ${data_label} " \
     || "$names" == "${prefix}boot ${prefix}rootfs_a ${data_label} " ]]
 }
@@ -63,7 +63,8 @@ grow_data_main() {
     echo 'Refusing to grow data: unexpected boot-disk partition layout' >&2
     return 1
   }
-  systemd-repart --definitions="$GROW_DATA_DEFS" --empty=refuse --dry-run=no "$disk"
+  # Repart otherwise discards unallocated space, including the raw bootloader.
+  systemd-repart --definitions="$GROW_DATA_DEFS" --empty=refuse --dry-run=no --discard=no "$disk"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then grow_data_main "${1:?data partition label required}"; fi

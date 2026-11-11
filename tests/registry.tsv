@@ -230,3 +230,4 @@ tests/compact-layout.test.sh	shell	integration	default-shell	Compact factory geo
 tests/grow-data-257.test.sh	shell	integration	opt-in	Target systemd 257 growth contract using an explicitly selected existing pipeline builder
 tests/grow-data-entrypoint.test.sh	shell	unit	default-shell	Shipped growth main disk discovery, targeting, validation failures and cleanup with external I/O mocked
 tests/bundle-layout-inspect.test.sh	shell	unit	default-shell	Board-specific full-slot bundle inspector and production preflash metadata acceptance/rejection
+tests/grow-data-loop-257.test.sh	shell	integration	opt-in	Privileged target257 loop growth preserves nonzero loader gap and fixed partition bytes

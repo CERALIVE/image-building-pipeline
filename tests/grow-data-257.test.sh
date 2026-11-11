@@ -11,7 +11,7 @@ version=$(docker run --rm "$image" systemd-repart --version)
 [[ "$version" == 'systemd 257 '* ]] || { echo "target systemd 257 required, got $version"; exit 1; }
 run_repart() {
   docker run --rm --user "$(id -u):$(id -g)" -v "$work:/test" -w /test "$image" \
-    systemd-repart --offline=yes --definitions="/test/$1/defs" --empty=refuse --dry-run=no "/test/$1/disk"
+    systemd-repart --offline=yes --definitions="/test/$1/defs" --empty=refuse --dry-run=no --discard=no "/test/$1/disk"
 }
 for scenario in compact-ab legacy-ab compact-single bench-ab; do
   dir="$work/$scenario"; mkdir -p "$dir/defs"
@@ -35,6 +35,19 @@ for scenario in compact-ab legacy-ab compact-single bench-ab; do
     if (( n < count )); then printf '%s\n' "$info" >"$dir/before$n"; fi
   done
   grow_data_definitions "$dir/defs" "${prefix}data" <"$dir/table"
+  # Every inventory permutation must generate the same ordered definitions.
+  python3 - "$dir/table" "$dir" <<'PYORDER'
+import itertools, pathlib, sys
+rows = pathlib.Path(sys.argv[1]).read_text().splitlines()
+for i, order in enumerate(itertools.permutations(rows)):
+    pathlib.Path(sys.argv[2], f'order{i}').write_text('\n'.join(order)+'\n')
+PYORDER
+  for table in "$dir"/order*; do
+    mkdir "$dir/permuted"
+    grow_data_definitions "$dir/permuted" "${prefix}data" <"$table"
+    diff -r "$dir/defs" "$dir/permuted"
+    rm -r "$dir/permuted"
+  done
   start=$(sgdisk -i "$count" "$dir/disk" | awk '/First sector:/{print $3}')
   before=$(sgdisk -i "$count" "$dir/disk" | awk '/Partition size:/{print $3}')
   truncate -s 20G "$dir/disk"
@@ -52,13 +65,12 @@ for scenario in compact-ab legacy-ab compact-single bench-ab; do
   cmp "$dir/once.gpt" "$dir/twice.gpt"
   echo "$scenario: target257 data fills disk, boot/roots unchanged, repeat idempotent"
 done
-# Unknown, missing, duplicated or reordered partitions must not reach repart.
-for bad in missing duplicate reordered physical-reordered overlap type; do
+# Unknown, missing, duplicated or physically reordered partitions must not reach repart.
+for bad in missing duplicate physical-reordered overlap type; do
   mkdir "$work/$bad"
   case "$bad" in
     missing) sed '/ data /d' "$work/compact-ab/table" ;;
     duplicate) cat "$work/compact-ab/table"; tail -1 "$work/compact-ab/table" ;;
-    reordered) tac "$work/compact-ab/table" ;;
     physical-reordered) awk '$5 == 3 {$6=11567104} $5 == 4 {$6=5799936} {print}' "$work/compact-ab/table" ;;
     overlap) awk '$5 == 4 {$6-=8} {print}' "$work/compact-ab/table" ;;
     type) sed 's/0FC63DAF-8483-4772-8E79-3D69D8477DE4/00000000-0000-0000-0000-000000000000/g' "$work/compact-ab/table" ;;

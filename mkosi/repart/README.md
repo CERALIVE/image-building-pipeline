@@ -78,3 +78,32 @@ the contract. dm-verity remains future hardening, not a current install dependen
   FAT-backed bootcount selector in `platform/boot/`.
 - Signed plain-format `*.raucb` bundles are emitted by `lib/build-bundle.sh`.
 - **`/var` + WiFi bind-mounts onto `data`** → task 30.
+
+### First-boot data growth safety
+
+The runtime growth helper explicitly sorts the inventory numerically by partition
+number before validating labels, types, sizes and physical START/non-overlap.
+Inventory display order is not a partition geometry guarantee. Invalid layouts
+refuse mutation before invoking repart.
+
+Growth uses `systemd-repart --empty=refuse --discard=no` with fixed boot/root
+sizes and no formatting, copying or relabeling directives. The discard option
+preserves the raw Rockchip bootloader area before partition 1. In systemd 257,
+`context_discard_gap_after()` otherwise discards this area even when every
+partition already exists; the option disables that path. Existing partitions
+skip new-partition wiping/formatting. GPT metadata must still be rewritten to
+extend data and relocate the backup GPT; no extra GPT option is needed in the
+257.13 loop regression, which verifies sectors 34..32767 byte-for-byte.
+See [systemd v257.13 repart source](https://github.com/systemd/systemd/blob/v257.13/src/repart/repart.c).
+
+The default entrypoint test checks shuffled inventories and fail-closed guards.
+`tests/grow-data-257.test.sh` tests every inventory permutation for compact,
+legacy, single-slot and bench-label layouts using an existing builder selected
+by `CERALIVE_REPART_TEST_IMAGE`. The privileged opt-in
+`tests/grow-data-loop-257.test.sh` takes `CERALIVE_REPART_TEST_BINARY`, an absolute
+path to a systemd 257 executable (or wrapper for the extracted builder libraries).
+Run it as root with the normal assembler prerequisites on PATH. It uses only
+its own temporary file and loop device, seeds a nonzero bootloader gap and
+partition sentinels, and verifies full boot/root hashes and GPT entries, gap
+hash, backup GPT validity, full-disk data growth and repeat idempotence. This
+is software evidence; a real first boot and subsequent reboot remain required.

@@ -21,7 +21,7 @@ grow_data_is_block_device() {
   [[ "$scenario" != nonblock ]] || return 1
   [[ "$1" == "$root_node" || "$1" == /dev/mockdisk0 ]]
 }
-lsblk() {
+inventory() {
   case "$*" in
     '-dnro PARTLABEL /dev/mockdisk0p'[23])
       if [[ "$scenario" == wrong-root ]]; then echo data; else echo "${prefix}rootfs_${slot}"; fi ;;
@@ -53,16 +53,25 @@ lsblk() {
     *) echo "unexpected lsblk invocation: $*" >&2; return 1 ;;
   esac
 }
+lsblk() {
+  if [[ "$*" == --bytes* ]]; then
+    case "$scenario" in
+      order-3142) inventory "$@" | awk 'NR==1{print;next} {row[$5]=$0} END{print row[3];print row[1];print row[4];print row[2]}' ;;
+      order-reverse) inventory "$@" | tac ;;
+      *) inventory "$@" ;;
+    esac
+  else inventory "$@"; fi
+}
 mktemp() { [[ "$*" == '-d /run/ceralive-grow-data.XXXXXX' ]]; command mktemp -d "$GROW_TEST_WORK/run.XXXXXX"; }
 systemd-repart() {
-  [[ $# -eq 4 && "$1" == --definitions=* && "$2" == --empty=refuse && "$3" == --dry-run=no && "$4" == /dev/mockdisk0 ]]
+  [[ $# -eq 5 && "$1" == --definitions=* && "$2" == --empty=refuse && "$3" == --dry-run=no && "$4" == --discard=no && "$5" == /dev/mockdisk0 ]]
   printf '%s\n' "$@" >"$GROW_TEST_WORK/invoked"
   command cp -a "${1#--definitions=}" "$GROW_TEST_WORK/definitions"
   [[ "$scenario" != repart-fail ]] || return 1
 }
 grow_data_main "${prefix}data"
 HARNESS
-for scenario in root-a root-b bench-a bench-b legacy-a legacy-b single-a; do
+for scenario in root-a root-b bench-a bench-b legacy-a legacy-b single-a order-3142 order-reverse; do
   GROW_TEST_WORK="$work/$scenario"; export GROW_TEST_WORK; mkdir "$GROW_TEST_WORK"
   bash "$work/harness" "$scenario"
   [[ "$(tail -1 "$GROW_TEST_WORK/invoked")" == /dev/mockdisk0 ]]
