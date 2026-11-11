@@ -17,9 +17,12 @@ the installed reprune/mirror manifest. Package selection, firmware archive ident
 configuration remain unchanged. The existing prune manifest is also installed
 for repruning after package upgrades and expected slot comparison differences.
 
-Measured candidate exclusions total 586,989,568 bytes per root tree; actual image
-savings require a rebuild. Cold-plug radio/modem and physical media qualification
-remain required before release.
+Read-only inspection of the rebuilt combined candidate measured 756,473,856
+firmware bytes per root, 586,989,568 bytes below the full-firmware baseline;
+all 5,245 retained regular files/symlinks matched by hash/link target. Finite
+ROCK 5B+ checks passed a small modem DNS/HTTPS probe and physical HDMI media
+capture. These measurements do not qualify every peripheral, other boards,
+interrupted growth or sustained operation.
 
 ## Restore excluded firmware
 
