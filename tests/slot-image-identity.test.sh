@@ -162,4 +162,98 @@ assert_eq 'seed is label-independent' "$(slot_image_seed_uuid)" "$(SLOT_IMAGE_LA
 [[ "$(slot_image_seed_uuid)" != "$(COMPATIBLE_STRING=other slot_image_seed_uuid)" ]] \
   && ok 'seed follows the compatible string' || bad 'seed ignores the compatible string'
 
+# 7. Force the unreadable-tree decision without root or a container daemon.
+# The runtime shim checks the mount/environment boundary and executes the REAL
+# inline container payload. Only tool path arguments are translated to the fixture;
+# mkfs.ext4 and tune2fs still create and update actual ext4 images.
+shim="${work}/container-bin"
+mkdir -p "${shim}"
+SLOT_TEST_REAL_MKFS="$(command -v mkfs.ext4)"
+SLOT_TEST_REAL_TUNE="$(command -v tune2fs)"
+export SLOT_TEST_REAL_MKFS SLOT_TEST_REAL_TUNE
+export SLOT_TEST_CONTAINER_CALLS="${work}/container-calls.jsonl"
+cat >"${shim}/tar" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+cat >"${shim}/docker" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == run && "$2" == --rm ]]
+shift 2
+envs=()
+tree='' out=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -e) envs+=("$2"); shift 2 ;;
+    -v)
+      case "$2" in
+        *:/rootfs-tree:ro) tree="${2%:/rootfs-tree:ro}" ;;
+        *:/out) out="${2%:/out}" ;;
+        *) exit 2 ;;
+      esac
+      shift 2 ;;
+    *) [[ "$1" == identity-container-contract ]]; shift; break ;;
+  esac
+done
+[[ -d "$tree" && -d "$out" && "$1" == bash ]]
+env -u FS_SEED -u FS_UUID -u FS_LABEL "${envs[@]}" \
+  SLOT_TEST_TREE="$tree" SLOT_TEST_OUT="$out" python3 - "$@" <<'PY'
+import json, os, sys
+keys = ('FS_SEED', 'FS_UUID', 'FS_LABEL', 'E2FSPROGS_FAKE_TIME')
+with open(os.environ['SLOT_TEST_CONTAINER_CALLS'], 'a') as stream:
+    stream.write(json.dumps({k: os.environ[k] for k in keys}) + '\n')
+os.execvp(sys.argv[1], sys.argv[1:])
+PY
+SH
+cat >"${shim}/formatter" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${0##*/}" in
+  mkfs.ext4) tool="$SLOT_TEST_REAL_MKFS" ;;
+  tune2fs) tool="$SLOT_TEST_REAL_TUNE" ;;
+  *) exit 2 ;;
+esac
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    /rootfs-tree) args+=("$SLOT_TEST_TREE") ;;
+    /out/*) args+=("$SLOT_TEST_OUT/${arg#/out/}") ;;
+    *) args+=("$arg") ;;
+  esac
+done
+exec "$tool" "${args[@]}"
+SH
+chmod +x "${shim}/tar" "${shim}/docker" "${shim}/formatter"
+ln -s formatter "${shim}/mkfs.ext4"
+ln -s formatter "${shim}/tune2fs"
+
+for label in rootfs_a rootfs_b rootfs; do
+  container_img="${work}/container-${label}.ext4"
+  if ! PATH="${shim}:${PATH}" MKOSI_BUILDER_IMAGE=identity-container-contract \
+      SLOT_IMAGE_LABEL="${label}" make_slot_image "${tree}" "${container_img}" >/dev/null 2>&1; then
+    bad "container formatter failed for ${label}"
+    exit 1
+  fi
+  assert_eq "container ${label} label" "${label}" "$(field 'Filesystem volume name' "${container_img}")"
+  assert_eq "container ${label} final UUID" "$(det_uuid "identity-test-${label}")" "$(field 'Filesystem UUID' "${container_img}")"
+  assert_eq "container ${label} checksum seed" "$(field 'Checksum seed' "${img_a}")" "$(field 'Checksum seed' "${container_img}")"
+  e2fsck -fn "${container_img}" >/dev/null 2>&1 \
+    && ok "container ${label} passes e2fsck -fn" || bad "container ${label} fails e2fsck -fn"
+  case "$label" in rootfs_a) native="$img_a" ;; rootfs_b) native="$img_b" ;; rootfs) native="$img_ota" ;; esac
+  assert_eq "container ${label} matches native bytes" "$(sha256sum <"${native}")" "$(sha256sum <"${container_img}")"
+done
+if python3 - "$SLOT_TEST_CONTAINER_CALLS" "$(slot_image_seed_uuid)" "$SOURCE_DATE_EPOCH" \
+    "$(det_uuid identity-test-rootfs_a)" "$(det_uuid identity-test-rootfs_b)" "$(det_uuid identity-test-rootfs)" <<'PY'
+import json, sys
+path, seed, epoch, *uuids = sys.argv[1:]
+with open(path) as stream:
+    calls = [json.loads(line) for line in stream]
+assert len(calls) == 3, calls
+for call, label, uuid in zip(calls, ('rootfs_a', 'rootfs_b', 'rootfs'), uuids):
+    assert call == dict(FS_SEED=seed, FS_UUID=uuid, FS_LABEL=label, E2FSPROGS_FAKE_TIME=epoch), call
+PY
+then ok 'container receives the shared seed, final UUID, label and fixed clock for all three images'
+else bad 'container environment contract differs from the slot identities'; fi
+
 [[ "${FAIL}" -eq 0 ]]
