@@ -1,0 +1,8 @@
+[Unit]
+Description=Save shared SSH boot policy
+Requires=ceralive-ssh-policy.service
+After=ceralive-ssh-policy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ceralive-ssh-policy save

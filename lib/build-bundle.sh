@@ -51,7 +51,11 @@ version=${version}
 [bundle]
 format=verity
 
+[hooks]
+filename=ssh-policy-hook
+
 [image.rootfs]
+hooks=pre-install
 filename=rootfs.ext4
 adaptive=block-hash-index
 EOF
@@ -145,6 +149,7 @@ build-bundle() {
   SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4" \
     || die "failed to make 4096 MiB ext4 rootfs slot image"
   write_manifest "${content}/manifest.raucm" "${compatible}" "${version}"
+  install -m 0755 "${PIPELINE_DIR}/mkosi/runtime/ceralive-ssh-policy.sh" "${content}/ssh-policy-hook"
   bundle_with_rauc "${content}" "${out}"
   ( cd "${out_dir}" && sha256sum "$(basename "${out}")" >"$(basename "${out}").sha256" )
   log_success "verity adaptive bundle: ${out}"

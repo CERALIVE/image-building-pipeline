@@ -148,6 +148,13 @@ setup_ssh_firstboot() {
       || die "CERALIVE_OS_RELEASE_VERSION must be YYYY.MINOR.PATCH CalVer"
     printf '%s\n' "${CERALIVE_OS_RELEASE_VERSION}" >/etc/ceralive/os-release-version && chmod 0444 /etc/ceralive/os-release-version
   fi
+  install -m 0755 "${src}/ceralive-ssh-policy.sh" /usr/local/sbin/ceralive-ssh-policy
+  local policy_unit
+  for policy_unit in ceralive-ssh-policy.service ceralive-ssh-policy-save.service ceralive-ssh-policy.path; do
+    install -m 0644 "${src}/${policy_unit}" "/etc/systemd/system/${policy_unit}"
+  done
+  enable_service ceralive-ssh-policy.service
+  enable_service ceralive-ssh-policy.path
   enable_service ceralive-ssh-firstboot.service
   enable_service ceralive-ci-uart-bootstrap.service
 }

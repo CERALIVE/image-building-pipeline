@@ -1,0 +1,11 @@
+[Unit]
+Description=Track operator SSH enablement changes
+Requires=ceralive-ssh-policy.service
+After=ceralive-ssh-policy.service
+
+[Path]
+PathChanged=/etc/systemd/system/multi-user.target.wants
+Unit=ceralive-ssh-policy-save.service
+
+[Install]
+WantedBy=multi-user.target

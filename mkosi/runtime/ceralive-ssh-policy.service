@@ -1,0 +1,15 @@
+[Unit]
+Description=Restore shared SSH boot policy
+RequiresMountsFor=/data
+Requires=ceralive-migrate-data.service
+After=ceralive-migrate-data.service ceralive.service
+Before=ceralive-ssh-policy.path
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ceralive-ssh-policy restore
+ExecStop=/usr/local/sbin/ceralive-ssh-policy save
+
+[Install]
+WantedBy=multi-user.target

@@ -205,3 +205,13 @@ On hardware, after submitting credentials, confirm: the `CeraLive-Setup-*` hotsp
 disappears, `journalctl -t ceralive-provision -t ceralive-portal` shows the join +
 teardown, and CeraUI answers on the device's new IP or selected `.local`
 hostname (`ceralive.local`, `ceralive2.local`, and so on).
+
+### Shutdown cleanup
+
+The provisioning service uses a dedicated `shutdown` verb for ExecStop. Manual
+`stop` and `teardown` restore the application control plane; shutdown must not
+start it while systemd is stopping it. Portal stop jobs are queued without
+waiting inside ExecStop, and NM link-down is bounded to five seconds (three
+seconds requested from nmcli). The unit has a ten-second stop budget. This
+avoids blocking behind systemd's shutdown transaction until its default
+90-second timeout; AP profile and retrigger flags remain available next boot.

@@ -176,3 +176,29 @@ config, so a malformed drop-in can never wedge sshd's startup.
 
 No `fail2ban`, no UFW, no auditd, no key-only enforcement for the `ceralive`
 user. SC4 locks the scope to exactly the four actions above.
+
+## SSH boot policy across updates
+
+The operator's persistent SSH choice is separate from a temporary Start/Stop.
+Systemd stores enablement in the active rootfs; host keys and application
+configuration on shared data alone do not preserve that choice after an update.
+The signed OS bundle's rootfs pre-install hook records current enablement in
+shared data before writing the inactive slot, including upgrades from images
+without the policy service. Normal RAUC compatibility and signature checks remain
+in effect. Installation refuses if shared data is not mounted or policy cannot
+be read. No active-session state is promoted to persistent access.
+
+`ceralive-ssh-policy.service` imports local enablement when no saved policy exists,
+then restores saved policy on subsequent boots. A path unit records operator
+changes to the systemd wants directory; the service also snapshots at clean
+shutdown. State lives in `/data/ceralive/ssh-policy/boot-policy` (root only).
+A saved opt-in enables and asynchronously starts SSH through the existing
+hardening guard. A saved opt-out disables service/socket and stops them. Masks
+are never removed. Unknown policy/read errors fail the policy operation.
+Production images still ship SSH disabled, and temporary SSH sessions never
+arm it for a later boot. Forced power loss immediately after a toggle can
+precede the path unit's snapshot; clean update shutdown captures the final state.
+
+Host regressions cover legacy-slot capture, a fresh inactive slot, rollback,
+opt-out, runtime-only enablement, masks and invalid state. Physical signed-update
+reachability remains a separate hardware qualification.

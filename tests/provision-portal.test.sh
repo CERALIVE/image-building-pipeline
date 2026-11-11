@@ -243,6 +243,20 @@ called "systemctl start ceralive.service"        && pass "(d) CeraUI restored"  
 [ ! -e "$(state_file portal-active)" ]           && pass "portal-active cleared"         || fail "portal-active cleared"
 [ ! -e "$(state_file teardown-requested)" ]      && pass "teardown-requested flag cleared" || fail "teardown-requested flag cleared"
 
+# A blocking start during ExecStop waits behind the shutdown transaction. Model
+# that deadlock by refusing every blocking systemctl call in the shutdown case.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+: >"$(state_file force-provision)"
+make_stub systemctl 'echo "systemctl $*" >>"$CALL_LOG"' '[ "$1" = --no-block ] || exit 99'
+bash "${PROVISION}" shutdown >/dev/null 2>&1
+called "systemctl --no-block stop ceralive-portal.socket" && pass "shutdown enqueues portal stop" || fail "shutdown enqueues portal stop"
+! called "systemctl start" && pass "shutdown never starts CeraUI" || fail "shutdown never starts CeraUI"
+! called "systemctl stop" && pass "shutdown has no blocking stop" || fail "shutdown has no blocking stop"
+called "timeout 5" && pass "shutdown bounds NM cleanup" || fail "shutdown bounds NM cleanup"
+[ -e "$(state_file portal-active)" ] && pass "shutdown retains portal marker" || fail "shutdown retains portal marker"
+[ -e "$(state_file force-provision)" ] && pass "shutdown retains force flag" || fail "shutdown retains force flag"
+
 echo
 if [ "${FAILED}" -eq 0 ]; then
   echo "RESULT: ALL PASS — captive portal + handoff + 4-condition teardown verified offline"
