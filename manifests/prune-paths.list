@@ -53,3 +53,16 @@
 # CONTENT: the locale/i18n strip, safe everywhere (not alternatives-registered).
 /usr/share/locale/*
 /usr/lib/locale/locale-archive
+
+# Appliance policy: exclude discrete GPUs, server NICs/switches and Intel cameras.
+# Keep all wireless, modem and Rockchip media assets; see docs/firmware-policy.md.
+/usr/lib/firmware/nvidia
+/usr/lib/firmware/mellanox
+/usr/lib/firmware/netronome
+/usr/lib/firmware/amdgpu
+/usr/lib/firmware/mrvl/prestera
+/usr/lib/firmware/intel/ipu
+/usr/lib/firmware/i915
+/usr/lib/firmware/intel/vsc
+/usr/lib/firmware/radeon
+/usr/lib/firmware/xe
