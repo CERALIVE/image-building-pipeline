@@ -20,7 +20,8 @@ cat >"$work/bin/lsblk" <<'SH'
 case "$*" in
   '-bdnro SIZE /dev/test2') echo "${ROOT_BYTES:-2684354560}" ;;
   '-bdnro SIZE /dev/test4') echo 8589934592 ;;
-  '-dnro PKNAME /dev/test2'|'-dnro PKNAME /dev/test4') echo test ;;
+   '-dnro PKNAME /dev/test2') echo test ;;
+  '-dnro PKNAME /dev/test4') echo "${DATA_PARENT:-test}" ;;
   '-dnro PARTLABEL /dev/test4') echo data ;;
   *) exit 1 ;;
 esac
@@ -35,7 +36,9 @@ esac
 SH
 cat >"$work/bin/stat" <<'SH'
 #!/bin/bash
-if [[ ${SMALL_FS:-0} == 1 ]]; then echo '65536 4096 60000'; else echo '2050000 4096 1500000'; fi
+if [[ ${SMALL_FS:-0} == 1 ]]; then echo '65536 4096 60000'
+elif [[ ${LOW_FREE:-0} == 1 ]]; then echo '2050000 4096 60000'
+else echo '2050000 4096 1500000'; fi
 SH
 chmod +x "$work/bin/"*
 export PATH="$work/bin:$PATH"
@@ -46,6 +49,9 @@ for state in failure pending; do
 done
 if FS_STATE=failure bash "$helper"; then exit 1; fi
 if SMALL_FS=1 bash "$helper"; then exit 1; fi
+if ROOT_BYTES=unknown bash "$helper"; then exit 1; fi
+if DATA_PARENT=foreign bash "$helper"; then exit 1; fi
+if LOW_FREE=1 bash "$helper"; then exit 1; fi
 bash "$helper"
 # Legacy adequately-sized layouts are not tied to repart success.
 ROOT_BYTES=4294967296 GROW_STATE=failure bash "$helper"

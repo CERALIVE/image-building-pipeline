@@ -8,12 +8,17 @@ refuse() {
 root=$(readlink -f "$(findmnt -nro SOURCE /)")
 root_bytes=$(lsblk -bdnro SIZE "$root")
 # Legacy geometry is not made dependent on repart success.
-[[ "$root_bytes" == 2684354560 ]] || exit 0
+case "$root_bytes" in
+  2684354560) ;;
+  4294967296) exit 0 ;;
+  *) refuse 'unknown root partition size' ;;
+esac
 systemctl is-active --quiet ceralive-grow-data.service || refuse 'partition growth failed or is pending'
 systemctl is-active --quiet systemd-growfs@data.service || refuse 'filesystem growth failed or is pending'
 [[ "$(findmnt -nro TARGET /data)" == /data ]] || refuse '/data is not mounted'
 data=$(readlink -f "$(findmnt -nro SOURCE /data)")
-[[ "$(lsblk -dnro PKNAME "$data")" == "$(lsblk -dnro PKNAME "$root")" ]] || refuse '/data is not on the boot disk'
+root_parent=$(lsblk -dnro PKNAME "$root")
+[[ "$root_parent" =~ ^[a-zA-Z0-9._-]+$ && "$(lsblk -dnro PKNAME "$data")" == "$root_parent" ]] || refuse '/data is not on the boot disk'
 case "$(lsblk -dnro PARTLABEL "$data")" in data|xdata) ;; *) refuse 'wrong data partition label' ;; esac
 [[ "$(findmnt -nro FSTYPE /data)" == ext4 ]] || refuse '/data is not ext4'
 [[ ",$(findmnt -nro OPTIONS /data)," == *,rw,* ]] || refuse '/data is not writable'
