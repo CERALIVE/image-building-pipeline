@@ -109,7 +109,8 @@ Type=oneshot
 ExecStart=/usr/libexec/ceralive/ceralive-data-ready
 RemainAfterExit=yes
 UNIT
-    # Keep SSH/rescue boot available; application update owners and RAUC wait.
+    # Gate update owners without adding a hard SSH/rescue dependency.
+    # SSH still requires enablement and a successful persistent-identity guard.
     local consumer
     for consumer in ceralive-healthcheck ceralive rauc rauc-hawkbit-updater; do
       mkdir -p "/etc/systemd/system/${consumer}.service.d"

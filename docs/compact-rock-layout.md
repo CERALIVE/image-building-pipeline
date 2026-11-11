@@ -71,9 +71,21 @@ signed bundle; future larger updates need their own space checks. Legacy root
 partition sizes bypass this new gate rather than failing solely on repart.
 
 Failure or pending growth refuses mark-good and update owners, with an actionable
-journal error. SSH/rescue boot stays available. Inspect the growth and growfs
-journals, repair the cause, then reboot to retry the whole ordered sequence.
+journal error. The readiness gate adds no hard dependency from SSH or rescue,
+but this does not guarantee remote recovery. Production images disable SSH by
+default. SSH requires prior operator enablement and a successful identity/key
+guard; that guard writes persistent key and authorization state on `/data`.
+A read-only `/data` can therefore prevent SSH startup even when SSH was enabled.
+Preserving an operator's enablement choice across slots does not remove these
+identity and storage prerequisites.
+
+Arrange verified local console or bootable rescue-media access before installation;
+do not rely on SSH as the only recovery path. Use that access when SSH is disabled
+or its guard cannot complete. Inspect the partition-growth and growfs journals,
+repair the disk/filesystem cause, then reboot to retry the whole ordered sequence.
 A successful partition operation alone cannot certify filesystem growth.
+Failed-growth recovery and interrupted GPT/ext4 growth still require physical
+hardware qualification.
 
 ## Payload prerequisites and remaining qualification
 
