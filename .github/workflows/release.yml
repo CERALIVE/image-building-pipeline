@@ -242,7 +242,7 @@ jobs:
           mapfile -t bundles < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raucb')
           (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
           raw_bytes="$(stat -c %s "${raws[0]}")"
-          tests/preflash-verify.sh \
+          BOARD_ID="${CERALIVE_RELEASE_BOARD}" tests/preflash-verify.sh \
             --image "${raws[0]}" \
             --bundle "${bundles[0]}" \
             --board "${CERALIVE_RELEASE_BOARD}" \

@@ -109,14 +109,15 @@ INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${PIPELINE_DIR}/mkosi/platform/boot/install-
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
 source "${HERE}/shared/layout.sh"
-ROOTFS_MB="$(ceralive_rootfs_mb)" #
-DATA_FLOOR_MB="$(ceralive_data_floor_mb)" #
 GPT_TAIL_MB=1
-AB_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB * 2 + DATA_FLOOR_MB + GPT_TAIL_MB ))
-SINGLE_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB + DATA_FLOOR_MB + GPT_TAIL_MB ))
-DEFAULT_TOTAL_MB=14800
-[[ "${BOARD_ID:-}" != rock-5b-plus ]] || DEFAULT_TOTAL_MB="${AB_MIN_TOTAL_MB}"
-#   # conservative usable capacity of the smallest 16 GB target
+configure_layout() {
+  ROOTFS_MB="$(ceralive_rootfs_mb)"
+  DATA_FLOOR_MB="$(ceralive_data_floor_mb)"
+  AB_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB * 2 + DATA_FLOOR_MB + GPT_TAIL_MB ))
+  SINGLE_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB + DATA_FLOOR_MB + GPT_TAIL_MB ))
+  DEFAULT_TOTAL_MB=14800
+  [[ "${BOARD_ID:-}" != rock-5b-plus ]] || DEFAULT_TOTAL_MB="${AB_MIN_TOTAL_MB}"
+}
 SINGLESLOT_TOTAL_MB=8192 #  8 GiB reference medium for single-slot verify
 
 SECTOR=512
@@ -301,7 +302,7 @@ main() {
   local mode="${1:-}"; shift || true
   case "${mode}" in
     build)
-      local output="" total_mb="${DEFAULT_TOTAL_MB}" do_format="true"
+      local output="" total_mb="" do_format="true"
       local single_slot="${SINGLE_SLOT_FALLBACK:-false}"
       # Bootloader gap-write inputs default to the orchestrator-forwarded env
       # (resolve.sh → manifest): adapter family-gates the write, board selects the
@@ -326,6 +327,9 @@ main() {
           *) die "unknown build argument: $1" ;;
         esac
       done
+      export BOARD_ID="${board_id}"
+      configure_layout
+      total_mb="${total_mb:-${DEFAULT_TOTAL_MB}}"
       [[ -n "${output}" ]] || die "build: --output <img> is required"
       [[ "${single_slot}" == "true" || "${single_slot}" == "false" ]] \
         || die "SINGLE_SLOT_FALLBACK must be true|false (got '${single_slot}')"
@@ -341,6 +345,7 @@ main() {
       sgdisk --print "${output}" 2>/dev/null | sed -n '/Number/,$p'
       ;;
     verify)
+      configure_layout
       verify_contract
       ;;
     -h|--help|"")

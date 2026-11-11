@@ -54,6 +54,7 @@ source "${PIPELINE_DIR}/lib/rauc-bundle-inspect.sh"
 # shellcheck source=ci/board-identity.sh
 source "${PIPELINE_DIR}/ci/board-identity.sh"
 source "${PIPELINE_DIR}/lib/shared/slot-reserve.sh"
+source "${PIPELINE_DIR}/lib/shared/layout.sh"
 IMAGES_DIR="${IMAGES_DIR:-${PIPELINE_DIR}/images}"
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,11 @@ newest_artifact() {
 }
 
 check_gpt_geometry() {
+  local BOARD_ID="${2:-${BOARD_ID:-}}" ROOTFS_SIZE ROOTFS_B_START DATA_START DATA_MIN_SIZE
+  ROOTFS_SIZE=$(( $(ceralive_rootfs_mb) * 2048 ))
+  ROOTFS_B_START=$(( ROOTFS_A_START + ROOTFS_SIZE ))
+  DATA_START=$(( ROOTFS_B_START + ROOTFS_SIZE ))
+  DATA_MIN_SIZE=$(( $(ceralive_data_floor_mb) * 2048 ))
   local img="$1"
   require_tool sgdisk || { fail "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"; return; }
   local labels count verify_out
@@ -120,7 +126,7 @@ check_gpt_geometry() {
       && [[ "${p1_start}" == "${BOOT_START}" && "${p1_size}" == "${BOOT_SIZE}" ]] \
       && [[ "${p2_start}" == "${ROOTFS_A_START}" && "${p2_size}" == "${ROOTFS_SIZE}" ]] \
       && [[ "${p3_start}" == "${ROOTFS_B_START}" && "${p3_size}" == "${ROOTFS_SIZE}" ]] \
-      && [[ "${p4_start}" == "${DATA_START}" && "${p4_size}" -ge 4194304 ]] \
+      && [[ "${p4_start}" == "${DATA_START}" && "${p4_size}" -ge "${DATA_MIN_SIZE}" ]] \
       && [[ "${p4_last}" -eq "${expected_last}" && "${p4_size}" -eq $((expected_last - DATA_START + 1)) ]]; then
     pass "GPT geometry: exact A/B starts/sizes and unique labels"
     info "partitions (${count}): ${norm}"
@@ -693,7 +699,7 @@ run_gate() {
   [[ -f "${raw}" ]]    || { fail "image present: ${raw}"; }
   [[ -f "${bundle}" ]] || { fail "bundle present: ${bundle}"; }
   if [[ -f "${raw}" ]]; then
-    check_gpt_geometry "${raw}"
+    check_gpt_geometry "${raw}" "${board}"
     check_gap_magic    "${raw}"
     check_second_stage_fit "${raw}"
     check_boot_partition "${raw}" "${boot_off}"
