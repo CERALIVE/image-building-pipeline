@@ -30,7 +30,8 @@ for scenario in compact-ab legacy-ab compact-single bench-ab; do
     label=$(sed -n "s/Partition name: '\(.*\)'/\1/p" <<<"$info")
     type=$(sed -n 's/Partition GUID code: \([^ ]*\).*/\1/p' <<<"$info")
     sectors=$(awk '/Partition size:/{print $3}' <<<"$info")
-    printf 'part %s %s %s %s\n' "$label" "$type" "$((sectors * 512))" "$n" >>"$dir/table"
+    first=$(awk '/First sector:/{print $3}' <<<"$info")
+    printf 'part %s %s %s %s %s\n' "$label" "$type" "$((sectors * 512))" "$n" "$first" >>"$dir/table"
     if (( n < count )); then printf '%s\n' "$info" >"$dir/before$n"; fi
   done
   grow_data_definitions "$dir/defs" "${prefix}data" <"$dir/table"
@@ -52,12 +53,14 @@ for scenario in compact-ab legacy-ab compact-single bench-ab; do
   echo "$scenario: target257 data fills disk, boot/roots unchanged, repeat idempotent"
 done
 # Unknown, missing, duplicated or reordered partitions must not reach repart.
-for bad in missing duplicate reordered type; do
+for bad in missing duplicate reordered physical-reordered overlap type; do
   mkdir "$work/$bad"
   case "$bad" in
     missing) sed '/ data /d' "$work/compact-ab/table" ;;
     duplicate) cat "$work/compact-ab/table"; tail -1 "$work/compact-ab/table" ;;
     reordered) tac "$work/compact-ab/table" ;;
+    physical-reordered) awk '$5 == 3 {$6=11567104} $5 == 4 {$6=5799936} {print}' "$work/compact-ab/table" ;;
+    overlap) awk '$5 == 4 {$6-=8} {print}' "$work/compact-ab/table" ;;
     type) sed 's/0FC63DAF-8483-4772-8E79-3D69D8477DE4/00000000-0000-0000-0000-000000000000/g' "$work/compact-ab/table" ;;
   esac >"$work/$bad/table"
   if grow_data_definitions "$work/$bad" data <"$work/$bad/table"; then echo "accepted invalid $bad table"; exit 1; fi

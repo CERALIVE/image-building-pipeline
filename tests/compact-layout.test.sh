@@ -41,7 +41,8 @@ for n in 1 2 3 4; do
   label=$(sed -n "s/Partition name: '\(.*\)'/\1/p" <<<"$info")
   type=$(sed -n 's/Partition GUID code: \([^ ]*\).*/\1/p' <<<"$info")
   sectors=$(awk '/Partition size:/{print $3}' <<<"$info")
-  printf 'part %s %s %s %s\n' "$label" "$type" "$((sectors * 512))" "$n" >>"$work/table"
+  first=$(awk '/First sector:/{print $3}' <<<"$info")
+  printf 'part %s %s %s %s %s\n' "$label" "$type" "$((sectors * 512))" "$n" "$first" >>"$work/table"
   if (( n < 4 )); then printf '%s\n' "$info" >"$work/before$n"; fi
 done
 grow_data_definitions "$work/defs" data <"$work/table"

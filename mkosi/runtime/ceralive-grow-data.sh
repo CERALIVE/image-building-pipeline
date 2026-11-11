@@ -2,19 +2,24 @@
 # systemd 257 matches repart definitions by type and order, not Label.
 set -euo pipefail
 
-# Input: lsblk --bytes --raw --paths --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN (sorted by PARTN).
+# Input: lsblk --bytes --raw --paths --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START (sorted by PARTN).
 # Validate the entire known layout before permitting any disk mutation. Generate
 # one ordered definition per existing partition; never invent a missing B slot.
 grow_data_definitions() {
-  local dest="$1" data_label="$2" prefix kind label type bytes number index=0 names=""
+  local dest="$1" data_label="$2" prefix kind label type bytes number start extra previous_end=0 index=0 names=""
   case "$data_label" in data) prefix="" ;; xdata) prefix=x ;; *) return 1 ;; esac
   local generic=0fc63daf-8483-4772-8e79-3d69d8477de4
   local boot=bc13c2ff-59e6-4262-a352-b275fd6f7172 expected_type conf
-  while read -r kind label type bytes number; do
+  while read -r kind label type bytes number start extra; do
     [[ "$kind" != disk ]] || continue
     [[ "$kind" == part && "$bytes" =~ ^[0-9]+$ && "$number" =~ ^[0-9]+$ ]] || return 1
+    [[ "$start" =~ ^[1-9][0-9]{0,15}$ && -z "$extra" ]] || return 1
     (( number == index + 1 )) || return 1
     (( bytes >= 268435456 && bytes % 4096 == 0 )) || return 1
+    # START is always in 512-byte sectors, including on 4K-sector devices.
+    # Partition numbers alone cannot establish physical order or non-overlap.
+    (( start >= previous_end )) || return 1
+    previous_end=$((start + bytes / 512))
     expected_type="$generic"
     case "$label" in
       "${prefix}boot") expected_type="$boot"; [[ "$bytes" == 268435456 ]] || return 1 ;;
@@ -51,7 +56,7 @@ grow_data_main() {
   [[ "$parent" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
   disk="/dev/$parent"
   grow_data_is_block_device "$disk" || return 1
-  table="$(lsblk --bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN "$disk")"
+  table="$(lsblk --bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START "$disk")"
   GROW_DATA_DEFS="$(mktemp -d /run/ceralive-grow-data.XXXXXX)"
   trap 'rm -rf -- "$GROW_DATA_DEFS"' EXIT
   grow_data_definitions "$GROW_DATA_DEFS" "$data_label" <<<"$table" || {

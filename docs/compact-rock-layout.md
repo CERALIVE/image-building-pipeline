@@ -24,7 +24,9 @@ are applied; a layout-only build may correctly fail the reserve gate.
 Before local mounts, ceralive-grow-data.service runs the installed growth helper
 on the booted root's backing disk. It validates the entire existing partition
 sequence and types: boot, root A, optional root B, final data (also allowing the
-explicit bench labels). Unknown, missing, duplicate or reordered partitions are
+explicit bench labels). Start offsets and sizes must also prove that physical
+ranges follow that sequence without overlap; partition numbers alone do not
+establish physical order. Unknown, missing, duplicate or reordered partitions are
 refused before invoking repart. Definitions are generated in /run in the same
 order, with boot/root minimum and maximum equal to their actual current sizes.
 Only data has no maximum. No Format, CopyFiles or Label is emitted: existing

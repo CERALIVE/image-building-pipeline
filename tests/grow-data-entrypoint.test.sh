@@ -27,19 +27,29 @@ lsblk() {
       if [[ "$scenario" == wrong-root ]]; then echo data; else echo "${prefix}rootfs_${slot}"; fi ;;
     '-dnro PKNAME /dev/mockdisk0p'[23])
       if [[ "$scenario" == wrong-parent ]]; then echo ../other-disk; else echo mockdisk0; fi ;;
-    '--bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN /dev/mockdisk0')
+    '--bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START /dev/mockdisk0')
       [[ "$scenario" != inventory-fail ]] || return 1
       echo 'disk    20000000000'
-      echo "part ${prefix}boot bc13c2ff-59e6-4262-a352-b275fd6f7172 268435456 1"
-      echo "part ${prefix}rootfs_a 0fc63daf-8483-4772-8e79-3d69d8477de4 $root_bytes 2"
+      echo "part ${prefix}boot bc13c2ff-59e6-4262-a352-b275fd6f7172 268435456 1 32768"
+      echo "part ${prefix}rootfs_a 0fc63daf-8483-4772-8e79-3d69d8477de4 $root_bytes 2 557056"
+      b_start=$((557056 + root_bytes / 512))
+      data_start=$((b_start + root_bytes / 512))
+      [[ "$scenario" != single-a ]] || data_start=$b_start
+      case "$scenario" in
+        physical-reordered) b_start=$((data_start + 524288)); data_start=$((557056 + root_bytes / 512)) ;;
+        overlap) data_start=$((data_start - 8)) ;;
+        same-start) data_start=$b_start ;;
+        invalid-start) data_start=unknown ;;
+        missing-start) data_start="" ;;
+      esac
       if [[ "$scenario" != single-a ]]; then
-        echo "part ${prefix}rootfs_b 0fc63daf-8483-4772-8e79-3d69d8477de4 $root_bytes 3"
+        echo "part ${prefix}rootfs_b 0fc63daf-8483-4772-8e79-3d69d8477de4 $root_bytes 3 $b_start"
       fi
       [[ "$scenario" != missing-data ]] || return 0
       n=4; [[ "$scenario" != single-a ]] || n=3
       label="${prefix}data"; [[ "$scenario" != malformed ]] || label=unknown
-      echo "part $label 0fc63daf-8483-4772-8e79-3d69d8477de4 268435456 $n"
-      [[ "$scenario" != duplicate ]] || echo "part $label 0fc63daf-8483-4772-8e79-3d69d8477de4 268435456 5" ;;
+      echo "part $label 0fc63daf-8483-4772-8e79-3d69d8477de4 268435456 $n $data_start"
+      [[ "$scenario" != duplicate ]] || echo "part $label 0fc63daf-8483-4772-8e79-3d69d8477de4 268435456 5 $((data_start + 524288))" ;;
     *) echo "unexpected lsblk invocation: $*" >&2; return 1 ;;
   esac
 }
@@ -63,7 +73,7 @@ for scenario in root-a root-b bench-a bench-b legacy-a legacy-b single-a; do
   [[ -z "$(find "$GROW_TEST_WORK" -maxdepth 1 -name 'run.*' -print)" ]] # EXIT cleanup ran
   echo "$scenario entrypoint targets only its backing disk with ordered fixed-root definitions"
 done
-for scenario in nonblock wrong-root wrong-parent findmnt-fail inventory-fail missing-data malformed duplicate; do
+for scenario in nonblock wrong-root wrong-parent findmnt-fail inventory-fail missing-data malformed duplicate physical-reordered overlap same-start invalid-start missing-start; do
   GROW_TEST_WORK="$work/$scenario"; export GROW_TEST_WORK; mkdir "$GROW_TEST_WORK"
   if bash "$work/harness" "$scenario"; then echo "accepted $scenario"; exit 1; fi
   [[ ! -e "$GROW_TEST_WORK/invoked" ]]
