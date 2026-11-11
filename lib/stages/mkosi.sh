@@ -195,7 +195,7 @@ generate_prune_local_conf() {
   local out
   out="$(prune_local_conf_path)"
   local csv
-  csv="$(prune_paths_csv)"
+  csv="$(prune_paths_csv)" || return $?
   [[ ! -e "${out}" && ! -L "${out}" ]] || die "mkosi local config already exists: ${out}"
   PRUNE_CONF_TEMP="$(mktemp "${out}.XXXXXX")"
   {

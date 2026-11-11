@@ -96,6 +96,14 @@ grep -qxF '[Content]' "${GENERATED}" || fail "Part B: generated file missing [Co
 grep -qxF "RemoveFiles=${expected_csv}" "${GENERATED}" \
   || fail "Part B: generated file's RemoveFiles= does not match the manifest CSV.\n$(cat "${GENERATED}")"
 
+# A missing policy must not produce a successful empty RemoveFiles config.
+rm -- "${GENERATED}"
+if CERALIVE_PRUNE_PATHS_MANIFEST="${WORK}/missing" generate_prune_local_conf; then
+  fail "Part B: missing policy reported success"
+fi
+[[ ! -e "${GENERATED}" ]] || fail "Part B: missing policy wrote a config"
+CERALIVE_PRUNE_PATHS_MANIFEST="${FIXTURE}" generate_prune_local_conf >/dev/null 2>&1 || fail "Part B: fixture restore failed"
+
 echo "prune-paths-removefiles: Part B OK (real generate_prune_local_conf() writes a valid mkosi.local.conf)"
 
 FIXTURE2="${WORK}/fixture2.list"
