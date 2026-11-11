@@ -7,6 +7,7 @@
 SLOT_IMAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/shared/slot-reserve.sh
 source "${SLOT_IMAGE_DIR}/../shared/slot-reserve.sh"
+source "${SLOT_IMAGE_DIR}/../shared/layout.sh"
 
 det_uuid() {
   local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
@@ -54,7 +55,7 @@ make_slot_image() {
   [[ -d "${tree}" ]] || { printf 'rootfs tree not found: %s\n' "${tree}" >&2; return 1; }
   [[ -n "${label}" ]] || { printf 'empty slot image label\n' >&2; return 1; }
   uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-${label}")"
-  truncate -s $((4096 * 1024 * 1024)) "${out}"
+  truncate -s $(($(ceralive_rootfs_mb) * 1024 * 1024)) "${out}"
   if tar -C "${tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4
     # Older mke2fs ignores SOURCE_DATE_EPOCH but honors its own clock override.
@@ -89,5 +90,5 @@ make_slot_image() {
     printf 'populated %s fails ext4 available-byte/inode reserve\n' "${label}" >&2
     return 1
   }
-  [[ "$(stat -c '%s' "${out}")" == "$((4096 * 1024 * 1024))" ]]
+  [[ "$(stat -c '%s' "${out}")" == "$(($(ceralive_rootfs_mb) * 1024 * 1024))" ]]
 }

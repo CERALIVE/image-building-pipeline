@@ -142,8 +142,8 @@ build-bundle() {
   content="$(mktemp -d "${out_dir}/.bundle-content.XXXXXX")"
   trap 'rm -rf "${content}"' RETURN
   out="${out_dir}/${ts}.raucb"
-  SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4" \
-    || die "failed to make 4096 MiB ext4 rootfs slot image"
+  BOARD_ID="${board}" SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4" \
+    || die "failed to make ext4 rootfs slot image"
   write_manifest "${content}/manifest.raucm" "${compatible}" "${version}"
   bundle_with_rauc "${content}" "${out}"
   ( cd "${out_dir}" && sha256sum "$(basename "${out}")" >"$(basename "${out}").sha256" )

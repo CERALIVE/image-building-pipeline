@@ -108,12 +108,15 @@ INSTALL_BOOT_SH="${INSTALL_BOOT_SH:-${PIPELINE_DIR}/mkosi/platform/boot/install-
 
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
-ROOTFS_MB=4096
-DATA_FLOOR_MB=2048
+source "${HERE}/shared/layout.sh"
+ROOTFS_MB="$(ceralive_rootfs_mb)" #
+DATA_FLOOR_MB="$(ceralive_data_floor_mb)" #
 GPT_TAIL_MB=1
 AB_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB * 2 + DATA_FLOOR_MB + GPT_TAIL_MB ))
 SINGLE_MIN_TOTAL_MB=$(( GAP_MB + BOOT_MB + ROOTFS_MB + DATA_FLOOR_MB + GPT_TAIL_MB ))
-DEFAULT_TOTAL_MB=14800   # conservative usable capacity of the smallest 16 GB target
+DEFAULT_TOTAL_MB=14800
+[[ "${BOARD_ID:-}" != rock-5b-plus ]] || DEFAULT_TOTAL_MB="${AB_MIN_TOTAL_MB}"
+#   # conservative usable capacity of the smallest 16 GB target
 SINGLESLOT_TOTAL_MB=8192 #  8 GiB reference medium for single-slot verify
 
 SECTOR=512

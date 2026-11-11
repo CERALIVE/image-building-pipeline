@@ -34,6 +34,12 @@ stage_repart_dir() {
     else
       cp "${f}" "${dest}/"
     fi
+    if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
+      case "$(basename "${f}")" in
+        *rootfs*) sed -i 's/=4096M/=2560M/g' "${dest}/$(basename "${f}")" ;;
+        *data*) sed -i 's/=2048M/=256M/' "${dest}/$(basename "${f}")" ;;
+      esac
+    fi
     copied=$(( copied + 1 ))
   done
   shopt -u nullglob
