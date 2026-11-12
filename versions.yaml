@@ -114,7 +114,14 @@ CeraUI:
   # v2026.9.5: unified device update orchestrator, validated on both bench boards.
   # v2026.10.0: released update-system fixes; package installation is not image qualification.
   # v2026.11.1: refreshes a stale healthy-state record before a kernel stage.
-  pin: v2026.11.1
+  # v2026.11.2: update consent, kernel-stage failure reporting and hotspot UI fixes.
+  pin: v2026.11.2
+  # Device deb: ceralive-device 2026.11.2-20261110T235721.31b06d5 (amd64) /
+  #   2026.11.2-20261110T235725.31b06d5 (arm64); see first-party-deb-versions.txt.
+  # Tag commit: 31b06d54ff2e338805d84602a292e9dc95d8de2e.
+  # Versions confirmed against the release assets and refreshed release catalog.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.2
+  # Historical receipt for 2026.11.1 follows (not the active artifact):
   # Device deb: ceralive-device 2026.11.1-20261106T235637.77fae5e (amd64) /
   #   2026.11.1-20261106T235641.77fae5e (arm64); see first-party-deb-versions.txt.
   # Tag commit: 77fae5eb21d3e6b7125325dcbc4d1fcbe09638a4.
@@ -151,7 +158,7 @@ srtla:
   path: srtla-send-rs
   repo: https://github.com/CERALIVE/srtla-send-rs
   kind: first-party
-  pin: v4.1.0
+  pin: v4.2.0
   channel: stable
 
 # Provenance-only: the companion package version is selected exclusively by
