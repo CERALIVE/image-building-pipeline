@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.11.1's unified update orchestrator.
+channel publisher and pins stable CeraUI v2026.11.2's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -261,17 +261,17 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects stable CeraUI **v2026.11.1**
-(tag commit `77fae5eb21d3e6b7125325dcbc4d1fcbe09638a4`), published
-2026-11-06T23:58:19Z. The exact Debian versions are
-`2026.11.1-20261106T235641.77fae5e` (arm64) and
-`2026.11.1-20261106T235637.77fae5e` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.11.1`. Downloaded asset hashes match both SHA-256 sidecars
-and GitHub asset digests, and Debian control fields confirm both identities.
+The current image pin selects stable CeraUI **v2026.11.2**
+(tag commit `31b06d54ff2e338805d84602a292e9dc95d8de2e`), published
+2026-11-10T23:58:58Z. The exact Debian versions are
+`2026.11.2-20261110T235725.31b06d5` (arm64) and
+`2026.11.2-20261110T235721.31b06d5` (amd64), with repo-local provenance
+`CeraUI.pin: v2026.11.2`. Release asset names and the authenticated release
+catalog confirm these versions.
 APT serving, installation and hardware were not checked for this pin. See the
-[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-11-06).
-The committed release catalog is unchanged pending a separate final refresh
-commit after the owner decides the prerequisite PR merge order. Pinning is not
+[pin receipt](first-party-pin-currency.md#srtla-and-ceraui-pin-receipt--2026-11-12).
+The catalog refresh and owner-selected CeraUI bump accompany `srtla=4.2.0`.
+Pinning is not
 image qualification or OS stable/beta authorization; OS 2026.10.97 remains
 private-drill only and channel pointers are unchanged.
 
