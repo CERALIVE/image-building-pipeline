@@ -125,6 +125,8 @@ tests/apt-first-party-origin.test.sh	shell	integration	default-shell	real offlin
 tests/prune-paths-removefiles.test.sh	shell	integration	default-shell	single-source prune-paths.list generates a real mkosi RemoveFiles= merge (Todo 29)
 tests/reprune-hook.test.sh	shell	integration	default-shell	device reprune hook + apt cache writer, real glob/doc pruning, never fails dpkg (Todo 29)
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
+tests/app-apt-archives-clean.test.sh	shell	unit	default-shell	final rootfs ships no downloaded .deb: app-layer clean ignores the device /data cache redirect and fails on leftovers
+tests/app-build-logs-dropped.test.sh	shell	unit	default-shell	final rootfs carries no build-time apt/dpkg/alternatives logs; unrelated logs and /var/log/apt stay
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel
 tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only where an installed-module sweep proves no consumer

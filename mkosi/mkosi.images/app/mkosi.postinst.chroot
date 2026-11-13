@@ -179,11 +179,45 @@ assert_sysext_binaries() {
   log "sysext-class binaries verified present (cerastream / srtla_send where staged)"
 }
 
+# The directory the rootfs slot actually ships its downloaded .debs in. The runtime
+# layer installs shared.list into apt's DEFAULT archive directory, and only AFTER
+# that writes /etc/apt/apt.conf.d/81ceralive-cache, which sends the DEVICE's apt to
+# /data/ceralive/apt-archives/. This layer inherits that file, so a bare
+# `apt-get clean` here follows the redirect, cleans a /data directory that does not
+# exist in the build tree, exits 0 and leaves every package in the slot.
+SHIPPED_APT_ARCHIVES="${SHIPPED_APT_ARCHIVES:-/var/cache/apt/archives}"
+
+# clean_apt_archives — empty the shipped archive directory regardless of the
+# Dir::Cache::archives the image configures for the device, then fail the build if
+# any package is still there.
+clean_apt_archives() {
+  local dir="${SHIPPED_APT_ARCHIVES%/}"
+  apt-get -o "Dir::Cache::archives=${dir}/" clean
+  if compgen -G "${dir}/*.deb" >/dev/null; then
+    die "downloaded packages remain in ${dir} after apt-get clean — they would ship in the image"
+  fi
+}
+
 clean_package_download_metadata() {
   log "removing build-time apt package indexes and downloaded archives"
-  apt-get clean
+  clean_apt_archives
   rm -rf /var/lib/apt/lists/* /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
   mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial
+}
+
+# Build-time apt/dpkg transcripts. They record how the image was assembled, carry
+# build timestamps and are read by nothing on the device; /var/log there is the
+# /data/log bind, which first boot seeds once from this directory. dpkg and apt
+# recreate their logs on the first device transaction, and /var/log/apt (owned by
+# the apt package) stays as an empty directory.
+BUILD_LOG_DIR="${BUILD_LOG_DIR:-/var/log}"
+
+drop_build_package_logs() {
+  log "removing build-time apt and dpkg logs"
+  rm -f -- "${BUILD_LOG_DIR}"/dpkg.log* "${BUILD_LOG_DIR}"/alternatives.log*
+  if [[ -d "${BUILD_LOG_DIR}/apt" ]]; then
+    find "${BUILD_LOG_DIR}/apt" -mindepth 1 -delete
+  fi
 }
 
 prune_final_image_payload() {
@@ -334,6 +368,7 @@ main() {
   rm -rf "${FIRST_PARTY_DIR}"
   bash "${SRCDIR:?}/runtime/packages-lock-capture.sh" app ${SYSEXT_APP_PKGS} ${APPFS_APP_PKGS} ${RUNTIME_APP_PKGS}
   clean_package_download_metadata
+  drop_build_package_logs
   prune_final_image_payload
   remove_chroot_service_policy
 
