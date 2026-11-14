@@ -14,7 +14,10 @@ concurrency:
 
 jobs:
   real-build:
-    runs-on: [self-hosted, ceralive-image-builder]
+    if: github.repository == 'CERALIVE/image-building-pipeline' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.triggering_actor == 'andrescera'))
+    runs-on:
+      group: image-builder
+      labels: [self-hosted, ceralive-image-builder]
     timeout-minutes: 240
     env:
       DOCKER_CONTEXT: default

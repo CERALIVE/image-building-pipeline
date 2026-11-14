@@ -14,7 +14,21 @@ import yaml
 
 HOSTED = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"}
 RUNNER_FILES = {
-    "kernel-release.yml", "publish-release.yml", "real-build-audit.yml", "release.yml",
+    "kernel-release.yml", "publish-release.yml", "real-build-audit.yml",
+    "release-candidate-build.yml", "runner-admission-probe.yml",
+}
+REPOSITORY = "github.repository == 'CERALIVE/image-building-pipeline'"
+ACTOR = "github.triggering_actor == 'andrescera'"
+ADMISSION = {
+    "release-candidate-build.yml": REPOSITORY + " && github.event_name == 'push' && "
+        "(startsWith(github.ref, 'refs/heads/release/') || "
+        "startsWith(github.ref, 'refs/tags/v')) && " + ACTOR,
+    "runner-admission-probe.yml": REPOSITORY + " && "
+        "(github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && "
+        "startsWith(github.ref, 'refs/heads/probe/'))) && " + ACTOR,
+    "publish-release.yml": REPOSITORY + " && " + ACTOR,
+    "real-build-audit.yml": REPOSITORY + " && (github.event_name == 'schedule' || "
+        "(github.event_name == 'workflow_dispatch' && " + ACTOR + "))",
 }
 FORBIDDEN_EVENTS = {"pull_request_target", "workflow_run", "issue_comment"}
 MATRIX_RUNNER = re.compile(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}")
@@ -147,10 +161,38 @@ for path in files:
                     fail(location, 2, "pull_request permissions allow only contents: read "
                          "and pull-requests: read; id-token is forbidden")
         if "runs-on" in job:
+            if path.name == "release.yml":
+                fail(location, 6, "release.yml must call the master reusable build without runs-on")
             if not hosted and path.name not in RUNNER_FILES:
                 fail(location, 5, "non-hosted runner outside the workflow file allowlist")
+            if not hosted:
+                runner = job["runs-on"]
+                group = runner.get("group") if isinstance(runner, dict) else None
+                if not isinstance(group, str) or group not in {"image-builder", "kernel-release"}:
+                    fail(location, 6, "self-hosted jobs require group image-builder or kernel-release")
+                condition = job.get("if", "")
+                condition = condition if isinstance(condition, str) else ""
+                if "workflow_call" in events:
+                    allowed = re.findall(r"github\.event_name\s*==\s*'([^']+)'", condition)
+                    if (REPOSITORY not in condition or not allowed or
+                            set(allowed) - {"push", "workflow_dispatch", "schedule"} or
+                            "pull_request" in condition):
+                        fail(location, 7, "workflow_call self-hosted job requires repository "
+                             "and allowlisted event admission before runner assignment")
+                if group == "image-builder" or path.name in ADMISSION:
+                    # Exact predicates reject OR/negation bypasses as well as missing actors.
+                    expected = ADMISSION.get(path.name)
+                    predicate = condition.removeprefix("${{").removesuffix("}}").strip()
+                    if expected is None or predicate != expected:
+                        fail(location, 8, "image-builder requires owner actor and exact event/ref admission")
         elif "uses" not in job:
             fail(location, "input", "job requires runs-on or reusable workflow uses")
+        if path.name == "publish-release.yml" and name == "publish":
+            environment = job.get("environment")
+            if isinstance(environment, dict):
+                environment = environment.get("name")
+            if environment != "release":
+                fail(location, 9, "publish requires environment release")
         check_uses(job, location)
         steps = job.get("steps", [])
         if not isinstance(steps, list):

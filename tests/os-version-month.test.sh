@@ -29,7 +29,7 @@ else bad 'default clock refused the current UTC month'; fi
 python3 - "${ROOT}" <<'PY' && ok 'build and publish run the month guard' || bad 'workflows are not wired to the month guard'
 import pathlib, sys, yaml
 root = pathlib.Path(sys.argv[1])
-release = yaml.safe_load((root / '.github/workflows/release.yml').read_text())
+release = yaml.safe_load((root / '.github/workflows/release-candidate-build.yml').read_text())
 step = next(s for s in release['jobs']['candidate']['steps'] if s.get('name') == 'Resolve OS release version')
 assert 'ci/check-os-version-month.sh "${version}"' in step['run']
 publish = yaml.safe_load((root / '.github/workflows/publish-release.yml').read_text())

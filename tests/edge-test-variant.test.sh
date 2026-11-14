@@ -498,7 +498,7 @@ else
   ok "release guard reads CERALIVE_KERNEL_VARIANT when no flag is given"
 fi
 
-RELEASE_YML="${PIPELINE_DIR}/.github/workflows/release.yml"
+RELEASE_YML="${PIPELINE_DIR}/.github/workflows/release-candidate-build.yml"
 if grep -q 'check-release-variant.sh' "${RELEASE_YML}"; then
   ok "the release workflow runs the guard"
 else

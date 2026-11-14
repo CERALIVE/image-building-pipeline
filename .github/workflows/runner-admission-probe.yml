@@ -1,0 +1,21 @@
+name: Runner admission probe
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-admission-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.repository == 'CERALIVE/image-building-pipeline' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/probe/'))) && github.triggering_actor == 'andrescera'
+    runs-on:
+      group: image-builder
+      labels: [self-hosted, ceralive-image-builder]
+    steps:
+      - run: echo admitted
