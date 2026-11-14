@@ -2,6 +2,7 @@
 
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  export CERALIVE_HEALTHCHECK_ASSESSMENT="$BATS_TEST_TMPDIR/health-assessment"
   export CERALIVE_HEALTHCHECK_CONF="$BATS_TEST_TMPDIR/update.conf"
   export CERALIVE_HEALTHCHECK_MARKER="$BATS_TEST_TMPDIR/.slot-marked-good"
   export CERALIVE_HEALTHCHECK_BOOT_ID_FILE="$BATS_TEST_TMPDIR/boot_id"
@@ -83,7 +84,7 @@ teardown() {
 @test "broken dpkg refuses mark-good even when the current boot marker exists" {
   printf 'boot-id %s\n' "$(<"$CERALIVE_HEALTHCHECK_BOOT_ID_FILE")" > "$CERALIVE_HEALTHCHECK_MARKER"
   export TEST_DPKG_BAD=1
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
   ! grep -q mark-good "$TEST_CALLS"
@@ -91,11 +92,11 @@ teardown() {
 
 @test "pending dpkg updates or an unreadable audit refuses confirmation" {
   printf 'pending\n' > "$CERALIVE_DPKG_UPDATES_DIR/0000"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   ! grep -q mark-good "$TEST_CALLS"
   rm "$CERALIVE_DPKG_UPDATES_DIR/0000" "$DPKG_BIN"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   ! grep -q mark-good "$TEST_CALLS"
 }
@@ -115,7 +116,7 @@ teardown() {
 
   # This is the exact dpkg state seen on the Orange Pi. An explicit check must
   # still refuse it; the unit must not be stopped/restarted by ceralive's restart.
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   [[ "$output" == *'dpkg updates directory is not empty'* ]]
   ! grep -q mark-good "$TEST_CALLS"
@@ -126,7 +127,7 @@ teardown() {
 
 @test "an interrupted dpkg with no live transaction still fails closed" {
   printf 'pending\n' > "$CERALIVE_DPKG_UPDATES_DIR/0000"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   [[ "$output" == *'dpkg updates directory is not empty'* ]]
   ! grep -q mark-good "$TEST_CALLS"
@@ -135,7 +136,7 @@ teardown() {
 
 @test "dpkg audit reporting a broken package refuses mark-good and triggers recovery" {
   export TEST_DPKG_BAD=1
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   ! grep -q mark-good "$TEST_CALLS"
   run bash "$ROOT/mkosi/runtime/ceralive-dpkg-recover.sh"
@@ -147,13 +148,13 @@ teardown() {
 @test "partlabel marker refuses confirmation even on the boot marker fast path" {
   printf 'boot-id %s\n' "$(<"$CERALIVE_HEALTHCHECK_BOOT_ID_FILE")" > "$CERALIVE_HEALTHCHECK_MARKER"
   touch "$CERALIVE_PARTLABEL_FAILURE"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   ! grep -q mark-good "$TEST_CALLS"
 }
 
 @test "healthy record follows mark-good with boot slot build and status hash" {
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   python3 - "$CERALIVE_HEALTHY_STATE_FILE" "$CERALIVE_DPKG_STATUS_FILE" "$CERALIVE_HEALTHCHECK_BOOT_ID_FILE" <<'PY'
 import hashlib, json, pathlib, sys
@@ -171,7 +172,7 @@ PY
   printf 'VERSION_ID=13\n' > "$CERALIVE_OS_RELEASE_FILE"
   export CERALIVE_IMAGE_VERSION_FILE="$BATS_TEST_TMPDIR/image-build-commit"
   printf 'd92a84b8284541bc34bf0118662fad769bd80466\n' > "$CERALIVE_IMAGE_VERSION_FILE"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   grep -Fq '"build_id":"d92a84b8284541bc34bf0118662fad769bd80466"' "$CERALIVE_HEALTHY_STATE_FILE"
   grep -Fq '/etc/ceralive/image-build-commit' "$ROOT/mkosi/runtime/ceralive-slot-sync.sh"
@@ -179,23 +180,23 @@ PY
 
 @test "failed mark-good never writes healthy state" {
   export TEST_RAUC_FAIL=1
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
 }
 
 @test "debug force-fail requires BOTH markers; either marker alone is inert" {
   touch "$CERALIVE_FORCE_HEALTHCHECK_FAIL"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   rm "$CERALIVE_FORCE_HEALTHCHECK_FAIL" "$CERALIVE_HEALTHCHECK_MARKER"
   touch "$CERALIVE_DEBUG_MARKER"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   rm "$CERALIVE_HEALTHCHECK_MARKER"
   touch "$CERALIVE_FORCE_HEALTHCHECK_FAIL"
   : > "$TEST_CALLS"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   ! grep -q mark-good "$TEST_CALLS"
 }
@@ -203,7 +204,7 @@ PY
 @test "debug marker honors the /etc testing hook before an already-good fast path" {
   touch "$CERALIVE_DEBUG_MARKER" "$CERALIVE_FORCE_HEALTHCHECK_FAIL"
   printf 'boot-id %s\n' "$(<"$CERALIVE_HEALTHCHECK_BOOT_ID_FILE")" > "$CERALIVE_HEALTHCHECK_MARKER"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   [[ "$output" == *'debug-image healthcheck failure injection armed'* ]]
   ! grep -q mark-good "$TEST_CALLS"
@@ -211,7 +212,7 @@ PY
 
 @test "without debug marker the same /etc testing hook is inert" {
   touch "$CERALIVE_FORCE_HEALTHCHECK_FAIL"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   [[ "$output" != *'healthcheck failure injection armed'* ]]
   grep -Fxq 'mark-good B' "$TEST_CALLS"
@@ -264,7 +265,7 @@ PY
 }
 
 @test "stale Rock marker cannot skip checks or leave current B budget exhausted" {
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   grep -Fxq check-service "$TEST_CALLS"
   grep -Fxq check-encoder "$TEST_CALLS"
@@ -275,7 +276,7 @@ PY
 
 @test "stale marker cannot confirm a dead encoder" {
   export TEST_ENCODER_FAIL=1
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
@@ -284,33 +285,33 @@ PY
 
 @test "stale marker cannot confirm an inactive control service" {
   export TEST_SERVICE_FAIL=1
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
 }
 
 @test "same boot is idempotent but a later boot of the same slot verifies again" {
-  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  assess_boot
   : > "$TEST_CALLS"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   ! grep -qE 'check-service|mark-good' "$TEST_CALLS"
   printf '2d7b1750-d034-4d34-91e3-a1d4c7a71257\n' > "$CERALIVE_HEALTHCHECK_BOOT_ID_FILE"
   bash "$TEST_STATE_HELPER" set-state B bad
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   grep -Fxq check-encoder "$TEST_CALLS"
   grep -Fxq BOOT_B_LEFT=3 "$CERALIVE_BOOT_STATE_FILE"
 }
 
 @test "a previous B boot cannot confirm a later A boot" {
-  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  assess_boot
   export TEST_SLOT=A
   printf '2d7b1750-d034-4d34-91e3-a1d4c7a71257\n' > "$CERALIVE_HEALTHCHECK_BOOT_ID_FILE"
   bash "$TEST_STATE_HELPER" set-state A bad
   : > "$TEST_CALLS"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -eq 0 ]
   grep -Fxq 'mark-good A' "$TEST_CALLS"
   grep -Fxq BOOT_A_LEFT=3 "$CERALIVE_BOOT_STATE_FILE"
@@ -318,14 +319,14 @@ PY
 
 @test "a refused RAUC mark-good never refreshes the old marker" {
   export TEST_RAUC_FAIL=1
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   [ "$(cat "$CERALIVE_HEALTHCHECK_MARKER")" = 'marked-good 2026-07-19T17:06:10Z' ]
 }
 
 @test "unreadable boot identity cannot treat a persistent marker as current" {
   rm "$CERALIVE_HEALTHCHECK_BOOT_ID_FILE"
-  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  run assess_boot
   [ "$status" -ne 0 ]
   run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
@@ -350,5 +351,127 @@ PY
   grep -Fxq '    disable_service rauc-hawkbit-updater.service' "$postinst"
   grep -Fxq '    mask_service rauc-hawkbit-updater.service' "$postinst"
   run grep -F 'enable_service rauc-hawkbit-updater.service' "$postinst"
+  [ "$status" -eq 1 ]
+}
+
+# Replay systemd's health -> boot-complete -> confirmation sequence.
+assess_boot() {
+  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" &&
+    bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+}
+
+@test "health verdict does not confirm the slot before boot completion" {
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -eq 0 ]
+  run grep -q mark-good "$TEST_CALLS"
+  [ "$status" -ne 0 ]
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -eq 0 ]
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
+}
+
+@test "boot assessment requires health and confirms only after boot-complete" {
+  local health="$ROOT/mkosi/runtime/ceralive-healthcheck.service"
+  local confirm="$ROOT/mkosi/runtime/ceralive-mark-good.service"
+  grep -Fxq 'Before=boot-complete.target' "$health"
+  grep -Fxq 'RequiredBy=boot-complete.target' "$health"
+  grep -Fxq 'Requires=boot-complete.target' "$confirm"
+  grep -Fxq 'After=boot-complete.target' "$confirm"
+  grep -Fxq 'WantedBy=multi-user.target' "$confirm"
+  grep -Fxq 'ExecStart=/usr/local/bin/ceralive-healthcheck.sh --mark-good' "$confirm"
+  local consumer
+  for consumer in ceralive-slot-sync ceralive-boot-script-sync; do
+    grep -Fxq 'Requires=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+    grep -Fxq 'After=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+  done
+  grep -Fq 'enable_service ceralive-mark-good.service' "$ROOT/mkosi/customize/postinst.d/services.sh"
+}
+
+@test "systemd verifies the enabled boot assessment graph and both ordering edges" {
+  command -v systemd-analyze >/dev/null
+  local root="$BATS_TEST_TMPDIR/root" units
+  units="$root/etc/systemd/system"
+  mkdir -p "$units" "$root/usr/local/bin" "$root/usr/bin"
+  cp "$ROOT/mkosi/runtime/ceralive-"{healthcheck,mark-good}.service "$units/"
+  cp /usr/lib/systemd/system/boot-complete.target "$units/"
+  local name
+  for name in basic.target sysinit.target shutdown.target multi-user.target; do
+    printf '[Unit]\nDescription=Fixture target\n' > "$units/$name"
+  done
+  for name in ceralive NetworkManager; do
+    printf '[Service]\nExecStart=/usr/bin/true\n' > "$units/$name.service"
+  done
+  touch "$root/usr/local/bin/ceralive-healthcheck.sh" "$root/usr/bin/true"
+  chmod +x "$root/usr/local/bin/ceralive-healthcheck.sh" "$root/usr/bin/true"
+  systemctl --root="$root" enable ceralive-healthcheck.service ceralive-mark-good.service
+  [ -L "$units/boot-complete.target.requires/ceralive-healthcheck.service" ]
+  [ -L "$units/multi-user.target.wants/ceralive-mark-good.service" ]
+  run systemd-analyze --man=no --root="$root" verify multi-user.target ceralive-mark-good.service
+  [ "$status" -eq 0 ]
+  # An inverse edge must close a cycle: proves the edges are in the loaded graph.
+  local edge
+  for edge in 'boot-complete.target ceralive-healthcheck.service' 'ceralive-mark-good.service boot-complete.target'; do
+    read -r later earlier <<< "$edge"
+    printf '[Unit]\nDescription=Ordering probe\nAfter=%s\nBefore=%s\n[Service]\nExecStart=/usr/bin/true\n' "$later" "$earlier" > "$units/probe.service"
+    run systemd-analyze --man=no --root="$root" verify multi-user.target probe.service
+    [[ "$output" == *'ordering cycle'* ]]
+  done
+}
+
+replay_hostname_retry() {
+  local original="$SYSTEMCTL_BIN"
+  export TEST_HEALTH_SYSTEMCTL="$original" TEST_HEALTH_SCRIPT="$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  local ctl="$BATS_TEST_TMPDIR/hostname-systemctl"
+  cat > "$ctl" <<'SH'
+#!/bin/bash
+case "$*" in
+  'is-active --quiet '*) exec "$TEST_HEALTH_SYSTEMCTL" "$@" ;;
+  '--no-block restart '*) bash "$TEST_HEALTH_SCRIPT" ;;
+  '--no-block start ceralive-mark-good.service') bash "$TEST_HEALTH_SCRIPT" --mark-good ;;
+  *) exit 90 ;;
+esac
+SH
+  chmod +x "$ctl"
+  eval "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$ROOT/mkosi/customize/postinst.d/hostname.sh")"
+  local -a CONSUMER_UNITS=(ceralive-healthcheck.service)
+  SYSTEMCTL_BIN="$ctl" restart_identity_consumers
+}
+
+@test "hostname retry confirms a slot when the failed first assessment recovers" {
+  TEST_SERVICE_FAIL=1 run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  run replay_hostname_retry
+  [ "$status" -eq 0 ]
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
+}
+
+@test "hostname retry leaves the slot unconfirmed when assessment fails again" {
+  export TEST_SERVICE_FAIL=1
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  run replay_hostname_retry
+  run grep -q mark-good "$TEST_CALLS"
+  [ "$status" -eq 1 ]
+}
+
+@test "confirmation requires a successful assessment for this boot" {
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+  run grep -q mark-good "$TEST_CALLS"
+  [ "$status" -eq 1 ]
+  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  printf '2d7b1750-d034-4d34-91e3-a1d4c7a71257\n' > "$CERALIVE_HEALTHCHECK_BOOT_ID_FILE"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+}
+
+@test "a failed reassessment invalidates an earlier successful verdict" {
+  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  TEST_SERVICE_FAIL=1 run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+  run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
 }

@@ -1,5 +1,5 @@
 [Unit]
-Description=CeraLive boot healthcheck — confirm streaming health then RAUC mark-good
+Description=CeraLive boot healthcheck — assess streaming health before boot completion
 Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 # Real streaming-stack health gate for A/B rollback (task 29): only a slot that
 # PROVES it can stream gets `rauc mark-good`. A boots-but-can't-encode slot is left
@@ -13,6 +13,7 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 Wants=ceralive.service
 After=ceralive.service NetworkManager.service
 Wants=NetworkManager.service
+Before=boot-complete.target
 # The script scopes idempotency to kernel boot_id. A persistent-path condition
 # would skip new-slot AND ordinary same-slot boots while their attempt budget falls.
 
@@ -25,3 +26,4 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=boot-complete.target
