@@ -1403,7 +1403,9 @@ architectures and these architecture-qualified `ceralive-device` rows:
 across timeouts (engine PRs #199–#201), fencing replacement capture until release
 completes. Both architecture assets were independently checksum-verified; see the
 [`engine pin receipt`](../first-party-pin-currency.md#engine-pin-receipt--2026-09-21).
-The HDMI-RX profile floor remains removed; this pin does not qualify restoring it.
+This pin does not qualify restoring the HDMI-RX profile floor. The draft
+Pro Audio proposal below changes the branch configuration only; it does not
+supersede this integration restriction.
 The retained `2026.9.5` fixes repair composition disable (an explicit `change-config.composition:
 null` clears composition transactionally) and the switching allocation guard (the
 allocation router no longer compares `framerate`, so a capture cadence that
@@ -4912,7 +4914,7 @@ ordering from both sides, fail-closed missing/partial sources, and the
 `configure_services` + drift-gate wiring) plus the retargeted BT-policy case in the
 same file and in `tests/mkosi-image-contract.bats`.
 
-**The HDMI-RX profile rule may name `input:stereo-fallback` and NOTHING ELSE — the
+**Integration gate: the HDMI-RX profile rule may name `input:stereo-fallback` and NOTHING ELSE — the
 `pro-audio` floor published a node that can never start, and the engine leaked one
 whole capture pipeline every 30 s against it** [EXISTS — board-measured 2026-09-20]
 
@@ -6200,3 +6202,16 @@ against synthetic fixtures, and the inventory above was read off a real board.
 The 2026-09-15 Rock RGA candidate booted with the unit, but that receipt does not
 record heartbeat blink or card-activity flicker. Those visual checks remain
 separate from kernel-pin acceptance; no fleet release is inferred.
+
+## HDMI receiver default profile
+
+This draft branch selects Pro Audio. It is not qualified for integration and
+does not supersede the historical restriction above: an idle receiver with no
+source previously caused an engine exit after about 66 minutes. The current
+engine pin is not evidence that this is fixed. Before merging, identify the
+engine fix, enforce its minimum engine version or pin floor, and complete a
+no-source soak of at least 3 hours with descriptor and thread counts. Verify
+late-source capture, saved selections after upgrade and received audio/video
+sync as well. The base already nested priorities in `actions.update-props`;
+this proposal changes the profile, not that structure. No signal polling
+service is installed. See [policy and acceptance](../hdmirx-audio.md).
