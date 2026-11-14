@@ -1212,8 +1212,15 @@ files and policy instead of Ubuntu's older `rauc`/`rauc-service` pair. It fails
 on a version mismatch, provisions the non-root `ceralive-ota` fixture account,
 starts a system D-Bus, reloads its installed policy, and
 then invokes the real RAUC contract; the harness requires its normal system-bus service
-name and does not replace that check with a session bus or a skipped test. The
-real harness's GPT loop detach can prompt udev to delete the last
+name and does not replace that check with a session bus or a skipped test.
+The GPT fixture waits for block nodes and settles udev's queued metadata changes
+after formatting, before asserting `lsblk PARTLABEL`; node existence alone does
+not mean the udev database is ready. The settle has a ten-second deadline and a
+timeout still fails the contract. An inherited ERR trap prints the failed command,
+line and status, and the exit trap includes the GPT service/client stderr logs.
+The rootless transition contract injects pending metadata, a settle timeout and a
+wrong label, and checks failure diagnostics without starting privileged tools.
+The real harness's GPT loop detach can prompt udev to delete the last
 `/dev/disk/by-partlabel` entry and its directory: it settles those removal events
 before making a unique fixture-owned label under `sudo mkdir -p`, never forces a
 replacement of a host `rootfs_b` link, and removes its own link and only directories

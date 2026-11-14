@@ -365,6 +365,10 @@ still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The kernel-stage leg also need
 [`docs/kernel-staging.md`](docs/kernel-staging.md). The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
+The real RAUC GPT fixture settles udev metadata after formatting before reading
+PARTLABELs, with a ten-second deadline. Failed commands and GPT service/client
+logs are printed on failure; the default rootless transition tests cover the
+metadata race and negative controls.
 
 The Avahi harness keeps its small, private fixture under `/var/tmp` regardless
 of `TMPDIR`: libdbus rejects socket paths longer than 99 bytes, so a long
