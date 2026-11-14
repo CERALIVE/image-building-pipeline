@@ -1,0 +1,10 @@
+[Unit]
+Description=Read-only startup status listener
+PartOf=ceralive-attention.service
+Before=ceralive.service
+
+[Socket]
+# The normal backend owns IPv4 wildcard port 80. No additional port or IPv6 listener.
+ListenStream=0.0.0.0:80
+Accept=yes
+MaxConnections=8
