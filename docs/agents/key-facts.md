@@ -3874,7 +3874,8 @@ same glob list.
 "/data/ceralive/apt-archives/"` (+ tmpfiles.d creating that dir and its
 `partial/` subdir), so downloaded `.deb`s persist across reboots and future
 software updates instead of the rootfs slot's own (small, RAUC-swapped)
-`/var/cache/apt/archives`.
+`/var/cache/apt/archives`. The same file sets `Dir::Cache::pkgcache "";` and
+`Dir::Cache::srcpkgcache "";` to prevent binary cache regeneration in root slots.
 
 **Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
 RESOLVED package membership, never a blind architecture check.**
