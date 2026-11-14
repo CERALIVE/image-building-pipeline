@@ -228,3 +228,6 @@ tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/power-button.bats	bats	unit	default-bats	Power-key gesture, fake evdev and local socket contracts
 tests/power-button-contract.py	helper	support	invoked-by-suite	Production gesture and socket tests driven by power-button.bats
+tests/button-ingress.bats	bats	unit	default-bats	Device-bound browser front door and Unix ingress contracts
+tests/button-ingress-contract.py	helper	support	invoked-by-suite	Synthetic ingress and actual Unix transport contracts
+tests/button-ingress-kernel.py	helper	support	invoked-by-suite	Isolated actual kernel device binding contract

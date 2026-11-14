@@ -583,3 +583,20 @@ setup_power_button() {
   install -D -m 0644 "$src/60-ceralive-button.conf" /etc/systemd/logind.conf.d/60-ceralive-button.conf
   enable_service ceralive-button.service
 }
+
+# Replaces the nginx TLS front and gives the backend one fenced internal port.
+setup_button_ingress() {
+  local src="${CERALIVE_RUNTIME_SRC:?}/button-ingress"
+  local dest="${BUTTON_INGRESS_ROOT:-}"
+  local file
+  for file in ingress.py cleanup.py backend.nft; do
+    install -D -m 0644 "$src/$file" "$dest/usr/local/lib/ceralive-button-ingress/$file"
+  done
+  for file in ceralive-button-ingress.service ceralive-button-backend-fence.service; do
+    install -D -m 0644 "$src/$file" "$dest/etc/systemd/system/$file"
+  done
+  install -D -m 0644 "$src/50-button-ingress.conf" "$dest/etc/systemd/system/ceralive.service.d/50-button-ingress.conf"
+  # nginx would compete for 443. Keep its installed config for rollback only.
+  mask_service nginx.service
+  enable_service ceralive-button-ingress.service
+}

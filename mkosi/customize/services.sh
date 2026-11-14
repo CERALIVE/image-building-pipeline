@@ -59,6 +59,7 @@ configure_network_services() {
   setup_ingest_firewall         # todo 14: LAN-ingest ingress firewall (drop :1935/:4001 on WAN/modem uplinks; LAN/hotspot only)
   setup_uplink_sharing_carrier  # REQ-USB-020..026: ceralive-share.service carrier + teardown script + CeraUI After=nftables drop-in (NOT enabled; CeraUI drives it)
   setup_power_button
+  setup_button_ingress
   setup_dongle_netns_retirement # phase-C todo 39: teardown for the RETIRED router-dongle netns layer (the /data slot store is the one artifact a slot swap cannot clear)
   log_success "services configured"
 }
