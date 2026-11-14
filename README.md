@@ -399,6 +399,13 @@ The same PR unit-test job also runs `python3 ci/upstream-watch.py --self-test`.
 It uses committed fixtures without network access or credentials; the live,
 issue-only upstream reconciliation remains in its separate scheduled workflow.
 
+The default suite includes `tests/workflow-security-contract.test.sh` [EXISTS].
+It parses workflow YAML to reject unsafe triggers, pull-request jobs with
+non-hosted runners, secrets, environments, reusable workflow calls or elevated
+permissions, persisted checkout credentials, and mutable third-party action refs.
+Only the named release workflows may select runners outside the hosted allowlist.
+Set `WORKFLOWS_DIR` to a scratch workflow directory to exercise failure cases.
+
 Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md)
 §5. Its low-level `ci/publish-immutable-r2-pair.sh` helper requires the
 independently approved candidate SHA-256, snapshots both inputs privately, and

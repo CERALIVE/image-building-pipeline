@@ -151,6 +151,7 @@ tests/kernel-artifact-cache.test.sh	shell	unit	default-shell	content-keyed kerne
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs
+tests/workflow-security-contract.test.sh	shell	unit	default-shell	fork-safe workflow triggers, runners, permissions, credentials and immutable third-party actions
 tests/orchestrate-build-lock.test.sh	shell	integration	default-shell	per-board flock serialises staging, different boards stay parallel
 tests/boot-script-sanitize.test.sh	shell	unit	default-shell	the A/B selector against absent setexpr and an undefined loadaddr
 tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/identity asserter/extractor
