@@ -1874,7 +1874,7 @@ REPRO
 # 30. Debug/production package split — the CERALIVE_DEBUG_IMAGE variant seam.
 #
 #     manifests/packages/development.delta.list is the debug-only package set:
-#     python3 + strace/tcpdump + the fifteen T17 packages the debug-toolset
+#     strace/tcpdump + the fifteen packages the debug-toolset
 #     sysext add-on carries. It is installed ONLY when CERALIVE_DEBUG_IMAGE=1;
 #     a production build's package set must stay byte-identical to what todo 31
 #     measured and baselined.
@@ -1885,7 +1885,7 @@ REPRO
 #     `manifests/packages/*.delta.list` as a directory — lib/parity-check.sh's
 #     expected set, tests/realhw-suite.sh's synthesized dpkg status, and this
 #     file's own make_parity_rootfs fixture. Left alone, every one of them would
-#     have folded 18 debug packages into the PRODUCTION contract: parity-check
+#     have folded 17 debug packages into the PRODUCTION contract: parity-check
 #     would fail the [7/9] gate on a correct production image, and the fixture
 #     would have hidden it by declaring those packages installed. All three now
 #     go through common.sh::runtime_pkg_list_files, which skips the debug delta
@@ -1900,13 +1900,11 @@ REPRO
   [ "$status" -eq 0 ]
 }
 
-@test "dev delta: python3 is in the delta and NOT in the production shared list" {
-  # python3 is the content-diff probe for the two variants: a real production
-  # rootfs has 552 installed packages and zero python3*, so its presence is an
-  # unambiguous signal that the debug branch actually took effect.
-  run grep -Ex 'python3[[:space:]]*(#.*)?' "$(DEV_DELTA_LIST)"
+@test "dev delta: strace is in the delta and NOT in the production shared list" {
+  # Use strace as the variant probe; Python now runs the shared button service.
+  run grep -Ex 'strace[[:space:]]*(#.*)?' "$(DEV_DELTA_LIST)"
   [ "$status" -eq 0 ]
-  run grep -qxF python3 <(active_pkgs_of "$PIPELINE_DIR/manifests/packages/shared.list")
+  run grep -qxF strace <(active_pkgs_of "$PIPELINE_DIR/manifests/packages/shared.list")
   [ "$status" -ne 0 ]
 }
 
@@ -2027,7 +2025,7 @@ REPRO
 
   run "$LIB_DIR/parity-check.sh" "$root"
   [[ "$output" == *"all Debian-sourced shared.list packages installed"* ]]
-  [[ "$output" != *"python3"* ]]
+  [[ "$output" != *"tcpdump"* ]]
   [[ "$output" != *"strace"* ]]
 }
 
@@ -2039,7 +2037,7 @@ REPRO
   make_parity_rootfs "$root"          # production package set only
   run env CERALIVE_DEBUG_IMAGE=1 "$LIB_DIR/parity-check.sh" "$root"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"python3"* ]]
+  [[ "$output" == *"tcpdump"* ]]
   [[ "$output" == *"strace"* ]]
 }
 
