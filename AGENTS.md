@@ -67,6 +67,7 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Kernel activation, boot identity, durable overlays/quarantine and owner-gated capability [PARTIAL] | [Activation lifecycle](docs/ota-activation.md) |
 | First-boot WiFi provisioning portal [PARTIAL]: brand mark, lock, notice and fail-soft rendering | [Portal contract](docs/agents/add-on-subsystem.md); [flow and brand refresh](docs/wifi-provisioning.md) |
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
+| Selected audio card re-enumeration [PARTIAL: host tests only] | [Audio contract](docs/agents/key-facts.md); `tests/audio-card-reprobe.test.sh` |
 | Unsafe build/runtime patterns | [ANTI-PATTERNS](docs/agents/anti-patterns.md) |
 | Known issues, deferred work and hardware acceptance limits | [KNOWN ISSUES / DEFERRED](docs/agents/known-issues-deferred.md) |
 

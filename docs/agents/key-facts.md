@@ -4962,8 +4962,22 @@ has never carried this rule, sat flat at 49 fds for 2 h 30 m on the same engine.
 **The trade is stated rather than buried.** Removing the floor restores PR #180's
 original defect IN THE DEGRADED SET ONLY — a board probed with no HDMI audio parks
 the card at `off` and `hw:CARD=HDMIIN` leaves `list-devices` until something
-re-enumerates it. That is an operator-visible limitation, and it is strictly better
-than the alternative: the floor's benefit in that same degraded set was never
+re-enumerates it. The image now installs
+`/usr/libexec/ceralive/ceralive-audio-reprobe` from
+`mkosi/runtime/ceralive-audio-reprobe.sh` during `setup_pipewire_system_mode`.
+The root-run installer gives it mode 0755. The coordinated engine caller requests
+one re-enumeration only when a selected kernel card has no live PipeWire node.
+The helper accepts one `^[A-Za-z0-9_-]{1,32}$` id, matches it exactly against
+`/sys/class/sound/card*/id`, and sends sound remove/add events for that card alone.
+An exclusive nonblocking card lock and
+`/run/ceralive/audio-reprobe-<id>.stamp` enforce 30 seconds between attempts,
+including failed attempts. Malformed or future stamps refuse the request.
+Each udev command is bounded to one second; a failed remove never sends add.
+`CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, and installer destination
+`CERALIVE_LIBEXEC_DIR` support offline fixtures. The helper and installer are
+host-tested; physical no-signal-boot recovery still needs receiver qualification.
+
+This keeps the safe profile policy: the floor's benefit in the degraded set was never
 demonstrated (the node it publishes cannot start without a signal), while its cost is
 a proven fleet-wide engine death.
 
