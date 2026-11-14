@@ -833,6 +833,8 @@ EOF
   rm "$root/run/failed"
   : >"$root/iio/writes"
 
+  # Keep this attachment nine seconds old even if the runner is descheduled.
+  export TYPEC_TEST_NOW="$(( $(stat -c %Y "$root/run/corrected") + 9 ))"
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ ! -s "$root/iio/writes" ]

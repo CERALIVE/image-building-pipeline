@@ -10,6 +10,10 @@ Hostname values, collision handling and consumer restart assertions are unchange
 Malformed-response fixtures explicitly retain their existing four-second failure
 budget; they must not busy-poll a deliberately unready fake for 120 seconds.
 
+The recent Rock Type-C correction test fixes `date +%s` at marker mtime plus
+nine seconds. The existing older-than-ten-seconds case still permits a new
+cycle. Time spent scheduling fixture commands cannot change the attachment age.
+
 **Kernel releases [PARTIAL: owner settings/publication pending].**
 `ci/kernel-release.py` retains the immutable local candidate engine. Its
 `--publish` adapter requires the exact master workflow, first attempt, approved

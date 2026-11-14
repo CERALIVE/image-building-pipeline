@@ -1093,6 +1093,13 @@ typec_rock_fixture() {
 # detach and ADC changes, which regular files cannot produce themselves.
 run_typec_rock() {
   bash -c '
+    date() {
+      if [[ "$*" == +%s && -n "${TYPEC_TEST_NOW:-}" ]]; then
+        builtin printf "%s\n" "$TYPEC_TEST_NOW"
+      else
+        command date "$@"
+      fi
+    }
     printf() {
       local target
       target="$(readlink "/proc/$$/fd/1")"
