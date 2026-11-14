@@ -175,7 +175,12 @@ EOF
 mkdir -p "$TMP/root/etc/systemd/system/multi-user.target.wants"
 ln -s ../ceralive-rauc-activate.service "$TMP/root/etc/systemd/system/multi-user.target.wants/ceralive-rauc-activate.service"
 ln -s ../zz-activate-probe.service "$TMP/root/etc/systemd/system/multi-user.target.wants/zz-activate-probe.service"
-if ! systemd-analyze verify --root "$TMP/root" multi-user.target 2>&1 | grep -Fq 'Found ordering cycle'; then
+# A cycle can make verify exit nonzero; grep -q can also close the pipe early.
+# Read the complete diagnostic before asserting the cycle, as the other ordering
+# contract does, so pipefail cannot turn an observed cycle into a false failure.
+systemd-analyze verify --root "$TMP/root" multi-user.target >"$TMP/ordering-probe" 2>&1 || true
+if ! grep -Fq 'Found ordering cycle' "$TMP/ordering-probe"; then
+  command cat "$TMP/ordering-probe"
   fail 'ordering probe did not observe activation After=rauc.service'
 fi
 ok 'dynamic ordering probe: activation is after RAUC'
