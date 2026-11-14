@@ -352,3 +352,48 @@ PY
   run grep -F 'enable_service rauc-hawkbit-updater.service' "$postinst"
   [ "$status" -eq 1 ]
 }
+
+
+@test "data growth failure refuses mark-good" {
+  export CERALIVE_DATA_READY_BIN="$BATS_TEST_TMPDIR/data-ready"
+  printf '#!/bin/sh\nexit 1\n' > "$CERALIVE_DATA_READY_BIN"
+  chmod +x "$CERALIVE_DATA_READY_BIN"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  ! grep -q mark-good "$TEST_CALLS"
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+}
+
+@test "data growth pending refuses mark-good even with a current boot marker" {
+  export CERALIVE_DATA_READY_BIN="$BATS_TEST_TMPDIR/data-ready"
+  printf '#!/bin/sh\nexit 75\n' > "$CERALIVE_DATA_READY_BIN"
+  chmod +x "$CERALIVE_DATA_READY_BIN"
+  printf 'boot-id %s\n' "$(<"$CERALIVE_HEALTHCHECK_BOOT_ID_FILE")" > "$CERALIVE_HEALTHCHECK_MARKER"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  ! grep -q mark-good "$TEST_CALLS"
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+}
+
+@test "completed data growth allows healthy boot confirmation" {
+  export CERALIVE_DATA_READY_BIN="$BATS_TEST_TMPDIR/data-ready"
+  printf '#!/bin/sh\nexit 0\n' > "$CERALIVE_DATA_READY_BIN"
+  chmod +x "$CERALIVE_DATA_READY_BIN"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -eq 0 ]
+  grep -q 'mark-good B' "$TEST_CALLS"
+  [ -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+}
+
+
+@test "terminal capacity refusal cannot confirm health or refresh boot attempts" {
+  export CERALIVE_DATA_READY_BIN="$BATS_TEST_TMPDIR/data-ready"
+  printf '#!/bin/sh\nexit 78\n' > "$CERALIVE_DATA_READY_BIN"
+  chmod +x "$CERALIVE_DATA_READY_BIN"
+  cp "$CERALIVE_BOOT_STATE_FILE" "$BATS_TEST_TMPDIR/old-boot-state"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  ! grep -q mark-good "$TEST_CALLS"
+  [ ! -e "$CERALIVE_HEALTHY_STATE_FILE" ]
+  cmp "$CERALIVE_BOOT_STATE_FILE" "$BATS_TEST_TMPDIR/old-boot-state"
+}
