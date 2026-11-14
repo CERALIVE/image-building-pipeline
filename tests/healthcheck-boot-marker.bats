@@ -475,3 +475,44 @@ SH
   run grep -q mark-good "$TEST_CALLS"
   [ "$status" -eq 1 ]
 }
+
+@test "a retained same-kernel verdict permits direct confirmation until reassessment" {
+  # Model the soft-reboot boundary: /run and boot_id survive, probes change.
+  bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  export TEST_SERVICE_FAIL=1
+  : > "$TEST_CALLS"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -eq 0 ]
+  grep -Fxq 'mark-good B' "$TEST_CALLS"
+  ! grep -Fxq check-service "$TEST_CALLS"
+  # Unit-driven confirmation first pulls health; a new failed assessment
+  # invalidates that retained verdict for a slot still awaiting confirmation.
+  rm "$CERALIVE_HEALTHCHECK_MARKER" "$CERALIVE_HEALTHY_STATE_FILE"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  [ "$status" -ne 0 ]
+  : > "$TEST_CALLS"
+  run bash "$ROOT/mkosi/runtime/ceralive-healthcheck.sh" --mark-good
+  [ "$status" -ne 0 ]
+  ! grep -q mark-good "$TEST_CALLS"
+}
+
+@test "hostname recovery queues confirmation without retrying the sync consumers" {
+  local original="$SYSTEMCTL_BIN"
+  export TEST_HEALTH_SYSTEMCTL="$original" TEST_HEALTH_SCRIPT="$ROOT/mkosi/runtime/ceralive-healthcheck.sh"
+  TEST_SERVICE_FAIL=1 run bash "$TEST_HEALTH_SCRIPT"
+  [ "$status" -ne 0 ]
+  # Record actual helper requests rather than simulate systemd dependency retry.
+  local ctl="$BATS_TEST_TMPDIR/retry-systemctl"
+  printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "$TEST_CALLS"\n' > "$ctl"
+  chmod +x "$ctl"
+  eval "$(sed -n '/^restart_identity_consumers() {/,/^}/p' "$ROOT/mkosi/customize/postinst.d/hostname.sh")"
+  local -a CONSUMER_UNITS=(ceralive-healthcheck.service)
+  SYSTEMCTL_BIN="$ctl" restart_identity_consumers
+  grep -Fxq -- '--no-block start ceralive-mark-good.service' "$TEST_CALLS"
+  ! grep -Eq 'ceralive-(slot-sync|boot-script-sync)' "$TEST_CALLS"
+  local consumer
+  for consumer in ceralive-slot-sync ceralive-boot-script-sync; do
+    grep -Fxq 'Requires=ceralive-mark-good.service' "$ROOT/mkosi/runtime/$consumer.service"
+    ! grep -Eq '^(Wants|Requires|Upholds)=.*'"$consumer" "$ROOT/mkosi/runtime/ceralive-mark-good.service"
+  done
+}

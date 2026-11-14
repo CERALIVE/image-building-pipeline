@@ -606,8 +606,8 @@ setup_addon_keyring() {
 # ---------------------------------------------------------------------------
 # 15. Retained dormant hawkBit updater (disabled and masked, no server). CeraUI's
 #     capability-gated orchestrator is the automatic RAUC OS update path. Slot
-#     BOOT confirmation stays with ceralive-healthcheck.service (task 29): the updater
-#     only installs (RAUC D-Bus InstallBundle); it has NO mark-good, so it cannot
+#     BOOT confirmation stays with ceralive-mark-good.service after boot completion.
+#     The updater only installs (RAUC D-Bus InstallBundle); it has NO mark-good, so it cannot
 #     bypass the gate. post_update_reboot=false keeps reboot CeraLive-controlled.
 #
 # SECURE ENROLLMENT (NO shared static token baked in): the image bakes only the
@@ -644,7 +644,7 @@ tenant_id                 = @HAWKBIT_TENANT@
 target_name               = @HAWKBIT_TARGET_NAME@
 # Downloads land on the DATA partition, NOT the rootfs slot (task 41 MUST-NOT).
 bundle_download_location  = /data/ceralive/rauc-downloads/bundle.raucb
-# CeraLive owns reboot; healthcheck confirms only the booted slot.
+# CeraLive owns reboot; ceralive-mark-good.service confirms only the booted slot.
 post_update_reboot        = false
 retry_wait                = 300
 connect_timeout           = 20

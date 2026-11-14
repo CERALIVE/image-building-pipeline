@@ -1405,6 +1405,23 @@ boot log:
   phase requires that verdict even if invoked directly. Hostname recovery starts
   the confirmation service after restarting consumers, so a failed initial
   assessment can still confirm once a retry passes.
+- **Soft-reboot limit:** the verdict identifies a kernel boot, not a userspace
+  instance. A systemd soft reboot preserves both the kernel boot ID and `/run`.
+  Until the new health assessment clears the record, a direct root invocation of
+  `ceralive-healthcheck.sh --mark-good` can accept the previous userspace's passed
+  assessment without running the probes again. Unit-driven confirmation is safe
+  across this boundary: starting `ceralive-mark-good.service` pulls health through
+  `boot-complete.target` before confirmation. The image does not use soft reboot;
+  use the service for confirmation, not the script's internal `--mark-good` phase.
+  The direct phase alone does not establish health in the new userspace.
+- **Recovery sync limit:** after the first health assessment fails, hostname
+  recovery retries health and confirmation, but does not start
+  `ceralive-slot-sync.service` or `ceralive-boot-script-sync.service` again.
+  Their initial dependency jobs failed; a later successful confirmation does not
+  automatically retry them. Both can remain inactive for that boot, as before
+  the assessment/confirmation split. Confirmation therefore does not imply that
+  either sync ran after recovery. A later normal boot queues them again;
+  explicitly starting them after confirmation also retains their existing guards.
 - Confirmation is scoped to the current kernel boot ID, stored beside the
   timestamp in `/data/ceralive/.slot-marked-good`. A previous boot's marker,
   including a legacy timestamp-only one, never suppresses checks. Same-slot
