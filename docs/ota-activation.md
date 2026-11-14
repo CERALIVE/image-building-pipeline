@@ -152,3 +152,76 @@ command boundaries stubbed. Named SIGKILL checkpoints cover selection,
 mark-good and terminal-side-effect interruption. The slot-sync and post-install
 tests cover overlay replacement and retirement. These host tests do not replace
 the two-board kernel drill or privileged loop/chroot acceptance.
+
+## Planned reboot and power-off
+
+Update staging and activation do not reboot the device. The image installs
+`/usr/libexec/ceralive/ceralive-power reboot` (or `poweroff`) as an **opt-in**
+maintenance/recovery entrypoint. It has no automatic production callers: RAUC
+activation and hawkBit staging deliberately leave reboot to CeraUI or an
+administrator, and `post_update_reboot=false` remains enforced. CeraUI submits
+its own equivalent root systemctl calls; requiring this helper would break
+compatibility with images that predate it.
+
+The helper calls plain `systemctl reboot` or `systemctl poweroff` as root.
+On systemd 257 logind honours a strong shutdown block even for non-interactive
+root, without polkit. It omits `--check-inhibitors=yes`, whose additional
+session check refuses an otherwise idle box while a support SSH user is logged
+in. Exit 75 means command submission failed; exit 70 means the helper or its child
+was interrupted and the outcome is uncertain. It never forces or queues a fallback.
+The disposable kernel runner uses the same plain root shutdown path.
+
+CeraUI holds a logind **block** inhibitor while encoder or client-carrying
+protection is active, including uncertain startup and cleanup. A delay would
+expire during a long session. Plain `reboot`, `systemctl reboot` and scheduled
+`shutdown` are refused while that lock is held. The systemctl `-i` hint is not a
+working override on this systemd 257 image: skipping a strong block needs polkit,
+which is not installed. `--force` and direct target activation bypass logind;
+they are not the supported procedure.
+
+The supported emergency override, also shown by CeraUI, is **as root**:
+
+```sh
+systemctl stop ceralive
+systemctl reboot
+```
+
+Only continue if stopping the service succeeds. This stops streams, disconnects
+carried clients and closes the web interface. It drops CeraUI's descriptor and
+suppresses its automatic restart; the reboot still checks other strong locks.
+The companion CeraUI service watchdog kills and restarts a hung owner, closing
+its descriptor rather than holding a lock forever.
+
+Power policy is installed independently of RAUC activation setup.
+`60-ceralive-power-key.conf` sets `HandlePowerKey=poweroff`,
+`HandlePowerKeyLongPress=poweroff` and `PowerKeyIgnoreInhibited=yes`. A safety
+power-key request must reach clean poweroff even during a stream. On systemd
+257 **the same ignore setting applies to short and long presses**; there is no
+separate long-press ignore option. Any future GPIO power-key implementation must
+retain this policy. Low-level `handle-power-key` locks still belong to their
+key handler and are not bypassed by this setting.
+
+Hardware-free real-systemd contracts use a disposable systemd 257 environment
+without polkit or device passthrough. Reboot/poweroff targets are masked, and
+acceptance is checked from logind's journal rather than command exit status
+(the masked target itself makes accepted commands fail). Synthetic input events
+exercise power-key handling while a real strong inhibitor is held. The companion
+CeraUI contract also checks its actual native descriptor and service watchdog.
+Run the opt-in contract with:
+
+```sh
+CERALIVE_LOGIND_TEST_CONTAINER=<name> ./tests/real-logind-contract.sh
+```
+
+The exclusive container must have the safety
+sentinel `/run/logind-contract-disposable`, masked `reboot.target` and
+`poweroff.target`, and systemd/dbus/Python installed. The host needs a native C
+compiler; the fixture's shared library and container must use compatible libc.
+The container needs private PID/network/cgroup namespaces, permission to create
+an inner mount namespace, and no host bind mounts or devices. The test uses a
+private synthetic sysfs tree, FIFO input and an evdev-ioctl shim; the login
+manager, inhibitor handling and target submission are the real systemd code.
+It also runs a negative mutation with the ignore setting disabled.
+
+Watchdog resets, kernel failures and electrical power loss remain outside the
+planned-action guard. No hardware continuity qualification is implied.

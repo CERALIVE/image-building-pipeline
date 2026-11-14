@@ -5,7 +5,7 @@ fw=/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive
 code=1
 finish() {
   printf '\nCERALIVE_JOB_DONE=%s\n' "${code}" >/dev/ttyS0
-  systemctl poweroff
+  systemctl poweroff || echo "Runner shutdown was refused; no forced retry." >&2
 }
 trap finish EXIT
 modprobe qemu_fw_cfg
