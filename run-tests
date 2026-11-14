@@ -184,3 +184,19 @@ case "${CERALIVE_RUN_REAL_RAUC_CONTRACT:-skip}" in
     exit 2
     ;;
 esac
+
+
+# The namespace's shell is PID 1 and reaps the harness children. Never expose
+# physical devices; the contract creates only synthetic links and TUNs.
+case "${CERALIVE_RUN_CLAT_CONTRACT:-skip}" in
+  required|service)
+    clat_args=()
+    [[ "$CERALIVE_RUN_CLAT_CONTRACT" != service ]] || clat_args+=(--service-only)
+    sudo -n --preserve-env=CLAT_TEST_TAYGA,CLAT_TEST_SENDER,CLAT_TEST_RECEIVER \
+      unshare --pid --fork --mount-proc --net bash -c \
+      '/usr/bin/python3 "$@"; result=$?; wait; exit "$result"' \
+      clat "${HERE}/tests/clat-netns.py" "${clat_args[@]}"
+    ;;
+  skip) echo "== SKIP CLAT network contract (set CERALIVE_RUN_CLAT_CONTRACT=required or service) ==" ;;
+  *) echo "ERROR: invalid CERALIVE_RUN_CLAT_CONTRACT" >&2; exit 2 ;;
+esac
