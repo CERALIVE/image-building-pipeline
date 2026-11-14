@@ -58,7 +58,7 @@ tests/kernel-version-monotonic.test.sh	shell	integration	default-shell	offline D
 tests/candidate-os-version.test.sh	shell	integration	default-shell	publish guard: candidate baked OS version must equal the requested version
 tests/os-version-month.test.sh	shell	integration	default-shell	publish guard: a new OS version must be in the current UTC month
 tests/kernel-producer-identity.test.sh	shell	integration	default-shell	stack-frozen kernel producer digests and exclusion of release orchestration from identity
-tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	stack 9b89e6f plus revision-5 nftables-reject fragment/required-list digests, including the coverage function
+tests/fixtures/kernel-producer.sha256	fixture	support	not-executed	Reviewed kernel producer digests including ramoops injection and fingerprint coverage
 tests/kernel-release-command.test.sh	shell	integration	default-shell	local kernel candidates, existing gates, immutable bundles and side-effect-free publication refusal
 tests/kernel-release-environment.test.sh	shell	integration	default-shell	exact command contract result parity with and without inherited workflow and runner context
 tests/kernel-release-workflow.test.sh	shell	integration	default-shell	owner-approved VM workflow provenance, immutable Release and bench-bound authorization/dispatch sequences
@@ -226,3 +226,5 @@ tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/reset-evidence.bats	bats	unit	default-bats	Reset evidence persistence and RK3588 reserved memory
+tests/fixtures/tmpfiles-clock.c	fixture	support	not-executed	Test-only realtime jump for tmpfiles retention regression; compiled with cc by reset-evidence.bats

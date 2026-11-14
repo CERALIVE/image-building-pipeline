@@ -1182,6 +1182,7 @@ SH
       setup_fan_curve() { :; }
       setup_fan_kickstart() { :; }
       setup_led_status() { :; }
+      setup_reset_evidence() { :; }
       setup_cpu_governor() { :; }
       setup_hdmirx_edid() { :; }
       setup_pipewire_system_mode() { :; }
