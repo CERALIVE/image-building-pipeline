@@ -7,6 +7,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
+# shellcheck source=tests/real-rauc-fixture-lib.sh
+source "${HERE}/real-rauc-fixture-lib.sh"
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/ceralive-rauc-contract.XXXXXX")"
 CONF="${WORK}/system.conf"
 BUNDLE="${WORK}/bundle/probe.raucb"
@@ -113,6 +115,9 @@ release_harness_mounts() {
     remaining=0
     while read -r loop backing; do
       [[ "${backing}" == "${WORK}"/* ]] || continue
+      if [[ "${keep_slot_loops:-0}" == 1 && ( "${loop}" == "${slot_a_loop:-}" || "${loop}" == "${slot_b_loop:-}" ) ]]; then
+        continue
+      fi
       remaining=1
       sudo -n losetup -d "${loop}" 2>/dev/null || true
     done < <(losetup -l -n -O NAME,BACK-FILE 2>/dev/null || true)
@@ -131,6 +136,7 @@ cleanup() {
   stop_service
   stop_descendants
   remove_priority_fixture || leaked=1
+  keep_slot_loops=0
   release_harness_mounts
   while read -r _ source; do
     [[ "${source}" == "${WORK}"/* ]] && leaked=1
@@ -232,9 +238,14 @@ done
 printf 'factory-slot-a\n' >"${WORK}/slot-a-tree/etc/ceralive-rauc-probe"
 printf 'factory-slot-b\n' >"${WORK}/slot-b-tree/etc/ceralive-rauc-probe"
 printf 'updated-arm64-bundle\n' >"${WORK}/update-tree/etc/ceralive-rauc-probe"
-truncate -s 4096M "${WORK}/slot-a.ext4" "${WORK}/slot-b.ext4"
+rauc_fixture_slot_images "${WORK}"
 mkfs.ext4 -q -F -L rootfs_a -d "${WORK}/slot-a-tree" "${WORK}/slot-a.ext4"
 mkfs.ext4 -q -F -L rootfs_b -d "${WORK}/slot-b-tree" "${WORK}/slot-b.ext4"
+keep_slot_loops=1
+slot_a_loop="$(sudo -n losetup --find --show "${WORK}/slot-a.ext4")"
+slot_b_loop="$(sudo -n losetup --find --show "${WORK}/slot-b.ext4")"
+rauc_fixture_device_map "${WORK}" "${slot_a_loop}" "${slot_b_loop}"
+
 cp "${PIPELINE_DIR}/mkosi/platform/boot/ceralive-boot-state.sh" "${WORK}/ceralive-boot-state.sh"
 # The adapter SOURCES the shared slot-state core, resolving it as a repo-relative
 # sibling or at its installed device path. A mktemp staging dir is neither, so the
@@ -348,8 +359,7 @@ grep -Fq 'Bundle Format:  verity' "${WORK}/rauc-info.txt"
 grep -Fq 'Adaptive:  block-hash-index' "${WORK}/rauc-info.txt"
 printf 'VERITY_INFO=PASS adaptive block-hash-index\n'
 
-truncate -s 8300M "${WORK}/gpt.raw"
-sgdisk -o -n 1:2048:+4096M -c 1:rootfs_a -n 2:0:+4096M -c 2:rootfs_b "${WORK}/gpt.raw" >/dev/null
+rauc_fixture_gpt "${WORK}"
 gpt_loop="$(sudo -n losetup --find --show --partscan "${WORK}/gpt.raw")"
 for _ in $(seq 1 30); do
   [[ -b "${gpt_loop}p1" && -b "${gpt_loop}p2" ]] && break
@@ -380,6 +390,7 @@ sed -e "s|^device=${WORK}/slot-a.ext4$|device=${gpt_loop}p1|" \
     -e "s|^device=${WORK}/slot-b.ext4$|device=${gpt_loop}p2|" \
     -e "s|^post-install=/bin/true$|post-install=${generated_root}/usr/lib/rauc/ceralive-post-install|" \
     "${CONF}" >"${WORK}/gpt-system.conf"
+rauc_fixture_device_map "${WORK}" "${gpt_loop}p1" "${gpt_loop}p2"
 CONF="${WORK}/gpt-system.conf"
 start_service "${WORK}/service-gpt.log"
 timeout 120 rauc -c "${CONF}" install "${BUNDLE}" >"${WORK}/client-gpt.log" 2>&1
@@ -387,6 +398,7 @@ stop_service
 [[ "$(sudo -n e2label "${gpt_loop}p2")" == rootfs_b ]]
 [[ "$(sudo -n lsblk -ndo PARTLABEL "${gpt_loop}p2")" == rootfs_b ]]
 printf 'GPT_LABEL=PASS installed verity rootfs_b has its own GPT PARTLABEL as ext4 label\n'
+rauc_fixture_device_map "${WORK}" "${slot_a_loop}" "${slot_b_loop}"
 sudo -n losetup -d "${gpt_loop}"
 # A runner's udev removes the last by-partlabel entry (and sometimes its
 # directory) after loop detach. Wait for that removal before creating our link.
