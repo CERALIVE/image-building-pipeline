@@ -22,6 +22,11 @@ runs after that observation and before the timer returns. No background writer
 or sampler can outrun the monitor, miss a transient kick, or outlive the test.
 Production discovery, edge detection, writes, timers and restoration are unchanged.
 
+The hung-Git fixture sleeps indefinitely, so only the real `timeout(1)` timer
+can terminate it and permit the retry. Both attempts use the normal 30-second
+fixture deadline; a one-second deadline also killed healthy stubs on loaded
+runners. The test still requires exactly two attempts and the pinned tree.
+
 **Kernel releases [PARTIAL: owner settings/publication pending].**
 `ci/kernel-release.py` retains the immutable local candidate engine. Its
 `--publish` adapter requires the exact master workflow, first attempt, approved
