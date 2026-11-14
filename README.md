@@ -1897,3 +1897,6 @@ This project is dual-licensed under either:
 - Apache-2.0 (see LICENSE-APACHE)
 
 You may choose either license.
+
+Power-key behaviour and the local confirmation API: [power button](docs/power-button.md)
+(draft; two-board bench qualification pending).

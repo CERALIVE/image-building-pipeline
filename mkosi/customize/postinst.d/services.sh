@@ -571,3 +571,15 @@ setup_rtmp_gateway() {
 
   enable_service ceralive-rtmp-gateway.service
 }
+
+# No daemon is started in the build chroot. Reject incompatible systemd images.
+setup_power_button() {
+  local src="${CERALIVE_RUNTIME_SRC:?}/power-button"
+  local version
+  version="$(systemd --version | head -n 1 | awk '{print $2}')"
+  [[ "$version" =~ ^[0-9]+$ && "$version" -ge 251 ]] || die "power button requires systemd >=251"
+  install -D -m 0644 "$src/button.py" /usr/local/lib/ceralive-button/button.py
+  install -D -m 0644 "$src/ceralive-button.service" /etc/systemd/system/ceralive-button.service
+  install -D -m 0644 "$src/60-ceralive-button.conf" /etc/systemd/logind.conf.d/60-ceralive-button.conf
+  enable_service ceralive-button.service
+}
