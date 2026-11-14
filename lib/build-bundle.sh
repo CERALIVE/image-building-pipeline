@@ -55,6 +55,9 @@ format=verity
 filename=rootfs.ext4
 adaptive=block-hash-index
 EOF
+  if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
+    printf '\n[hooks]\nfilename=layout-check\nhooks=install-check\n' >>"${path}"
+  fi
 }
 
 # The canonical build already has the builder image; direct/native callers use
@@ -128,6 +131,9 @@ build-bundle() {
   local board="$1" rootfs_tree="$2" compatible version ts out_dir out content
   [[ -n "${board}" && -d "${rootfs_tree}" ]] \
     || die "board and a rootfs directory are required (tar/plain input is not an ext4 slot image)"
+  # shellcheck disable=SC2034 # Shared layout helpers read the CLI board dynamically.
+  local BOARD_ID="$board"
+  ceralive_rootfs_mb >/dev/null || return $?
   assert_pki
   compatible="${COMPATIBLE_STRING:-}"
   [[ -n "${compatible}" ]] || die "COMPATIBLE_STRING is unset/empty — refusing a bundle the device would reject"
@@ -142,9 +148,12 @@ build-bundle() {
   content="$(mktemp -d "${out_dir}/.bundle-content.XXXXXX")"
   trap 'rm -rf "${content}"' RETURN
   out="${out_dir}/${ts}.raucb"
-  SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4" \
-    || die "failed to make 4096 MiB ext4 rootfs slot image"
+  BOARD_ID="${board}" SLOT_IMAGE_LABEL=rootfs make_slot_image "${rootfs_tree}" "${content}/rootfs.ext4" \
+    || die "failed to make ext4 rootfs slot image"
   write_manifest "${content}/manifest.raucm" "${compatible}" "${version}"
+  if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
+    install -m 0755 "${PIPELINE_DIR}/mkosi/runtime/ceralive-layout-install-check.sh" "${content}/layout-check"
+  fi
   bundle_with_rauc "${content}" "${out}"
   ( cd "${out_dir}" && sha256sum "$(basename "${out}")" >"$(basename "${out}").sha256" )
   log_success "verity adaptive bundle: ${out}"

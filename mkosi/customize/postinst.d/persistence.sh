@@ -61,6 +61,17 @@ if ! declare -F die >/dev/null 2>&1; then
 fi
 
 
+# A separate helper permits rendering and APT config tests without touching the host.
+install_bounded_apt_metadata() {
+  local root="${1%/}"
+  mkdir -p "$root/var/lib/apt/lists" "$root/etc/apt/apt.conf.d"
+  local entry='tmpfs /var/lib/apt/lists tmpfs nosuid,nodev,noexec,size=192M,mode=0755 0 0'
+  if ! grep -Fxq "$entry" "$root/etc/fstab" 2>/dev/null; then
+    printf '%s\n' "$entry" >>"$root/etc/fstab"
+  fi
+  printf 'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n' >"$root/etc/apt/apt.conf.d/82bounded-metadata"
+}
+
 # --- 12. Persist user-mutable state on /data (verbatim, postinst section 12) -
 setup_data_persistence() {
   local data_root="/data" data_partlabel
@@ -69,10 +80,74 @@ setup_data_persistence() {
 
   log "persisting CeraLive state on ${data_root} (config/logs/wifi/srtla)"
 
+  local grow_order=""
+  [[ "${BOARD_ID:-}" != rock-5b-plus ]] || grow_order=",x-systemd.after=ceralive-grow-data.service,x-systemd.requires=ceralive-grow-data.service"
   if ! grep -qE "^[^#]*[[:space:]]${data_root}[[:space:]]" /etc/fstab 2>/dev/null; then
     mkdir -p "${data_root}"
-    printf 'PARTLABEL=%s\t%s\text4\tdefaults,noatime,nofail,x-systemd.growfs\t0\t2\n' \
-      "${data_partlabel}" "${data_root}" >>/etc/fstab
+    printf 'PARTLABEL=%s\t%s\text4\tdefaults,noatime,nofail,x-systemd.growfs%s\t0\t2\n' \
+      "${data_partlabel}" "${data_root}" "$grow_order" >>/etc/fstab
+  fi
+
+  if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
+    install_bounded_apt_metadata /
+    mkdir -p /etc/systemd/system/local-fs-pre.target.wants
+    install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-grow-data.sh" /usr/libexec/ceralive/ceralive-grow-data
+    cat >/etc/systemd/system/ceralive-grow-data.service <<UNIT
+[Unit]
+Description=Grow persistent data partition to the boot disk capacity
+DefaultDependencies=no
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service
+Before=local-fs-pre.target data.mount
+ConditionVirtualization=!container
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ceralive/ceralive-grow-data ${data_partlabel}
+RemainAfterExit=yes
+UNIT
+    ln -sfn ../ceralive-grow-data.service /etc/systemd/system/local-fs-pre.target.wants/ceralive-grow-data.service
+
+    install -D -m 0644 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-capacity-lib.sh" /usr/libexec/ceralive/ceralive-data-capacity-lib.sh
+    install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-ready.sh" /usr/libexec/ceralive/ceralive-data-ready
+    cat >/etc/systemd/system/ceralive-data-ready.service <<'UNIT'
+[Unit]
+Description=Verify ROCK persistent data readiness for health and updates
+RequiresMountsFor=/data
+Wants=ceralive-grow-data.service systemd-growfs@data.service
+After=ceralive-grow-data.service data.mount systemd-growfs@data.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ceralive/ceralive-data-ready
+TimeoutStartSec=30s
+Restart=no
+RemainAfterExit=yes
+UNIT
+    # fstab starts fsck as a sibling of the mount. It must not repair-write a
+    # refused card while the mount itself is still waiting for partition growth.
+    local data_fsck
+    data_fsck=$(systemd-escape --path --template=systemd-fsck@.service "/dev/disk/by-partlabel/${data_partlabel}")
+    mkdir -p "/etc/systemd/system/${data_fsck}.d"
+    cat >"/etc/systemd/system/${data_fsck}.d/data-growth.conf" <<'UNIT'
+[Unit]
+Requires=ceralive-grow-data.service
+After=ceralive-grow-data.service
+UNIT
+    # Gate update owners without adding a hard SSH/rescue dependency.
+    # SSH still requires enablement and a successful persistent-identity guard.
+    local consumer
+    for consumer in ceralive-healthcheck ceralive rauc rauc-hawkbit-updater; do
+      mkdir -p "/etc/systemd/system/${consumer}.service.d"
+      cat >"/etc/systemd/system/${consumer}.service.d/data-ready.conf" <<'UNIT'
+[Unit]
+Requires=ceralive-data-ready.service
+After=ceralive-data-ready.service
+
+[Service]
+ExecStartPre=/usr/libexec/ceralive/ceralive-data-ready
+UNIT
+    done
   fi
 
   mkdir -p /usr/local/sbin
@@ -196,6 +271,10 @@ Description=CeraLive one-time data migration + /data skeleton
 DefaultDependencies=no
 Conflicts=shutdown.target
 RequiresMountsFor=${data_root}
+# Do not seed or expose writable state until online filesystem growth succeeds.
+# Keep this in local-fs; the late readiness service has default dependencies.
+Requires=systemd-growfs@data.service
+After=systemd-growfs@data.service
 Before=local-fs.target shutdown.target ceralive-hostname.service ceralive.service
 ConditionPathIsMountPoint=${data_root}
 
@@ -259,6 +338,9 @@ EOF
 
 die() { echo "ceralive-update: $*" >&2; exit 1; }
 
+if [[ -x /usr/libexec/ceralive/ceralive-data-ready ]]; then
+  /usr/libexec/ceralive/ceralive-data-ready || die "persistent data is not ready"
+fi
 command -v rauc >/dev/null 2>&1 || die "rauc is not installed"
 mountpoint -q "$DATA" || die "$DATA is not mounted; refusing to update"
 [ -f "$CONF" ] || die "no $CONF; OTA is not provisioned on this device"
