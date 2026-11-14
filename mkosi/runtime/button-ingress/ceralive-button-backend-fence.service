@@ -1,0 +1,19 @@
+[Unit]
+Description=Keep ordinary browser backend port on loopback
+Before=ceralive.service ceralive-button-ingress.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/local/lib/ceralive-button-ingress/backend.nft
+ExecStop=/usr/sbin/nft delete table inet ceralive_button_backend
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_NETLINK

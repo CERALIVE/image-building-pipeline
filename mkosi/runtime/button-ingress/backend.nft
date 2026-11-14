@@ -1,0 +1,6 @@
+table inet ceralive_button_backend {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname != "lo" tcp dport 18080 drop
+    }
+}

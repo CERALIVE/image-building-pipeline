@@ -70,14 +70,7 @@
 #
 # Format: one package per line; `#` comments justify entries.
 
-# --- Interpreter (the plan's headline addition) -------------------------------
-python3                  # NOT in the production image at all (verified against a
-                         # real production rootfs: 552 installed packages, zero
-                         # python3*). Nothing in the shipped runtime is written in
-                         # Python — the build-side tooling that is (resolve.py,
-                         # validate-manifests.py) runs on the BUILD HOST, never on
-                         # the device. So this is a genuine debug-only addition and
-                         # is the cleanest content-diff probe for the two variants.
+# Python is now a shared runtime dependency of the power-key service.
 
 # --- Kernel/syscall + wire tracing (ceraui-base DEVELOPMENT, removed.md §(e)) --
 strace                   # syscall tracing — the first tool reached for when a
