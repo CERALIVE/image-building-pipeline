@@ -41,10 +41,10 @@ The JSON is a snapshot; consumers should apply each condition's expiry.
 
 The consumer runs without `/data`. Documents are generated in `/run`, escaped
 as text, with no scripts, links, forms or write actions. The normal TLS front
-serves them when its existing certificate storage works. If ROCK storage
+serves them when its existing certificate storage works. If storage
 readiness fails and the normal backend and setup portal are inactive, a bounded
 inetd HTTP handler temporarily uses the normal backend's IPv4 wildcard port 80.
-No extra port or IPv6 listener is opened. This fallback exposes only `/`, GET
+No extra port or IPv6 listener is opened. This fallback exposes `/`, `/attention/` and `/attention/status.json`, GET
 and HEAD, with no-store, a strict CSP, five-second connections and eight clients
 maximum. Successful readiness stops the socket before application startup.
 The daemon never stops a running backend to display a condition. Non-storage
@@ -186,3 +186,58 @@ Repair, reboot, verify normal port ownership, socket stopped, receipt removed,
 condition cleared and health assessed normally. Repeat interrupted growth and
 power-cut checks with the ROCK-layout qualification. Restore original media
 and compare saved configuration; do not infer hardware success from host mocks.
+
+## Storage cannot start safely (fork topic)
+
+[Español (Latinoamérica)](unsafe-storage.es-419.md).
+
+On the current ROCK image, the minimum is a 16 GB card. The measured floor is
+15,000,000,000 bytes, below the measured size of genuine 16 GB cards. The pre-growth check refuses smaller
+or read-only media before repartitioning. Failure of that oneshot blocks the
+data mount, its filesystem check, automatic filesystem growth and dependent
+persistence migration. Migration also requires successful online filesystem
+growth before seeding data or enabling the writable application, log and
+NetworkManager profile binds. A growfs failure leaves those writers stopped;
+the independent readiness/attention path reports the terminal storage failure.
+The independent attention service still reaches multi-user boot. It never
+marks either slot good, rearms boot attempts or requests a reboot. A later
+operator reboot follows the existing finite A/B attempt policy; it is not an
+automatic repair loop. Only the supported root geometry is accepted.
+
+The fatal LED code is **one second on, three seconds off** on the first eligible
+status indicator. HDMI VT8 and the local HTTP page say “The box can't start
+safely”, followed by the cause and fix:
+
+- “This card is too small for the box. Use a card sold as 16 GB or bigger.”
+- “The box couldn't prepare its storage.” Use local recovery to check the
+  filesystem or set up the card with the image again. If failures persist,
+  set up a different card. A metadata read or validation failure does not
+  establish that the card has misreported capacity.
+- “This card is read-only.” Check the adapter lock; replace a card that stays
+  read-only.
+- Growth failures say the card could not finish getting ready, with local
+  recovery instructions. No automatic repeat, resize or repair is attempted.
+
+The fallback HTTP listener now shares GET/HEAD `/attention/` and
+`/attention/status.json` with the normal TLS front, as well as `/` for a browser.
+An onboarding client on the local network can probe plain HTTP port 80 at
+`/attention/status.json`, inspect `highest.id == "data-readiness"` and
+`highest.severity == "fatal"`, and show `line`, `fix` and optional `detail`.
+This public status requires no pairing, certificate, application process or
+working `/data`. It never accepts credentials or mutations. It preserves the
+existing network configuration and never creates an open recovery hotspot.
+An inactive readiness unit caused by a failed dependency also gets the page.
+
+All added status writes are volatile `/run` files; no card test file, durable
+failure marker or boot-selector write is added. Read-only inventory and
+filesystem geometry errors are surfaced. This is **not** a destructive
+full-capacity authenticity test: a lying card that returns apparently valid
+reads can evade these checks. Do not claim every counterfeit is detected.
+A separate first-boot capacity probe needs its own bounded-write and
+loader/GPT-preservation qualification.
+
+Host contracts cover refusal before repart, dependency ordering, messages,
+LED timing, VT ownership and HTTP routes. Still required before release: on a
+spare ROCK card, prove physical LED/HDMI/local-network discovery, small/failed
+and read-only storage refusal, no automatic reboot, successful storage recovery
+and console login hand-back. No board acceptance follows from host tests.

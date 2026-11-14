@@ -21,6 +21,7 @@ SH
 cat >"$work/bin/lsblk" <<'SH'
 #!/bin/bash
 case "$*" in
+  '-dnro RO /dev/test') echo "${CARD_RO:-0}" ;;
   '-bdnro SIZE /dev/test') echo "${MEDIA_BYTES:-15000000000}" ;;
   '-bdnro SIZE /dev/test2') echo "${ROOT_BYTES:-4294967296}" ;;
   '-bdnro SIZE /dev/test4') echo 1835008000 ;;
@@ -47,6 +48,7 @@ else echo '440000 4096 300000'; fi
 SH
 cat >"$work/bin/dumpe2fs" <<'SH'
 #!/bin/bash
+[[ ${IO_FAIL:-0} != 1 ]] || exit 1
 if [[ ${SMALL_FS:-0} == 1 ]]; then echo 'Block count: 65536'; else echo 'Block count: 448000'; fi
 echo 'Block size: 4096'
 SH
@@ -81,7 +83,7 @@ sed '/^if \[\[ "${1:-}" == --partlabel-guard \]\]; then/,$d' mkosi/runtime/ceral
 # systemd-ordering-cycle.test.sh using rendered installed units and drop-ins.
 echo 'data readiness failure/pending/success and health refusal pass'
 
-# Undersized media is refused.
+# Image-length media used to pass preflash but could never stage an update.
 for media in 8000000000 14999999999; do
   if timeout 2s env MEDIA_BYTES="$media" bash "$helper" >"$work/capacity-error" 2>&1; then exit 1; else status=$?; fi
   [[ "$status" == 78 ]]
@@ -108,18 +110,38 @@ grep -qx 'BOOT_B_LEFT=0' "$CERALIVE_BOOT_STATE_FILE"
 echo 'capacity boundary, terminal refusal and finite boot-attempt regression pass'
 
 # Receipts distinguish every fatal readiness class without disclosing device paths.
-for scenario in media growth filesystem incomplete full readonly inventory; do
+for scenario in media growth filesystem incomplete full readonly inventory cardro io; do
   case "$scenario" in
+    cardro) envs=(CARD_RO=1); expected='card-read-only' ;;
+    io) envs=(IO_FAIL=1); expected='card-io-failed' ;;
     media) envs=(MEDIA_BYTES=8000000000); expected='media-too-small' ;;
     growth) envs=(GROW_STATE=failure); expected='partition-growth' ;;
     filesystem) envs=(FS_STATE=failure); expected='filesystem-growth' ;;
     incomplete) envs=(SMALL_FS=1); expected='filesystem-incomplete' ;;
     full) envs=(LOW_FREE=1); expected='data-full' ;;
-    readonly) envs=(DATA_OPTIONS=ro); expected='data-unusable' ;;
+    readonly) envs=(DATA_OPTIONS=ro); expected='card-read-only' ;;
     inventory) envs=(ROOT_BYTES=unknown); expected='readiness-failed' ;;
   esac
   if env "${envs[@]}" bash "$helper"; then exit 1; fi
   grep -q "^$expected " "$CERALIVE_DATA_STATUS_FILE"
+  if [[ "$scenario" == io ]]; then
+    python3 - "$CERALIVE_DATA_STATUS_FILE" "$work" <<'PY_MESSAGE'
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('attention', 'mkosi/runtime/ceralive-attention.py')
+a = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+a.INPUT = Path(sys.argv[2]) / 'conditions'
+a.INPUT.mkdir()
+a.data_condition(Path(sys.argv[1]))
+item = json.loads((a.INPUT / 'data-readiness.json').read_text())
+assert item['line'] == "The box couldn't prepare its storage.", item
+assert 'image' in item['fix'] and 'different card' in item['fix'], item
+spanish = Path('docs/unsafe-storage.es-419.md').read_text()
+assert 'La caja no pudo preparar su almacenamiento' in spanish
+assert 'falsa o defectuosa' not in spanish
+PY_MESSAGE
+  fi
 done
 bash "$helper"
 [[ ! -e $CERALIVE_DATA_STATUS_FILE ]]

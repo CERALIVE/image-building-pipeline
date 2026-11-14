@@ -41,9 +41,9 @@ with tempfile.TemporaryDirectory() as tmp:
         a.data_condition(receipt)
         posted=json.loads((a.INPUT/'data-readiness.json').read_text())
         assert posted['severity']=='fatal'
-        assert 'Minimum media: 15000000000 bytes' in posted['detail']
+        assert 'minimum media: 15000000000 bytes' in posted['detail']
         if reason == 'media-too-small':
-            assert '16 GB card or larger' in posted['line'] and '16 GB' in posted['fix']
+            assert 'card is too small' in posted['line'] and '16 GB' in posted['fix']
         assert reason in posted['detail'] or reason=='readiness-failed'
         a.render([posted],out)
         assert posted['line'] in (out/'index.html').read_text()

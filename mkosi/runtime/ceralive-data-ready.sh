@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ROCK root profiles require completed growth and usable update staging.
+# Fixed root profiles require completed growth and usable update staging.
 set -euo pipefail
 # shellcheck source=mkosi/runtime/ceralive-data-capacity-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ceralive-data-capacity-lib.sh"
@@ -37,6 +37,8 @@ media_bytes=$(lsblk -bdnro SIZE "/dev/$root_parent")
 [[ "$media_bytes" =~ ^[1-9][0-9]{0,14}$ ]] || refuse 'invalid boot media capacity'
 reason=media-too-small
 (( media_bytes >= minimum_media )) || capacity_refuse "boot media needs at least $minimum_media measured bytes; got $media_bytes"
+reason=card-read-only
+[[ "$(lsblk -dnro RO "/dev/$root_parent")" == 0 ]] || refuse 'boot card is read-only or its state is unknown'
 reason=partition-growth
 systemctl is-active --quiet ceralive-grow-data.service || refuse 'partition growth failed or is pending'
 reason=filesystem-growth
@@ -47,12 +49,15 @@ data=$(readlink -f "$(findmnt -nro SOURCE /data)")
 [[ "$root_parent" =~ ^[a-zA-Z0-9._-]+$ && "$(lsblk -dnro PKNAME "$data")" == "$root_parent" ]] || refuse '/data is not on the boot disk'
 case "$(lsblk -dnro PARTLABEL "$data")" in data|xdata) ;; *) refuse 'wrong data partition label' ;; esac
 [[ "$(findmnt -nro FSTYPE /data)" == ext4 ]] || refuse '/data is not ext4'
+reason=card-read-only
 [[ ",$(findmnt -nro OPTIONS /data)," == *,rw,* ]] || refuse '/data is not writable'
+reason='data-unusable'
 partition_bytes=$(lsblk -bdnro SIZE "$data")
 read -r blocks block_size available < <(stat -f -c '%b %S %a' /data)
 [[ "$partition_bytes" =~ ^[1-9][0-9]{0,14}$ && "$blocks" =~ ^[0-9]{1,15}$ && "$block_size" =~ ^[1-9][0-9]{0,5}$ && "$available" =~ ^[0-9]{1,15}$ ]] || refuse 'invalid capacity inventory'
 # statfs excludes ext4 overhead from total blocks. Compare the superblock's
 # physical filesystem extent, not statfs payload capacity, to the partition.
+reason=card-io-failed
 metadata=$(LC_ALL=C dumpe2fs -h "$data" 2>/dev/null) || refuse 'cannot read data filesystem geometry'
 read -r filesystem_blocks filesystem_block_size < <(awk -F: '
   $1=="Block count" {blocks=$2; n++}

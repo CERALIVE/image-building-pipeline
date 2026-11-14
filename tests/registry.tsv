@@ -237,3 +237,4 @@ tests/attention.test.sh	shell	unit	default-shell	Shared attention producers, out
 tests/attention-console.bats	bats	unit	default-bats	Dedicated diagnostic VT startup persistence and login/font hand-back
 tests/attention-console.test.py	tool	unit	invoked-by-suite	Fake VT state machine driven by attention-console.bats
 tests/attention-vt-vm.test.sh	shell	integration	opt-in	Disposable RAM-only guest exercises real getty and VT persistence/font hand-back
+tests/unsafe-storage.test.sh	shell	unit	default-shell	Terminal unsafe storage messages and onboarding HTTP probe

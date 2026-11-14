@@ -70,6 +70,7 @@ def render(items, directory=OUTPUT):
     top = items[0] if items else None
     title = top['line'] if top else 'No attention conditions reported.'
     body = '<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Device status</title>'
+    body += ("<p>The box can't start safely.</p>" if top and top['id'] == 'data-readiness' else '')
     body += '<h1>' + html.escape(title) + '</h1>'
     if top:
         body += '<p>' + html.escape(top['fix']) + '</p><details><summary>Details</summary><p>' + html.escape(top['detail']) + '</p></details>'
@@ -100,7 +101,9 @@ def data_condition(receipt=Path('/run/ceralive-data-status')):
         (INPUT / 'data-readiness.json').unlink(missing_ok=True)
         return
     messages = {
-        'media-too-small': ('SD card too small: this image needs a 16 GB card or larger.', 'Use a 16 GB card or larger and write the image to it again.'),
+        'media-too-small': ('This card is too small for the box.', 'Use a card sold as 16 GB or bigger. Set it up with the image again.'),
+        'card-read-only': ('This card is read-only.', 'Check the adapter lock. If the card stays read-only, set up a different card.'),
+        'card-io-failed': ("The box couldn't prepare its storage.", "Use local recovery to check the filesystem or set up the card with the image again. If failures persist, set up a different card."),
         'data-full': ('The card does not have enough free space.', 'Use local recovery to free space, then restart the device.'),
         'partition-growth': ('The card could not finish getting ready.', 'Use local recovery to check the card, then restart the device.'),
         'filesystem-growth': ('The card could not finish getting ready.', 'Use local recovery to check the card, then restart the device.'),
@@ -110,13 +113,13 @@ def data_condition(receipt=Path('/run/ceralive-data-status')):
     if reason not in messages:
         reason = 'data-unusable'
     sizes = [v if re.fullmatch(r'[0-9]{1,20}', v) else 'unknown' for v in (media, partition, filesystem, available)]
-    detail = 'Reason: {}. Media bytes: {}; data partition bytes: {}; filesystem bytes: {}; available bytes: {}. Minimum media: 15000000000 bytes; minimum available: 1073741824 bytes.'.format(reason, *sizes)
+    detail = 'Reason: {}. Media bytes: {}; data partition bytes: {}; filesystem bytes: {}; available bytes: {}. Current image minimum media: 15000000000 bytes. A card sold as 16 GB holds a little under 16 GB, which is normal and passes; minimum available: 1073741824 bytes.'.format(reason, *sizes)
     publish('data-readiness', 'fatal', line, detail, fix)
 
 
 def probes(thermal=Path('/sys/class/thermal')):
     data_condition()
-    if not Path('/run/ceralive-data-status').exists() and command('systemctl', 'is-failed', 'ceralive-data-ready.service') == 'failed':
+    if not Path('/run/ceralive-data-status').exists() and (command('systemctl', 'is-failed', 'ceralive-data-ready.service') == 'failed' or any(command('systemctl', 'is-failed', unit) == 'failed' for unit in ('ceralive-grow-data.service', 'systemd-growfs@data.service', 'data.mount'))):
         publish('data-readiness', 'fatal', 'The card is not ready to use safely.',
                 'The storage readiness check failed or timed out.',
                 'Use local recovery to check the card, then restart the device.')
@@ -187,7 +190,8 @@ class Console:
                     columns, rows = 80, 25
                 columns, rows = max(20, columns), max(5, rows)
                 lines = []
-                for value in (top['line'], '', top['fix'], '', 'Details: ' + top['detail']):
+                heading = "The box can't start safely. " if top['id'] == 'data-readiness' else ''
+                for value in (heading + top['line'], '', top['fix'], '', 'Details: ' + top['detail']):
                     lines.extend(textwrap.wrap(value, width=columns) or [''])
                 # Keep the recovery shortcut visible even for very long details.
                 lines = lines[:rows - 4]
@@ -229,7 +233,7 @@ def listener(items):
     # stop a running application just to display an attention condition.
     ui = command('systemctl', 'is-active', 'ceralive.service')
     portal = command('systemctl', 'is-active', 'ceralive-portal.socket')
-    if any(i['id'] == 'data-readiness' for i in items) and command('systemctl', 'is-failed', 'ceralive-data-ready.service') == 'failed' and ui in ('failed', 'inactive') and portal in ('inactive', 'failed'):
+    if any(i['id'] == 'data-readiness' for i in items) and ui in ('failed', 'inactive') and portal in ('inactive', 'failed'):
         command('systemctl', '--no-block', 'start', 'ceralive-data-diagnostic.socket')
     else:
         command('systemctl', '--no-block', 'stop', 'ceralive-data-diagnostic.socket')

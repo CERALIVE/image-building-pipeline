@@ -111,7 +111,7 @@ UNIT
     install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-ready.sh" /usr/libexec/ceralive/ceralive-data-ready
     cat >/etc/systemd/system/ceralive-data-ready.service <<'UNIT'
 [Unit]
-Description=Verify ROCK persistent data readiness for health and updates
+Description=Verify persistent data readiness for health and updates
 Wants=ceralive-attention.service data.mount ceralive-grow-data.service systemd-growfs@data.service
 After=ceralive-grow-data.service data.mount systemd-growfs@data.service
 
