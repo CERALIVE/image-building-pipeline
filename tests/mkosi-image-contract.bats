@@ -1273,22 +1273,43 @@ UNIT
 #     source content remains stable for fixed inputs and SOURCE_DATE_EPOCH.
 # ===========================================================================
 
+@test "repro: slot writer refuses mke2fs without timestamp clamping" {
+  local shim="$BATS_TEST_TMPDIR/old-mkfs" tree="$BATS_TEST_TMPDIR/tree"
+  mkdir -p "$shim" "$tree"
+  cat >"$shim/mkfs.ext4" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == -V ]]; then echo 'mke2fs 1.46.5 (30-Dec-2021)' >&2; exit 0; fi
+echo 'unsupported formatter invoked' >&2
+exit 99
+SH
+  chmod +x "$shim/mkfs.ext4"
+  run env PATH="$shim:$PATH" SOURCE_DATE_EPOCH=1700000000 \
+    bash -c 'source "$1/lib/common.sh"; source "$1/lib/disk/slot-image.sh"; make_slot_image "$2" "$3"' \
+    _ "$PIPELINE_DIR" "$tree" "$BATS_TEST_TMPDIR/rootfs.ext4"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'e2fsprogs >= 1.47.1 is required for timestamp clamping'* ]]
+  [[ "$output" != *'unsupported formatter invoked'* ]]
+}
+
 @test "repro: double-build of rock-5b-plus retains the same ext4 content and compatible" {
   repro_prereqs || skip "rauc/ext4/dev-PKI not available"
   build_repro_bundle "$BATS_TEST_TMPDIR/r1" 1700000000
   build_repro_bundle "$BATS_TEST_TMPDIR/r2" 1700000000
   [ -f "$BATS_TEST_TMPDIR/r1/fixed.raucb" ]
   [ -f "$BATS_TEST_TMPDIR/r2/fixed.raucb" ]
-  local i info clock tree="$BATS_TEST_TMPDIR/repro-tree" shim="$BATS_TEST_TMPDIR/old-mkfs"
+  local i info clock tree="$BATS_TEST_TMPDIR/repro-tree" shim="$BATS_TEST_TMPDIR/mkfs-env"
   mkdir -p "$shim"
   cat >"$shim/mkfs.ext4" <<EOF
 #!/usr/bin/env bash
-unset SOURCE_DATE_EPOCH
+[[ "\${SOURCE_DATE_EPOCH:-}" == 1700000000 ]] || exit 42
 exec "$(command -v mkfs.ext4)" "\$@"
 EOF
   chmod +x "$shim/mkfs.ext4"
   for i in r1 r2; do
-    # Older mke2fs ignores SOURCE_DATE_EPOCH; vary its ambient clock explicitly.
+    # Reading a source file may update atime; exercise distinct access histories.
+    touch -a -d @1800000000 "$tree/etc/hostname"
+    if [ "$i" = r2 ]; then touch -a -d @1900000000 "$tree/etc/hostname"; fi
+    # Vary the ambient formatter clock independently of SOURCE_DATE_EPOCH.
     if [ "$i" = r1 ]; then clock=1700000001; else clock=1800000000; fi
     info="$(rauc info --keyring="$PIPELINE_DIR/.dev-keys/root-ca.pem" "$BATS_TEST_TMPDIR/$i/fixed.raucb")"
     [[ "$info" == *'Bundle Format:  verity'* ]]
@@ -1300,6 +1321,10 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(stat -c '%s' "$BATS_TEST_TMPDIR/$i/rootfs.ext4")" -eq 4294967296 ]
     [ "$(debugfs -R 'cat /etc/hostname' "$BATS_TEST_TMPDIR/$i/rootfs.ext4" 2>/dev/null)" = ceralive ]
+    run debugfs -R 'stat /etc/hostname' "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'atime: 0x6553f100:00000000'* ]]
+    e2fsck -fn "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
   done
   cmp "$BATS_TEST_TMPDIR/r1/rootfs.ext4" "$BATS_TEST_TMPDIR/r2/rootfs.ext4"
 }

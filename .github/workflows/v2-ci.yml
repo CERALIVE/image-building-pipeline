@@ -158,7 +158,8 @@ jobs:
 
   bats:
     name: bats manifest unit suite
-    runs-on: ubuntu-latest
+    # Timestamp clamping needs e2fsprogs >= 1.47.1; avoid older latest runners.
+    runs-on: ubuntu-26.04
     needs: [changes, schema-validate]
     if: needs.changes.outputs.code == 'true'
     steps:

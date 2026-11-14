@@ -13,6 +13,26 @@ det_uuid() {
   printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
 }
 
+# SOURCE_DATE_EPOCH clamps imported inode times starting with e2fsprogs 1.47.1.
+# FAKE_TIME alone only pins newly created metadata, not the -d source atimes.
+slot_require_timestamp_clamping() {
+  local version
+  version="$(mkfs.ext4 -V 2>&1)" || return 1
+  if [[ ! "$version" =~ mke2fs\ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] ||
+    (( BASH_REMATCH[1] < 1 || (BASH_REMATCH[1] == 1 &&
+       (BASH_REMATCH[2] < 47 || (BASH_REMATCH[2] == 47 && BASH_REMATCH[3] < 1))) )); then
+    printf 'e2fsprogs >= 1.47.1 is required for timestamp clamping\n' >&2
+    return 1
+  fi
+}
+
+# All directory population paths share the tool floor and explicit build clock.
+slot_mkfs_ext4() {
+  local epoch="${SOURCE_DATE_EPOCH:-0}"
+  slot_require_timestamp_clamping || return 1
+  SOURCE_DATE_EPOCH="${epoch}" E2FSPROGS_FAKE_TIME="${epoch}" mkfs.ext4 "$@"
+}
+
 # inject_boot_payload <ext4-image> <payload-dir> — add the compiled boot.scr and its
 # SHA-256 line (install-boot.sh boot-payload) under /usr/lib/ceralive/boot/ of a finished
 # slot image, for ceralive-boot-script-sync. Done on the image, not the tree: the tree is
@@ -57,8 +77,7 @@ make_slot_image() {
   truncate -s $((4096 * 1024 * 1024)) "${out}"
   if tar -C "${tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4
-    # Older mke2fs ignores SOURCE_DATE_EPOCH but honors its own clock override.
-    E2FSPROGS_FAKE_TIME="${SOURCE_DATE_EPOCH:-0}" mkfs.ext4 -q -L "${label}" -U "${uuid}" -E hash_seed="${uuid}" \
+    slot_mkfs_ext4 -q -L "${label}" -U "${uuid}" -E hash_seed="${uuid}" \
       -d "${tree}" "${out}" || return 1
   else
     if command -v docker >/dev/null 2>&1; then runtime=docker
@@ -71,14 +90,14 @@ make_slot_image() {
       -e "E2FSPROGS_FAKE_TIME=${SOURCE_DATE_EPOCH:-0}" \
       -e "FS_UUID=${uuid}" -e "FS_LABEL=${label}" \
       -v "${tree}:/rootfs-tree:ro" -v "${img_dir}:/out" "${image}" \
-      bash -euo pipefail -c '
+      bash -euo pipefail -c "$(declare -f slot_require_timestamp_clamping slot_mkfs_ext4)"$'\n''
         export DEBIAN_FRONTEND=noninteractive
         if ! command -v mkfs.ext4 >/dev/null 2>&1; then
           apt-get update -qq
           apt-get install -y --no-install-recommends \
             -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
         fi
-        mkfs.ext4 -q -L "${FS_LABEL}" -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
+        slot_mkfs_ext4 -q -L "${FS_LABEL}" -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
           -d /rootfs-tree "/out/'"${img_base}"'"
       ' || return 1
   fi

@@ -41,10 +41,10 @@ assert_contains 'verity bundle sources shared slot-image producer' "${REPO}/lib/
 assert_contains 'shared producer uses common ext4 reserve assertion' "${REPO}/lib/disk/slot-image.sh" 'slot_reserve_assert_ext4 "${out}" "${label}"'
 if awk '
   /^make_slot_image\(\) \{/ { active=1 }
-  active && /mkfs\.ext4 -q/ { mkfs++ }
+  active && /slot_mkfs_ext4 -q/ { mkfs++ }
   active && /slot_reserve_assert_ext4 "\$\{out\}" "\$\{label\}"/ { gate=NR }
   active && /^}/ { exit !(mkfs == 2 && gate > 0 && gate > first_mkfs) }
-  active && /mkfs\.ext4 -q/ && !first_mkfs { first_mkfs=NR }
+  active && /slot_mkfs_ext4 -q/ && !first_mkfs { first_mkfs=NR }
 ' "${REPO}/lib/disk/slot-image.sh"; then ok 'shared producer gates both mkfs paths'; else bad 'ext4 reserve check does not follow both mkfs paths'; fi
 if awk '
   /^populate_rootfs_slot\(\) \{/ { active=1 }

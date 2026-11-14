@@ -50,6 +50,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "${HERE}/common.sh"
 
+# shellcheck source=lib/disk/slot-image.sh
+source "${HERE}/disk/slot-image.sh"
+
 # Sourced (not exec'd) for part_field / sectors_to_mib / part_count on the build +
 # verify paths. verify-disk.sh skips its standalone main() when sourced.
 # shellcheck source=lib/verify-disk.sh
@@ -108,15 +111,6 @@ stage_repart_dir_x86() {
 }
 
 # ---------------------------------------------------------------------------
-# det_uuid <seed> — STABLE RFC-4122-shaped UUID derived from <seed> (reproducible
-# rootfs_a). Same scheme as assemble-disk.sh.
-# ---------------------------------------------------------------------------
-det_uuid() {
-  local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
-  printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
-}
-
-# ---------------------------------------------------------------------------
 # populate_rootfs_a <img> <rootfs_tree> — write the mkosi rootfs tree into the
 # rootfs_a slot (partition 2). systemd-repart --offline FORMATS the ext4 slot but
 # never populates it; without this the flashed board loads GRUB + kernel then PANICS
@@ -143,7 +137,7 @@ populate_rootfs_a() {
   local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-rootfs_a")"
   if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4
-    mkfs.ext4 -q -L rootfs_a -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
+    slot_mkfs_ext4 -q -L rootfs_a -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
       -d "${rootfs_tree}" "${rootfs_img}" \
       || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
   else
@@ -177,14 +171,14 @@ _populate_rootfs_a_in_container() {
     -v "${tree}:/rootfs-tree:ro" \
     -v "${img_dir}:/out" \
     "${image}" \
-    bash -euo pipefail -c '
+    bash -euo pipefail -c "$(declare -f slot_require_timestamp_clamping slot_mkfs_ext4)"$'\n''
       export DEBIAN_FRONTEND=noninteractive
       if ! command -v mkfs.ext4 >/dev/null 2>&1; then
         apt-get update -qq
         apt-get install -y --no-install-recommends \
           -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
       fi
-      mkfs.ext4 -q -L rootfs_a -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
+      slot_mkfs_ext4 -q -L rootfs_a -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
         -d /rootfs-tree "/out/'"${img_base}"'"
     ' || die "containerized mkfs.ext4 -d failed populating rootfs_a from ${tree}"
 }
