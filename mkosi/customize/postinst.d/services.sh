@@ -409,6 +409,8 @@ setup_boot_healthcheck() {
   mkdir -p /usr/local/bin
   install -m 0755 "${src}/ceralive-healthcheck.sh" /usr/local/bin/ceralive-healthcheck.sh
   install -m 0644 "${src}/ceralive-healthcheck.service" /etc/systemd/system/ceralive-healthcheck.service
+  install -m 0644 "${src}/ceralive-mark-good.service" /etc/systemd/system/ceralive-mark-good.service
+  enable_service ceralive-mark-good.service
   enable_service ceralive-healthcheck.service
   [[ -f "${src}/ceralive-partlabel-guard.service" ]] \
     || die "PARTLABEL guard unit source not found: ${src}/ceralive-partlabel-guard.service"

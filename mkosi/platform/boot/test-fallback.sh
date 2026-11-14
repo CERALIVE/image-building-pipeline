@@ -314,6 +314,7 @@ printf '847ee4ac-0b00-4043-8d1b-5a5e1eb5b930\n' >"${WORK}/hc-boot-id"
 
 run_healthcheck() { # <conf> <marker> [cerastream-bin] -> healthcheck exit code
   local rc=0
+  CERALIVE_HEALTHCHECK_ASSESSMENT="${WORK}/health-assessment" \
   CERALIVE_HEALTHCHECK_CONF="$1" CERALIVE_HEALTHCHECK_MARKER="$2" \
   SYSTEMCTL_BIN="${HC_STUBS}/systemctl" RAUC_BIN="${HC_STUBS}/rauc" \
   DPKG_BIN="${HC_STUBS}/dpkg" CERALIVE_DPKG_UPDATES_DIR="${WORK}/dpkg-updates" \
@@ -327,7 +328,7 @@ run_healthcheck() { # <conf> <marker> [cerastream-bin] -> healthcheck exit code
   CERALIVE_FORCE_HEALTHCHECK_FAIL="${WORK}/force-healthcheck-fail" \
   CERASTREAM_BIN="${3:-${HC_STUBS}/cerastream}" SRTLA_SEND_BIN="${HC_STUBS}/srtla_send" \
   IP_BIN="${HC_STUBS}/ip" \
-    bash "${HEALTHCHECK}" >"${WORK}/healthcheck.log" 2>&1 || rc=$?
+    bash -c 'bash "$1" && bash "$1" --mark-good' bash "${HEALTHCHECK}" >"${WORK}/healthcheck.log" 2>&1 || rc=$?
   if [[ "${rc}" -ne 0 ]]; then
     printf '  healthcheck exit %s (%s):\n' "${rc}" "$1" >&2
     while IFS= read -r line; do printf '    %s\n' "${line}" >&2; done <"${WORK}/healthcheck.log"

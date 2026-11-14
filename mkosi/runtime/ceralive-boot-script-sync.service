@@ -6,8 +6,8 @@ ConditionPathExists=/usr/lib/ceralive/boot/boot.scr
 RequiresMountsFor=/boot
 # A failed or skipped healthcheck means the booted slot is unconfirmed: the boot
 # selector must not change then.
-Requires=ceralive-healthcheck.service
-After=ceralive-healthcheck.service
+Requires=ceralive-mark-good.service
+After=ceralive-mark-good.service
 
 [Service]
 Type=oneshot
