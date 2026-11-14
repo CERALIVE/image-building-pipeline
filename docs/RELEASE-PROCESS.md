@@ -1103,11 +1103,12 @@ payload against its SHA-256 hash node before authorizing a flash.
 
 ```bash
 ssh ceralive@<device> 'rauc status'
-ssh ceralive@<device> 'systemctl status ceralive-healthcheck.service'
+ssh ceralive@<device> 'systemctl status ceralive-healthcheck.service ceralive-mark-good.service'
 ```
 
-`ceralive-healthcheck.service` is the gate that decides whether the newly
-booted slot gets `rauc mark-good` — see §8 for the full rollback contract this
+`ceralive-healthcheck.service` assesses the newly booted slot before
+`boot-complete.target`; `ceralive-mark-good.service` then confirms it with
+`rauc mark-good` — see §8 for the full rollback contract this
 feeds into. For the legacy tooling only, hawkBit's Management API reports per-target action status
 (`RUNNING` / `FINISHED` / `ERROR`) for anyone tracking a fleet-wide rollout,
 per the integration contract in `fleet/integration-contract.md`.
@@ -1278,9 +1279,11 @@ same shipped scripts without hardware):
    interrupted first, the currently-running slot remains primary.
 2. On reboot, the device boots the new (now-primary) slot with a **bounded
    bootcount budget** (`BOOT_ATTEMPTS`, default 3).
-3. `ceralive-healthcheck.service` runs after boot and decides the slot's fate:
+3. `ceralive-healthcheck.service` assesses health before `boot-complete.target`.
+   The separate `ceralive-mark-good.service` requires and follows that target:
    - **Healthy** (service active, `cerastream`/`srtla_send` load, SRT
-     reachable) → `rauc mark-good`. The slot's bootcount resets, and the
+     reachable) → boot completion, then `rauc mark-good`. The slot's bootcount
+     resets, and the
      switch to the new slot is now **permanent** — a subsequent reboot does
      **not** revert, even after the confirmation.
    - **Unhealthy** (e.g. a stripped/missing encoder binary, service
@@ -1388,7 +1391,8 @@ hawkBit tooling. If a bundle it distributes is found to be bad:
 ### Healthcheck interplay
 
 The healthcheck (`ceralive-healthcheck.sh`, gated by
-`ceralive-healthcheck.service`) is what makes the fallback contract
+`ceralive-healthcheck.service`, followed by `ceralive-mark-good.service` after
+`boot-complete.target`) is what makes the fallback contract
 **self-driving** rather than requiring an operator to watch every device's
 boot log:
 
@@ -1396,6 +1400,28 @@ boot log:
   confirms the slot the board is running on. `ceralive-slot-sync.sh` marks only
   the other slot good (`rauc status mark-good other`), and only after it has
   mirrored the healthy running slot into it and verified the copy.
+- A successful assessment writes the current boot ID to
+  `/run/ceralive/health-assessment`; reassessment clears it first. The confirmation
+  phase requires that verdict even if invoked directly. Hostname recovery starts
+  the confirmation service after restarting consumers, so a failed initial
+  assessment can still confirm once a retry passes.
+- **Soft-reboot limit:** the verdict identifies a kernel boot, not a userspace
+  instance. A systemd soft reboot preserves both the kernel boot ID and `/run`.
+  Until the new health assessment clears the record, a direct root invocation of
+  `ceralive-healthcheck.sh --mark-good` can accept the previous userspace's passed
+  assessment without running the probes again. Unit-driven confirmation is safe
+  across this boundary: starting `ceralive-mark-good.service` pulls health through
+  `boot-complete.target` before confirmation. The image does not use soft reboot;
+  use the service for confirmation, not the script's internal `--mark-good` phase.
+  The direct phase alone does not establish health in the new userspace.
+- **Recovery sync limit:** after the first health assessment fails, hostname
+  recovery retries health and confirmation, but does not start
+  `ceralive-slot-sync.service` or `ceralive-boot-script-sync.service` again.
+  Their initial dependency jobs failed; a later successful confirmation does not
+  automatically retry them. Both can remain inactive for that boot, as before
+  the assessment/confirmation split. Confirmation therefore does not imply that
+  either sync ran after recovery. A later normal boot queues them again;
+  explicitly starting them after confirmation also retains their existing guards.
 - Confirmation is scoped to the current kernel boot ID, stored beside the
   timestamp in `/data/ceralive/.slot-marked-good`. A previous boot's marker,
   including a legacy timestamp-only one, never suppresses checks. Same-slot

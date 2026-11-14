@@ -7,8 +7,8 @@ Documentation=file:///usr/share/doc/ceralive/partition-contract.md
 # agent) via `systemctl start --no-block ceralive-slot-sync.service`, after the
 # booted slot's OWN healthy-state.json has already survived a reboot and a
 # streaming healthcheck. There is nothing here for `preset-all` to resurrect.
-Requires=ceralive-healthcheck.service
-After=ceralive-healthcheck.service
+Requires=ceralive-mark-good.service
+After=ceralive-mark-good.service
 RequiresMountsFor=/data
 
 [Service]

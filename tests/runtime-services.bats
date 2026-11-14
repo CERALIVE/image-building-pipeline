@@ -272,6 +272,7 @@ load manifest-helpers
   grep -Fq 'Requires=ceralive-migrate-data.service' "$POSTINST_LIB"
   grep -Fq 'RequiresMountsFor=/data' "$POSTINST_LIB"
   [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service'* ]]
+  [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block start ceralive-mark-good.service'* ]]
   [[ "$hostname_unit" == *'ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive-hawkbit-provision.service ceralive-healthcheck.service'* ]]
   [[ "$hostname_unit" == *'RemainAfterExit=yes'* ]]
   [[ "$hostname_unit" != *'OnSuccess='* ]]

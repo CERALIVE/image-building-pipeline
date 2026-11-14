@@ -10,6 +10,7 @@ setup() {
   export CERALIVE_KERNEL_STATE_LIB="${KERNEL_STATE_LIB_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-kernel-state-lib.sh}"
   export CERALIVE_BOOT_STATE_FILE="$FIXTURE/boot-state"
   export BOOT_STATE_BIN="$ROOT/mkosi/platform/boot/ceralive-boot-state.sh"
+  export CERALIVE_HEALTHCHECK_ASSESSMENT="$FIXTURE/health-assessment"
   export CERALIVE_HEALTHCHECK_BOOT_ID_FILE="$FIXTURE/boot-id"
   export CERALIVE_HEALTHCHECK_CMDLINE_FILE="$FIXTURE/cmdline"
   export CERALIVE_HEALTHCHECK_CONF="$FIXTURE/update.conf"
@@ -31,7 +32,13 @@ setup() {
   mkdir -p "$FIXTURE/bin" "$FIXTURE/state" "$FIXTURE/updates"
   export PATH="$FIXTURE/bin:$PATH"
   export ACTIVATE_SCRIPT="${ACTIVATE_SCRIPT_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-rauc-activate.sh}"
-  export HEALTH_SCRIPT="${HEALTH_SCRIPT_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-healthcheck.sh}"
+  export HEALTH_PHASE_SCRIPT="${HEALTH_SCRIPT_OVERRIDE:-$ROOT/mkosi/runtime/ceralive-healthcheck.sh}"
+  export HEALTH_SCRIPT="$FIXTURE/bin/assess-boot"
+  cat > "$HEALTH_SCRIPT" <<'SH'
+#!/bin/bash
+bash "$HEALTH_PHASE_SCRIPT" && bash "$HEALTH_PHASE_SCRIPT" --mark-good
+SH
+
   export EXPECTED_PACKAGE=linux-image-7.2.0-ceralive-rk3588
   export EXPECTED_VERSION=7.2.0-ceralive2
   export EXPECTED_SHA
