@@ -4,7 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 REPO="${PIPELINE_DIR}"
-WORKFLOW="${WORKFLOW:-${REPO}/.github/workflows/release.yml}"
+WORKFLOW="${WORKFLOW:-${REPO}/.github/workflows/release-candidate-build.yml}"
 RELEASE_DOC="${REPO}/docs/RELEASE-PROCESS.md"
 R2_PUBLISHER="${REPO}/ci/publish-immutable-r2-pair.sh"
 
@@ -22,9 +22,22 @@ workflow = yaml.load(workflow_path.read_text(), Loader=yaml.BaseLoader)
 candidate = workflow["jobs"]["candidate"]
 steps = candidate["steps"]
 
-assert candidate["runs-on"] == ["self-hosted", "ceralive-image-builder"]
+assert candidate["runs-on"] == {
+    "group": "image-builder", "labels": ["self-hosted", "ceralive-image-builder"],
+}
 assert workflow["permissions"]["contents"] == "read"
-assert workflow["concurrency"]["cancel-in-progress"] == "false"
+assert workflow["on"] == {"workflow_call": ""}
+assert "concurrency" not in workflow, "the caller owns release concurrency"
+caller = yaml.load((workflow_path.parent / "release.yml").read_text(), Loader=yaml.BaseLoader)
+assert caller["on"] == {"push": {"branches": ["release/**"], "tags": ["v*"]}}
+assert caller["permissions"] == {"contents": "read"}
+assert caller["concurrency"] == {
+    "group": "${{ github.workflow }}-${{ github.ref }}", "cancel-in-progress": "false",
+}
+assert caller["jobs"] == {"candidate": {
+    "uses": "CERALIVE/image-building-pipeline/.github/workflows/release-candidate-build.yml@master",
+    "secrets": "inherit",
+}}
 boards = candidate["strategy"]["matrix"]["board"]
 assert boards == ["rock-5b-plus", "orange-pi-5-plus"]
 assert candidate["strategy"]["fail-fast"] == "false"
@@ -62,6 +75,39 @@ assert steps.index(version_step) < next(
     i for i, s in enumerate(steps) if s.get("name") == "Materialize release trust inputs"
 )
 repo = workflow_path.resolve().parents[2]
+equality = next(s for s in steps if s.get("name") == "Require build steps identical to master")
+checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v7")
+assert checkout["with"]["fetch-depth"] == "0"
+assert steps.index(equality) == steps.index(checkout) + 1
+with tempfile.TemporaryDirectory() as scratch:
+    source = Path(scratch) / ".github/workflows/release-candidate-build.yml"
+    source.parent.mkdir(parents=True)
+    source.write_text(workflow_path.read_text())
+    git_env = {**os.environ, "GIT_MASTER": "1"}
+    for args in (["init", "-q"], ["add", "."],
+                 ["-c", "user.name=Contract", "-c", "user.email=contract@example.invalid",
+                  "commit", "-qm", "candidate"]):
+        subprocess.run(["git", *args], cwd=scratch, env=git_env, check=True, timeout=10)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=scratch,
+                                  env=git_env, text=True).strip()
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", sha],
+                   cwd=scratch, env=git_env, check=True, timeout=10)
+    for changed, expected in ((False, 0), (True, 1)):
+        if changed:
+            source.write_text(source.read_text() + "\n# later master build change\n")
+            subprocess.run(["git", "add", "."], cwd=scratch, env=git_env, check=True, timeout=10)
+            subprocess.run(["git", "-c", "user.name=Contract",
+                            "-c", "user.email=contract@example.invalid", "commit", "-qm", "changed"],
+                           cwd=scratch, env=git_env, check=True, timeout=10)
+            subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"],
+                           cwd=scratch, env=git_env, check=True, timeout=10)
+        result = subprocess.run(["bash", "-c", equality["run"]], cwd=scratch,
+                                env={**git_env, "GITHUB_SHA": sha},
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == expected, result
+        if changed:
+            assert "re-prove on a new release/** branch" in result.stdout, result
+        print(f"master equality: changed={changed} exit={result.returncode}")
 with tempfile.TemporaryDirectory() as tmp:
     output = Path(tmp) / "env"
     for ref, supplied, expected in (

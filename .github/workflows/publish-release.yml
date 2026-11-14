@@ -48,10 +48,13 @@ permissions:
 
 jobs:
   publish:
+    if: github.repository == 'CERALIVE/image-building-pipeline' && github.triggering_actor == 'andrescera'
     concurrency:
       group: ceralive-kernel-floor
       cancel-in-progress: false
-    runs-on: [self-hosted, ceralive-image-builder]
+    runs-on:
+      group: image-builder
+      labels: [self-hosted, ceralive-image-builder]
     environment: release
     timeout-minutes: 180
     steps:

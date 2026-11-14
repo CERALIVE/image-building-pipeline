@@ -4,6 +4,7 @@
 
 | Task | Location |
 |------|----------|
+| **Fork CI, runner groups, owner admission and probes [PARTIAL]** | [CI security contract](ci-security.md); `.github/workflows/`; `tests/workflow-security-contract.test.sh` |
 | Start a build | `./build <board>` — see [`docs/dev-loop.md`](../dev-loop.md) |
 | **Which Debian suite / os-release VERSION_ID the image targets** | `manifests/target-release.env` — the ONE mapping; read it through `lib/shared/target-release-lib.sh::target_release_load`. Gate: `ci/check-suite-literals.sh`; contract: `tests/target-release-derivation.test.sh`. See the "target release has exactly one source of truth" KEY FACT below |
 | **A specific `[N/9]` build stage** | `lib/stages/<stage>.sh` — see the "orchestrate.sh is an ENTRY plus per-stage modules" KEY FACT below |

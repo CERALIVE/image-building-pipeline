@@ -88,86 +88,45 @@ them to bound and hash-check U-Boot FIT payloads before any USB operation.
 
 ---
 
-## 2. (Optional) install a GitHub Actions self-hosted runner
+## 2. Image builder runner admission [PARTIAL: owner cutover pending]
 
-> **This is OPTIONAL and not used today.** There is no automated hardware-flashing
-> workflow, so this bench does not need to be a registered CI runner — the operator
-> runs the flash-and-verify tool by hand (sections 3–9). The registration steps
-> below are retained only for a possible future CI wiring.
->
-> **Credentials are PRIVATE.** If you do register, the token below is **short-lived
-> and repo/org-scoped**. Generate it from the repo's *Settings → Actions → Runners →
-> New self-hosted runner* page (or `gh`), use it within its lifetime, and **never
-> commit it, never echo it into logs, never expose it as a public-repo secret.**
-> If this repo is public, register the runner at the **org** level with the
-> runner restricted to this repo, so the token never lives in public CI config.
+The operator bench needs no runner registration. The production image builder
+is a separate CI role, admitted through the organization group `image-builder`,
+never through a repository registration or a default group. Outside pull
+request checks run on GitHub-hosted runners with read-only permissions, no
+secrets and no environments. First-time contributors need approval; later
+checks run automatically without gaining access to this workstation.
 
-### 2.1 Create a dedicated, unprivileged service user
+The group selects only this repository and exactly four workflow paths at
+`refs/heads/master`: `release-candidate-build.yml`, `publish-release.yml`,
+`real-build-audit.yml`, and `runner-admission-probe.yml`. Image jobs use:
 
-Do **not** run the runner as `root`. Flashing needs USB access via a `udev`
-rule + group membership, not root.
-
-```bash
-sudo useradd -m -s /bin/bash ghrunner
-sudo usermod -aG dialout,plugdev ghrunner   # dialout=serial, plugdev=USB
-sudo -iu ghrunner
+```yaml
+runs-on:
+  group: image-builder
+  labels: [self-hosted, ceralive-image-builder]
 ```
 
-### 2.2 Download + configure the runner
+The group restriction and job admission conditions are both required.
+`release.yml` calls the build at master; caller repository, event/ref and
+`github.triggering_actor == 'andrescera'` are checked before runner assignment.
+Manual audit starts require that actor too; scheduled audits remain automatic.
+Publication additionally uses the `release` approval environment.
 
-```bash
-# as ghrunner, in its home
-mkdir actions-runner && cd actions-runner
-RUNNER_VER="2.319.1"   # pin; check github.com/actions/runner/releases
-curl -fsSL -o runner.tar.gz \
-  "https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-x64-${RUNNER_VER}.tar.gz"
-tar xzf runner.tar.gz
+Group creation and moving the idle runner are separate owner-confirmed steps.
+After stopping its service and removing its repository registration, re-register
+against the organization URL with `--runnergroup image-builder` and
+`--labels ceralive-image-builder`, preserving the name, work directory and
+service configuration. Obtain short-lived tokens privately and never log them.
+Read back workflow restrictions, membership, online/idle state and zero
+repository-level runners before running owner-confirmed admission probes.
+No hardware-flashing job or board runner is registered by this procedure.
 
-# Register. <REPO_URL> e.g. https://github.com/<org>/image-building-pipeline
-# <TOKEN> from Settings → Actions → Runners → New self-hosted runner (expires fast).
-./config.sh \
-  --url <REPO_URL> \
-  --token <TOKEN> \
-  --name ceralive-rk3588-rock5bplus-01 \
-  --labels ceralive-rk3588,rock-5b-plus \
-  --work _work \
-  --unattended \
-  --replace
-```
-
-- **Both labels are the contract.** Jobs select this runner with
-  `runs-on: [self-hosted, ceralive-rk3588, rock-5b-plus]`. Anything else stays on
-  `ubuntu-latest`.
-- `--name` should be unique + identify the physical board.
-
-### 2.3 Install as a service (auto-start, survives reboot)
-
-```bash
-# still in actions-runner, as ghrunner — but svc.sh needs sudo to install the unit
-sudo ./svc.sh install ghrunner
-sudo ./svc.sh start
-sudo ./svc.sh status
-```
-
-The runner now appears **Idle** under *Settings → Actions → Runners*. The
-service restarts on host reboot — important for an always-on HW lab.
-
-### 2.4 Harden the runner
-
-- **This is an operator bench, not a CI runner.** Because no GitHub Actions job
-  runs on this box (there is no automated hardware-flashing workflow), the
-  self-hosted-runner supply-chain risk does not apply. Keep it a plain operator
-  workstation: do NOT register it as a public-repo Actions runner. If you ever
-  wire it into CI in the future, restrict it to trusted refs and a protected
-  environment first.
-- **No long-lived board credential on the box.** The workflow generates an
-  Ed25519 identity under `RUNNER_TEMP`, provisions only its restricted and
-  expiring public key over UART, revokes it after the suite, then removes the
-  private key. The distinct host-local UART signing key authenticates that data
-  envelope; only its public verification key is present in the image.
-- **Ephemeral option:** add `--ephemeral` to `config.sh` so the runner
-  de-registers after one job (re-register via a wrapper/systemd). Safer for
-  public repos; costs a re-register per job.
+The [CI security contract](../docs/agents/ci-security.md) owns exact group paths,
+registration, probe outcomes and the sole-admin checklist required before
+granting anyone else write access. The image builder can reach the runner
+user's stored GitHub login, Docker and the workspace; labels alone do not
+protect these capabilities.
 
 ---
 

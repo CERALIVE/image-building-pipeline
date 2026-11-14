@@ -83,7 +83,7 @@ assert_eq 'local published metadata is usable without gh' 7.2.0-ceralive3 "$(gat
 python3 - "${ROOT}" <<'PY'
 import pathlib, sys, yaml
 root = pathlib.Path(sys.argv[1])
-for filename, job_name in (('v2-ci.yml', 'schema-validate'), ('release.yml', 'candidate')):
+for filename, job_name in (('v2-ci.yml', 'schema-validate'), ('release-candidate-build.yml', 'candidate')):
     job = yaml.load((root/'.github/workflows'/filename).read_text(), Loader=yaml.BaseLoader)['jobs'][job_name]
     steps = job['steps']
     gate = next(s for s in steps if '--candidate' in s.get('run','') and 'check-kernel-version-monotonic.py' in s['run'])

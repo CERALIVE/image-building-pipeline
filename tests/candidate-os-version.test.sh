@@ -29,7 +29,7 @@ else ok 'candidate with a non-CalVer stamp is refused'; fi
 python3 - "${ROOT}" <<'PY' && ok 'build writes the stamp and publish runs the guard' || bad 'workflows are not wired to the guard'
 import pathlib, sys, yaml
 root = pathlib.Path(sys.argv[1])
-release = yaml.safe_load((root / '.github/workflows/release.yml').read_text())
+release = yaml.safe_load((root / '.github/workflows/release-candidate-build.yml').read_text())
 seal = next(s for s in release['jobs']['candidate']['steps'] if s.get('name') == 'Seal candidate metadata')
 assert 'candidate/os-release-version' in seal['run'] and 'CERALIVE_OS_RELEASE_VERSION' in seal['run']
 publish = yaml.safe_load((root / '.github/workflows/publish-release.yml').read_text())

@@ -365,6 +365,10 @@ still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The kernel-stage leg also need
 [`docs/kernel-staging.md`](docs/kernel-staging.md). The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
+The real RAUC GPT fixture settles udev metadata after formatting before reading
+PARTLABELs, with a ten-second deadline. Failed commands and GPT service/client
+logs are printed on failure; the default rootless transition tests cover the
+metadata race and negative controls.
 
 The Avahi harness keeps its small, private fixture under `/var/tmp` regardless
 of `TMPDIR`: libdbus rejects socket paths longer than 99 bytes, so a long
@@ -592,7 +596,8 @@ ci/check-build-log.sh --census-report <build.log>                        # count
 The lint rejects a `BLOCKING` signature, a `FIXED` regression, a signature in no
 table at all, and an `ACCEPTED` signature that appears more often than its
 baseline. There are no wildcard exceptions: every entry is compared with `==`
-against a normalized line. It runs in `release.yml` right after the production
+against a normalized line. It runs in `release-candidate-build.yml`, called by
+`release.yml` at master, right after the production
 candidate build, which is the only place a real production build log exists — the
 PR gate is `DRY_RUN=1` and never executes the image layers.
 
@@ -780,7 +785,7 @@ committed baseline `manifests/bsp-baseline.json`.
 
 - A differing version **or** a same-version content-hash re-spin prints a
   `BSP drift` banner. On the **release path** — any build with
-  `CERALIVE_BUILD_MODE=production`, which is what `release.yml` sets and what
+  `CERALIVE_BUILD_MODE=production`, which is what `release-candidate-build.yml` sets and what
   `ci/build-hardware-candidates.sh` refuses unless the board's trust anchor
   really is a production root — that banner is **fatal**. A development build
   reports it and continues, so local iteration is not blocked.
@@ -874,7 +879,7 @@ to fill the local cache; corrupt remote bytes warn and fall back to origin.
 `CERALIVE_DEBCACHE=0` still disables the whole `.deb` cache and `DRY_RUN=1`
 consults neither tier. Apt indexes and signing metadata are never cached.
 
-Only `release.yml` and `real-build-audit.yml` upload, after build verification
+Only `release-candidate-build.yml` (called by `release.yml`) and `real-build-audit.yml` upload, after build verification
 and only when all `R2_BUILD_CACHE_*` secrets are present. The uploader verifies
 staged bytes against signed metadata/pins and kernel artifacts against manifest,
 deb/DTB and Kconfig gates; S3 `put-object --if-none-match '*'` prevents overwrites
