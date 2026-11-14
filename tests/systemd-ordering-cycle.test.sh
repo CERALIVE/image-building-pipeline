@@ -208,16 +208,62 @@ render_mount() { # $1=src $2=dst $3=unitname
 }
 render_mount /data/log       /var/log       var-log.mount
 render_mount /data/ceralive  /opt/ceralive  opt-ceralive.mount
+nm_bind=$(systemd-escape -p --suffix=mount /etc/NetworkManager/system-connections)
+render_mount /data/nm/system-connections /etc/NetworkManager/system-connections "$nm_bind"
 
-# /data mount + stubs referenced by Before=
-cat >"${ETC}/data.mount" <<'EOF'
-[Unit]
-Description=CeraLive data partition
-[Mount]
-What=/dev/disk/by-partlabel/data
-Where=/data
-Type=ext4
-EOF
+# Execute the shipped ROCK persistence installer through its early-unit block.
+# Rewrite only output paths outside heredocs; unit bodies and fstab options are
+# rendered by the actual shell code, not duplicate fixtures. Later migration /
+# bind mounts are rendered below as before. No host filesystem is modified.
+python3 - "${POSTINST_D}/persistence.sh" "${TMP}/render-growth.sh" <<'PY_RENDER'
+from pathlib import Path
+import re, sys
+text=Path(sys.argv[1]).read_text().split('setup_data_persistence() {',1)[1]
+text, boundary, _=text.partition('\n  mkdir -p /usr/local/sbin')
+assert boundary, 'persistence installer boundary missing'
+lines=[]
+heredoc=None
+for line in text.splitlines():
+    if heredoc:
+        lines.append(line)
+        if line == heredoc:
+            heredoc=None
+        continue
+    match=re.search(r"<<['\"]?(\w+)",line)
+    line=line.replace('/etc/', '${S}/etc/').replace('/usr/', '${S}/usr/')
+    line=line.replace('mkdir -p "${data_root}"', 'mkdir -p "${S}${data_root}"')
+    line=line.replace('install_bounded_apt_metadata /', 'install_bounded_apt_metadata "${S}"')
+    lines.append(line)
+    if match:
+        heredoc=match[1]
+Path(sys.argv[2]).write_text('setup_data_persistence() {\n'+'\n'.join(lines)+'\n}\nsetup_data_persistence\n')
+PY_RENDER
+# Load the real helper definitions, then render their call into the private tree.
+# shellcheck source=mkosi/customize/postinst.d/persistence.sh
+source "${POSTINST_D}/persistence.sh"
+export S CERALIVE_RUNTIME_SRC="${RUNTIME}" BOARD_ID=rock-5b-plus
+log() { :; }
+resolve_partlabel() { printf '%s\n' data; }
+# shellcheck source=/dev/null
+source "${TMP}/render-growth.sh"
+
+# Feed the rendered fstab through the real host generator, including growfs,
+# fsck, nofail, and the partition-growth ordering edge. Keep the real stock
+# growfs template copied with the systemd tree above.
+FSTAB_GENERATOR="${SYS_LIB%/system}/system-generators/systemd-fstab-generator"
+[[ -x "${FSTAB_GENERATOR}" ]] || fail 'systemd fstab generator unavailable'
+SYSTEMD_FSTAB="${S}/etc/fstab" SYSTEMD_IN_INITRD=no \
+  "${FSTAB_GENERATOR}" "${ETC}" "${ETC}" "${ETC}" >"${TMP}/fstab-generator.log" 2>&1 \
+  || { cat "${TMP}/fstab-generator.log" >&2; fail 'fstab generation failed'; }
+[[ -s "${ETC}/data.mount" ]] || fail 'fstab generator did not emit data.mount'
+[[ -e "${ETC}/data.mount.wants/systemd-growfs@data.service" ]] \
+  || fail 'fstab no longer pulls filesystem growth in'
+# Package-owned service payloads are stubs; their installed readiness drop-ins
+# are real and must participate in the same transaction as app and health.
+for consumer in rauc rauc-hawkbit-updater; do
+  printf '[Service]\nExecStart=/bin/true\n' >"${ETC}/${consumer}.service"
+done
+
 cat >"${ETC}/ceralive.service" <<'EOF'
 [Unit]
 Description=ceralive.service stub
@@ -259,18 +305,21 @@ cp "${JOURNAL_FLUSH_DROPIN}" "${ETC}/systemd-journal-flush.service.d/10-ceralive
 systemctl --root "${S}" enable \
   ssh.socket ceralive-ssh-firstboot.service ceralive-ci-uart-bootstrap.service \
   ceralive-migrate-data.service var-log.mount opt-ceralive.mount data.mount \
-  ceralive.service NetworkManager.service ceralive-hostname.service \
+  "$nm_bind" ceralive.service NetworkManager.service ceralive-hostname.service \
   ceralive-machine-id.service ceralive-dpkg-recover.service ceralive-healthcheck.service >/dev/null 2>&1 || true
 mkdir -p "${ETC}/multi-user.target.wants"
 ln -sf ../ssh.service "${ETC}/multi-user.target.wants/ssh.service"
+for consumer in rauc rauc-hawkbit-updater; do
+  ln -sf "../${consumer}.service" "${ETC}/multi-user.target.wants/${consumer}.service"
+done
 ln -sf "${SYS_LIB}/multi-user.target" "${ETC}/default.target"
 
 # systemd-analyze verify is non-deterministic in WHICH job it deletes to break a
 # cycle, so count matched cycle lines across a few runs.
 count_cycles() {
-  local out n total=0
+  local out n total=0 target="${1:-default.target}"
   for _ in 1 2 3; do
-    out="$(systemd-analyze verify --root "${S}" default.target 2>&1 || true)"
+    out="$(systemd-analyze verify --root "${S}" "${target}" 2>&1 || true)"
     n="$(printf '%s\n' "${out}" | grep -c 'Found ordering cycle' || true)"
     total=$((total + n))
   done
@@ -365,6 +414,153 @@ probe_orders_after ceralive.service ceralive-dpkg-recover.service \
 probe_orders_after ceralive-healthcheck.service ceralive-dpkg-recover.service \
   || fail 'healthcheck can start before dpkg recovery'
 echo 'systemd-ordering-cycle: Part E dpkg recovery ordering OK (filesystem, recovery, app, confirmation)'
+
+# --- Part F: ROCK growth -> mount -> growfs -> readiness -> consumers ----
+for edge in \
+  'data.mount ceralive-grow-data.service' \
+  'systemd-growfs@data.service data.mount' \
+  'ceralive-migrate-data.service systemd-growfs@data.service' \
+  'var-log.mount systemd-growfs@data.service' \
+  'opt-ceralive.mount systemd-growfs@data.service' \
+  "$nm_bind systemd-growfs@data.service" \
+  'ceralive-data-ready.service systemd-growfs@data.service' \
+  'ceralive-data-ready.service ceralive-grow-data.service'; do
+  read -r later earlier <<<"$edge"
+  probe_orders_after "$later" "$earlier" || fail "$later can precede $earlier"
+done
+# Requires alone can still start repair in parallel; prove the ordering too.
+data_fsck=$(systemd-escape --path --template=systemd-fsck@.service /dev/disk/by-partlabel/data)
+probe_orders_after "$data_fsck" ceralive-grow-data.service || fail 'fsck can start before growth finishes'
+for consumer in ceralive ceralive-healthcheck rauc rauc-hawkbit-updater; do
+  probe_orders_after "${consumer}.service" ceralive-data-ready.service \
+    || fail "${consumer} can precede data readiness"
+done
+# Dedicated attention VT must not race either independent login service.
+cat >"${S}/usr/lib/systemd/system/getty@.service" <<'UNIT'
+[Service]
+ExecStart=/bin/true
+UNIT
+for login in getty@tty1.service getty@tty2.service; do
+  probe_orders_after ceralive-attention.service "$login" || fail "attention can precede $login"
+done
+for reserved in getty@tty8.service autovt@tty8.service; do
+  [[ $(readlink "${ETC}/$reserved") == /dev/null ]] || fail "$reserved is not reserved for attention"
+done
+(( $(count_cycles multi-user.target) == 0 )) || fail 'attention/getty ordering introduces a cycle'
+# SSH must retain data-mount/identity ordering but not wait for app/update
+# readiness. Rescue must remain acyclic and independent of readiness too.
+for ssh in ssh.service ssh.socket; do
+  probe_orders_after "$ssh" data.mount || fail "$ssh can precede persistent identity mount"
+  if probe_orders_after "$ssh" ceralive-data-ready.service; then
+    fail "$ssh waits for readiness, obstructing diagnostics"
+  fi
+done
+(( $(count_cycles rescue.target) == 0 )) || fail 'rescue transaction has an ordering cycle'
+if probe_orders_after rescue.target ceralive-data-ready.service; then
+  fail 'rescue waits for application data readiness'
+fi
+# Check hard dependency reachability as well as ordering: a bare Requires=
+# could make readiness failure stop SSH without adding any ordering cycle.
+check_rescue_dependencies() {
+  python3 - "$ETC" "${S}/usr/lib/systemd/system" <<'PY_DEPS'
+import configparser
+from pathlib import Path
+import sys
+roots=[Path(p) for p in sys.argv[1:]]
+readiness=configparser.ConfigParser(interpolation=None)
+readiness.read(roots[0]/'ceralive-data-ready.service')
+assert readiness.get('Service','Type') == 'oneshot'
+assert readiness.get('Service','TimeoutStartSec') == '30s'
+assert readiness.get('Service','Restart') == 'no'
+def dependencies(unit):
+    names=[unit]
+    if '@' in unit:
+        names.append(unit.split('@',1)[0]+'@.service')
+    body=next((r/n for n in names for r in roots if (r/n).is_file()),None)
+    conf=configparser.ConfigParser(strict=False,interpolation=None)
+    paths=[] if body is None else [body]
+    for r in reversed(roots):
+        paths.extend(sorted((r/(unit+'.d')).glob('*.conf')))
+    conf.read(paths)
+    result=set()
+    # systemd accumulates repeated dependency directives; ConfigParser keeps
+    # only the last one (fstab-generator emits one Requires per dependency).
+    accumulated={key: set() for key in ('Requires','Requisite','BindsTo')}
+    for path in paths:
+        section=''
+        for line in path.read_text().splitlines():
+            if line.startswith('['):
+                section=line
+            key, sep, value=line.partition('=')
+            if section == '[Unit]' and sep and key in accumulated:
+                if not value.strip():
+                    accumulated[key].clear()
+                else:
+                    accumulated[key].update(value.split())
+    for values in accumulated.values():
+        result.update(values)
+    if any(p=='/data' or p.startswith('/data/') for p in conf.get('Unit','RequiresMountsFor',fallback='').split()):
+        result.add('data.mount')
+    if unit.endswith('.service') and conf.get('Unit','DefaultDependencies',fallback='yes') != 'no':
+        result.add('sysinit.target')
+    for r in roots:
+        result.update(p.name for p in (r/(unit+'.requires')).glob('*'))
+    instance=unit.split('@',1)[1].rsplit('.',1)[0] if '@' in unit else ''
+    return {name.replace('%i', instance) for name in result}
+
+def closure(unit):
+    found=set()
+    pending=[unit]
+    while pending:
+        name=pending.pop()
+        if name in found:
+            continue
+        found.add(name)
+        pending.extend(dependencies(name)-found)
+    return found
+for unit in dependencies('data.mount'):
+    if unit.startswith('systemd-fsck@'):
+        assert 'ceralive-grow-data.service' in closure(unit), 'fsck can write after failed growth'
+assert 'ceralive-grow-data.service' in closure('data.mount'), 'mount can write after failed growth'
+assert 'ceralive-grow-data.service' in closure('systemd-growfs@data.service'), 'growfs can write after failed growth'
+# Failure contract: ordered Requires propagates a failed growfs start job to
+# migration and every writable bind. The cycle probes above separately prove
+# the ordering half; Wants alone must never pass this half of the contract.
+writers=('ceralive-migrate-data.service', 'var-log.mount', 'opt-ceralive.mount',
+         r'etc-NetworkManager-system\x2dconnections.mount')
+for writer in writers:
+    assert 'systemd-growfs@data.service' in closure(writer), writer+' can write after failed growfs'
+for diagnostic in ('ceralive-data-ready.service', 'ceralive-attention.service', 'rescue.target'):
+    assert 'systemd-growfs@data.service' not in closure(diagnostic), diagnostic+' blocked by growfs failure'
+assert 'ceralive-grow-data.service' not in closure('ceralive-attention.service'), 'attention blocked by growth failure'
+for unit in ('ssh.service','ssh.socket','rescue.target'):
+    assert 'ceralive-data-ready.service' not in closure(unit), unit+' hard-requires readiness'
+for unit in ('ceralive.service','ceralive-healthcheck.service','rauc.service','rauc-hawkbit-updater.service'):
+    assert 'ceralive-data-ready.service' in closure(unit), unit+' does not require readiness'
+PY_DEPS
+}
+check_rescue_dependencies || fail 'diagnostic rescue/consumer dependency isolation failed'
+
+# Negative controls prove the fixture sees both the installed drop-ins and
+# early mount graph. Restore only files created inside this synthetic root.
+cp "${ETC}/ceralive-data-ready.service" "${TMP}/readiness-original"
+printf '\n[Unit]\nBefore=data.mount\n' >>"${ETC}/ceralive-data-ready.service"
+(( $(count_cycles) > 0 )) || fail 'readiness-before-mount cycle went undetected'
+cp "${TMP}/readiness-original" "${ETC}/ceralive-data-ready.service"
+cp "${ETC}/rauc.service.d/data-ready.conf" "${TMP}/rauc-dropin-original"
+sed -i '/^After=ceralive-data-ready.service$/d' "${ETC}/rauc.service.d/data-ready.conf"
+if probe_orders_after rauc.service ceralive-data-ready.service; then
+  fail 'missing consumer readiness ordering went undetected'
+fi
+cp "${TMP}/rauc-dropin-original" "${ETC}/rauc.service.d/data-ready.conf"
+mkdir -p "${ETC}/ssh.service.d"
+printf '[Unit]\nRequires=ceralive-data-ready.service\n' >"${ETC}/ssh.service.d/zz-bad-requirement.conf"
+if check_rescue_dependencies >"${TMP}/bad-ssh-dependency.log" 2>&1; then
+  fail 'bare SSH readiness requirement went undetected'
+fi
+rm "${ETC}/ssh.service.d/zz-bad-requirement.conf"
+check_rescue_dependencies || fail 'restored dependency graph failed'
+echo 'systemd-ordering-cycle: Part F ROCK growth, growfs, readiness, consumers and SSH/rescue ordering OK'
 
 echo "systemd-ordering-cycle regression: PASS"
 

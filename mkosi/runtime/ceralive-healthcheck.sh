@@ -434,7 +434,19 @@ marker_matches_boot() {
     grep -Fxq "boot-id ${BOOT_ID}" "${MARKER}"
 }
 
+data_ready_ok() {
+  local helper="${CERALIVE_DATA_READY_BIN:-/usr/libexec/ceralive/ceralive-data-ready}"
+  if [[ -e /etc/systemd/system/ceralive-data-ready.service && ! -x "$helper" ]]; then
+    fail 'data readiness helper missing; slot left unconfirmed'
+    return 1
+  fi
+  if [[ -x "$helper" ]]; then
+    "$helper" || { fail 'persistent data is not ready; slot left unconfirmed'; return 1; }
+  fi
+}
+
 mark_good() {
+   data_ready_ok || return 1
    partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || return 1
    if [[ "${KERNEL_CONFIRM_PENDING:-0}" == 1 ]]; then
      kernel_running_identity_matches || { fail 'kernel identity mismatch'; return 1; }
@@ -472,6 +484,7 @@ mark_good() {
 }
 
 main() {
+   data_ready_ok || exit 1
    partlabel_guard_ok && dpkg_integrity_ok && drill_guard_ok || exit 1
   load_conf
 
