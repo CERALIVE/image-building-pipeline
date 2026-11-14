@@ -1666,8 +1666,15 @@ Measured cost: **+20.9 MiB net** (18 packages added, 2 removed) — see
 WirePlumber picks that profile deterministically whenever the card enumerated one,
 which is the case on any board probed with HDMI audio present. When the card was
 probed with no signal at all, ACP can describe no input profile, the card parks at
-`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until something
-re-enumerates the card — a known, deliberate limitation. The `pro-audio` floor that
+`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until the card
+is re-enumerated. The image installs the root-owned, mode-0755 helper
+`/usr/libexec/ceralive/ceralive-audio-reprobe` for the engine to request this when
+the operator selects a kernel card with no PipeWire node. It accepts only an exact
+ALSA card id, sends remove then add for that card, and limits attempts to one per
+card per 30 seconds, including failures. Each udev command has a one-second limit.
+The engine must still observe a usable node; helper success alone proves no audio.
+Host tests cover the helper and installation; boot-without-signal recovery on a
+physical receiver remains unqualified. The `pro-audio` floor that
 used to cover that case is removed: it published a capture node whose PCM cannot
 start without a signal (`set_hw_params: Link has been severed`), and the engine's
 always-on meter then leaked one PipeWire capture pipeline every 30 s against it —

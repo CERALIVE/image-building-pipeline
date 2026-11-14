@@ -2689,6 +2689,7 @@ pw_run() {
     PIPEWIRE_TMPFILES_DIR="$root/etc/tmpfiles.d" \
     PIPEWIRE_DBUS_DIR="$root/etc/dbus-1/system.d" \
     CERASTREAM_PIPEWIRE_DROPIN_DIR="$root/etc/systemd/system/cerastream.service.d" \
+    CERALIVE_LIBEXEC_DIR="$root/usr/libexec/ceralive" \
     bash -c "source '$POSTINST_ENTRY'; setup_pipewire_system_mode"
 }
 
@@ -2742,6 +2743,10 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ -f "$root/etc/tmpfiles.d/ceralive-pipewire.conf" ]
   [ -f "$root/etc/dbus-1/system.d/ceralive-pipewire-bluez.conf" ]
   [ -f "$root/etc/systemd/system/cerastream.service.d/40-pipewire.conf" ]
+  local helper="$root/usr/libexec/ceralive/ceralive-audio-reprobe"
+  [ "$(stat -c %a "$helper")" = 755 ]
+  [ "$(stat -c %u "$helper")" = "$EUID" ]
+  cmp "$PIPELINE_DIR/mkosi/runtime/ceralive-audio-reprobe.sh" "$helper"
 
   run cat "$root/calls"
   [ "$status" -eq 0 ]
