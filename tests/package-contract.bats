@@ -1946,6 +1946,9 @@ REPRO
 }
 
 @test "dev delta: the resolved debug package SET equals production plus exactly the delta" {
+  # Package identifiers need byte ordering for both sort and comm.
+  local LC_ALL=C
+  export LC_ALL
   local prod debug
   prod="$(CERALIVE_DEBUG_IMAGE=0 runtime_pkg_lists | xargs sed -e 's/#.*//' | awk 'NF{print $1}' | sort -u)"
   debug="$(CERALIVE_DEBUG_IMAGE=1 runtime_pkg_lists | xargs sed -e 's/#.*//' | awk 'NF{print $1}' | sort -u)"
