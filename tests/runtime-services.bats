@@ -161,7 +161,7 @@ load manifest-helpers
 @test "hostname: malformed Avahi snapshots fail closed without persisting identity" {
   local root="$BATS_TEST_TMPDIR/malformed-probe"
   make_hostname_fixture "$root"
-  run run_hostname_script "$root" "" malformed
+  CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" malformed
   [ "$status" -ne 0 ]
   [[ "$output" == *"index=<missing>"* ]]
   [[ "$output" == *"system-hostname=<missing>"* ]]
@@ -492,7 +492,7 @@ SH
   for scenario in misleading-state misleading-name; do
     root="$BATS_TEST_TMPDIR/$scenario"
     make_hostname_fixture "$root"
-    run run_hostname_script "$root" "" "$scenario"
+    CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" "$scenario"
     [ "$status" -ne 0 ]
     [[ "$output" == *"index=<missing>"* ]]
     [[ "$output" == *"system-hostname=<missing>"* ]]
@@ -506,7 +506,7 @@ SH
   for scenario in multiline-state multiline-name; do
     root="$BATS_TEST_TMPDIR/$scenario"
     make_hostname_fixture "$root"
-    run run_hostname_script "$root" "" "$scenario"
+    CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" "$scenario"
     [ "$status" -ne 0 ]
     [[ "$output" == *"index=<missing>"* ]]
     [[ "$output" == *"hostname-file=<missing>"* ]]

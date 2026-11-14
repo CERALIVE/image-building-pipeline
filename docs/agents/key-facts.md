@@ -2,6 +2,14 @@
 
 ## KEY FACTS
 
+**Runtime test timing [EXISTS: host fixtures, not hardware qualification].**
+The hostname fixture keeps the production 120-second ownership deadline and
+still bounds each candidate to four probes; a four-second deadline incorrectly
+treated scheduler delays in synchronous command stubs as Avahi failures.
+Hostname values, collision handling and consumer restart assertions are unchanged.
+Malformed-response fixtures explicitly retain their existing four-second failure
+budget; they must not busy-poll a deliberately unready fake for 120 seconds.
+
 **Kernel releases [PARTIAL: owner settings/publication pending].**
 `ci/kernel-release.py` retains the immutable local candidate engine. Its
 `--publish` adapter requires the exact master workflow, first attempt, approved

@@ -328,6 +328,8 @@ run_hostname_script() {
   local -a script_args=()
   [[ -z "$mode" ]] || script_args+=("$mode")
   local rc=0
+  # Keep the production deadline: the probe count bounds this synchronous fake;
+  # four seconds instead measured how quickly the host could schedule its stubs.
   env HOSTNAME_CALLS="$root/calls" \
       SYSTEM_HOSTNAME_FILE="$root/system-hostname" \
       HOSTNAME_OCCUPIED_NAMES="$occupied" \
@@ -355,7 +357,7 @@ run_hostname_script() {
       AVAHI_RESOLVE_BIN="$root/bin/avahi-resolve" \
       SYSTEMCTL_BIN="$root/bin/systemctl" \
       CERALIVE_HOSTNAME_MAX_INDEX=4 \
-      CERALIVE_HOSTNAME_MAX_WAIT=4 \
+      CERALIVE_HOSTNAME_MAX_WAIT="${CERALIVE_HOSTNAME_MAX_WAIT:-120}" \
       CERALIVE_HOSTNAME_MAX_PROBES=4 \
       CERALIVE_HOSTNAME_POLL_INTERVAL=0 \
       CERALIVE_HOSTNAME_STABLE_CHECKS=2 \
