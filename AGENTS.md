@@ -37,6 +37,8 @@ python3 ci/validate-manifests.py
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=required CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
 Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
+Workflow security: `tests/workflow-security-contract.test.sh` checks fork boundaries,
+checkout credentials and third-party action SHAs; `WORKFLOWS_DIR` selects QA fixtures.
 The kernel-stage contract also needs `CERALIVE_KERNEL_STAGE_ROOTFS`, a pre-exported
 native Debian rootfs; see [staging](docs/kernel-staging.md).
 Build/boot/release lanes are distinct from the lint/test gate; never claim unrun hardware qualification.

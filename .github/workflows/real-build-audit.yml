@@ -47,6 +47,8 @@ jobs:
             "${CLEANUP_IMAGE}" \
             rm -rf -- "${targets[@]}"
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Refresh first-party release evidence
         env:
           # Optional read-only token for the private first-party repos; when unset gh falls back
@@ -58,7 +60,7 @@ jobs:
       - name: Check builder resource budget
         run: ./ci/check-builder-resources.sh
       - name: Set up BuildKit
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Require Debian build cache on this runner
         env:
           CERALIVE_APT_CACHE_CONFIG: ${{ runner.temp }}/apt-cache-ceralive.conf
