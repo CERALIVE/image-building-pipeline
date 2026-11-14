@@ -1,0 +1,29 @@
+[Unit]
+Description=IPv4 translation for IPv6-only cellular uplinks
+After=NetworkManager.service nftables.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/ceralive/ceralive-clat
+ExecStopPost=/usr/lib/ceralive/ceralive-clat --cleanup
+RuntimeDirectoryPreserve=restart
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=ceralive/clat
+RuntimeDirectoryMode=0755
+UMask=0022
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_SETUID CAP_SETGID
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+ReadWritePaths=/run/ceralive/clat /proc/sys/net
+
+[Install]
+WantedBy=multi-user.target

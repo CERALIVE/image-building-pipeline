@@ -383,3 +383,12 @@ setup_dongle_netns_retirement() {
 
   enable_service ceralive-dongle-netns-retire.service
 }
+
+setup_cellular_clat() {
+  local src="${CERALIVE_RUNTIME_SRC:?}"
+  install -D -m 0755 "${src}/ceralive-clat.py" /usr/lib/ceralive/ceralive-clat
+  install -D -m 0644 "${src}/ceralive-clat.service" /usr/lib/systemd/system/ceralive-clat.service
+  # The package's single system-wide translator is not our per-link service.
+  systemctl mask tayga.service
+  enable_service ceralive-clat.service
+}

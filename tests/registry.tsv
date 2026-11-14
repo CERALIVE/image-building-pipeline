@@ -226,3 +226,7 @@ tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/cellular-clat.bats	bats	unit	default-bats	RFC 7050, link lifecycle and image-owned service packaging
+tests/clat-test.py	helper	unit	invoked-by-suite	CLAT discovery and state regression tests
+tests/clat-netns.py	helper	privileged	opt-in	two synthetic cellular links, hotspot and real SRTLA through tayga
+tests/clat-nm-fixture.py	helper	privileged	invoked-by-suite	private NetworkManager D-Bus fixture for the CLAT network test
