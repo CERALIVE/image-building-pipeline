@@ -331,7 +331,8 @@ variants:
       # never published to APT; revision 7's release run failed in the Avahi contract.
       local_version: -ceralive-rk3588
       kernel_release: 7.2.0-ceralive-rk3588
-      package_version: 7.2.0-ceralive8
+      # Revision 9 adds the Rock board ramoops DT reservation at kernel build time.
+      package_version: 7.2.0-ceralive9
 
       # PLATFORM-LAYER INSTALL MAPPING. bindeb-pkg puts arm64 in-tree DTBs under
       # /usr/lib/linux-image-<KERNELRELEASE>/<soc-vendor>/; the U-Boot boot script
@@ -390,6 +391,6 @@ variants:
       # It carries the same `.0` for the same reason edge does.
       local_version: -ceralive-rk3588-test
       kernel_release: 7.2.0-ceralive-rk3588-test
-      package_version: 7.2.0-ceralive1+test1
+      package_version: 7.2.0-ceralive1+test2
 
       dtb_deb_dir: /usr/lib/linux-image-7.2.0-ceralive-rk3588-test/rockchip

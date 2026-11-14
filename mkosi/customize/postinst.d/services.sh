@@ -160,6 +160,7 @@ configure_services() {
   setup_fan_curve
   setup_fan_kickstart
   setup_led_status
+  setup_reset_evidence
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
@@ -570,4 +571,16 @@ setup_rtmp_gateway() {
   rm -rf "${tmpdir}"
 
   enable_service ceralive-rtmp-gateway.service
+}
+
+# Stock pstore owns archiving and acknowledgement in every rootfs slot.
+setup_reset_evidence() {
+  local src="${CERALIVE_RUNTIME_SRC:-}" dest="${PSTORE_DESTROOT:-}"
+  [[ -n "$src" && -f "$src/ceralive-pstore-rotate.sh" ]] || die "pstore runtime source not found"
+  install -D -m 0755 "${src}/ceralive-pstore-rotate.sh" "${dest}/usr/lib/ceralive/ceralive-pstore-rotate"
+  install -D -m 0644 "${src}/ceralive-pstore.conf" "${dest}/etc/systemd/pstore.conf.d/60-ceralive.conf"
+  install -D -m 0644 "${src}/ceralive-pstore.service.conf" "${dest}/etc/systemd/system/systemd-pstore.service.d/60-ceralive.conf"
+  install -D -m 0644 "${src}/ceralive-pstore.tmpfiles.conf" "${dest}/etc/tmpfiles.d/ceralive-pstore.conf"
+  install -D -m 0644 "${src}/ceralive-pstore-tmpfiles.service.conf" "${dest}/etc/systemd/system/systemd-tmpfiles-setup.service.d/60-ceralive-pstore.conf"
+  enable_service systemd-pstore.service
 }

@@ -109,7 +109,7 @@ assert_param KERNEL_VARIANT 'edge-test'
 assert_param KERNEL_PACKAGES 'linux-image-7.2.0-ceralive-rk3588-test'
 assert_param KERNEL_SOURCE_LOCAL_VERSION '-ceralive-rk3588-test'
 assert_param KERNEL_SOURCE_KERNEL_RELEASE '7.2.0-ceralive-rk3588-test'
-assert_param KERNEL_SOURCE_PACKAGE_VERSION '7.2.0-ceralive1+test1'
+assert_param KERNEL_SOURCE_PACKAGE_VERSION '7.2.0-ceralive1+test2'
 assert_param KERNEL_SOURCE_DEFCONFIG_FRAGMENTS \
   'manifests/kernel/rk3588-edge.fragment manifests/kernel/rk3588-edge-test.fragment'
 
@@ -326,9 +326,9 @@ expect_reject "resolved child still requires every inherited pin" \
 # A chain deeper than one level must resolve, so `extends` is inheritance and not
 # a one-off special case for this variant.
 mutate_family "${WORK}/chain.yaml" \
-  '{"edge-test-deep": {"extends": "edge-test", "kernel_source": {"package_version": "7.2.0-ceralive1+test2"}}}'
+  '{"edge-test-deep": {"extends": "edge-test", "kernel_source": {"package_version": "7.2.0-ceralive1+test3"}}}'
 CHAIN_OUT="$(merge_family "${WORK}/chain.yaml" --variant edge-test-deep)"
-if grep -q "^KERNEL_SOURCE_PACKAGE_VERSION.7.2.0-ceralive1+test2$" <<<"${CHAIN_OUT}" \
+if grep -q "^KERNEL_SOURCE_PACKAGE_VERSION.7.2.0-ceralive1+test3$" <<<"${CHAIN_OUT}" \
    && grep -q "rk3588-edge-test.fragment" <<<"${CHAIN_OUT}" \
    && grep -q "^KERNEL_SOURCE_COMMIT.8d3ae59288f1e7d58d76558a6ee96d533bc5019f$" <<<"${CHAIN_OUT}"; then
   ok "a two-deep extends chain resolves grandparent pins and parent fragments"

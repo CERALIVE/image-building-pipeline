@@ -34,6 +34,8 @@ kernel_input_fingerprint() {
       "${KERNEL_LIB_DIR}/checkout.sh" "${KERNEL_LIB_DIR}/builder.sh" \
       "${KERNEL_LIB_DIR}/package.sh" "${KERNEL_LIB_DIR}/artifact-cache.sh" \
       "${KERNEL_LIB_DIR}/only.sh" \
+      "${KERNEL_LIB_DIR}/ramoops.sh" \
+      "${PIPELINE_DIR}/manifests/kernel/rk3588-ramoops.dtsi" \
       "${HERE}/shared/remote-cache.sh" \
       "${KERNEL_CONFIG_VERIFIER_SH:-${HERE}/verify-kernel-config.sh}" \
       "${HERE}/verify-boot-artifacts.sh" \

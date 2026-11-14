@@ -828,7 +828,9 @@ CONFIG_AUTOFS_FS=y
 # NOT SUFFICIENT ON ITS OWN: ramoops still needs a reserved memory region. Without
 # a DT reserved-memory node (or ramoops.mem_address= on the cmdline) ramoops_init
 # registers nothing, /sys/fs/pstore stays empty, and these symbols are inert — a
-# safe no-op, but a no-op. The DT node lives in rk3588-kernel-patches.
+# safe no-op, but a no-op. The DT node lives in rk3588-ramoops.dtsi, injected
+# by lib/kernel/ramoops.sh. Reed-Solomon is a build dependency, not proof that
+# the node enables ECC; ecc-size remains a hardware qualification item.
 CONFIG_WATCHDOG_SYSFS=y
 CONFIG_PSTORE_CONSOLE=y
 CONFIG_PSTORE_RAM=y

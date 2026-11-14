@@ -9,19 +9,36 @@ export ROOT WORK
 
 # Independent stack digests bind both the producer bytes and its coverage list.
 (cd "${ROOT}" && sha256sum --check tests/fixtures/kernel-producer.sha256)
-ok 'production inputs equal stack 9b89e6f plus revision-5 nftables-reject fragment/required-list changes'
+ok 'production inputs match the reviewed kernel and reset-evidence producer snapshot'
 
 kernel_test_repo "${WORK}/repo"
-kernel_test_artifact "${WORK}/artifact" 7.2.0-ceralive8 "${WORK}/repo"
+fixture_version=7.2.0-ceralive8
+kernel_test_artifact "${WORK}/artifact" "${fixture_version}" "${WORK}/repo"
 expected="$(jq -r .input_fingerprint "${WORK}/artifact/kernel-artifact.json")"
 fingerprint() (
   set -a
   eval "$("${WORK}/repo/lib/resolve.sh" rock-5b-plus)"
   set +a
   unset KERNEL_VARIANT
+  export KERNEL_SOURCE_PACKAGE_VERSION="${fixture_version}"
   bash "${WORK}/repo/lib/kernel/released.sh" --board rock-5b-plus \
     --fingerprint-from "${WORK}/artifact/kernel-artifact.json"
 )
+
+assert_eq "unmodified producer matches the fixture version" "${expected}" "$(fingerprint)"
+
+# The reset-evidence producer inputs must invalidate cached kernel artifacts.
+for file in lib/kernel/ramoops.sh manifests/kernel/rk3588-ramoops.dtsi; do
+  cp "${WORK}/repo/${file}" "${WORK}/original"
+  printf '\n' >>"${WORK}/repo/${file}"
+  actual="$(fingerprint)"
+  if [[ "${actual}" == "${expected}" ]]; then
+    bad "${file} must change the kernel fingerprint"
+  else
+    ok "${file} changes the kernel fingerprint"
+  fi
+  cp "${WORK}/original" "${WORK}/repo/${file}"
+done
 
 # Changing release orchestration may not become a kernel input through a wrapper.
 for file in lib/kernel/released.sh lib/kernel_release.py ci/check-kernel-version-monotonic.py \
