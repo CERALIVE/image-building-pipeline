@@ -14,6 +14,14 @@ The recent Rock Type-C correction test fixes `date +%s` at marker mtime plus
 nine seconds. The existing older-than-ten-seconds case still permits a new
 cycle. Time spent scheduling fixture commands cannot change the attachment age.
 
+Fan tests drive fake-governor transitions at the real monitor's poll-sleep
+boundary, after priming and after the preceding tick has consumed its state.
+They sample the actual `cur_state` file at each sleep boundary, including after
+the boost write, and retain the real kick sleep. A mid-kick governor decision
+runs after that observation and before the timer returns. No background writer
+or sampler can outrun the monitor, miss a transient kick, or outlive the test.
+Production discovery, edge detection, writes, timers and restoration are unchanged.
+
 **Kernel releases [PARTIAL: owner settings/publication pending].**
 `ci/kernel-release.py` retains the immutable local candidate engine. Its
 `--publish` adapter requires the exact master workflow, first attempt, approved
@@ -6094,7 +6102,7 @@ deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not 
 reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
 `cooling_device2` that must never be written, so any hardcoded index and any
 hand-invented kick value fails the suite. It pins the kick→restore round trip against
-an independently sampled `cur_state` timeline, the bounded window, all three
+a `cur_state` timeline sampled at the monitor's sleep boundaries, the bounded window, all three
 never-fire edges, startup priming, the mid-kick governor-re-assert race, a
 second cooldown/reheat cycle firing again (the property that makes a oneshot wrong),
 the `max_state`-is-READ-never-a-literal contract, the no-`pwm1`/`mode`/trip rule, the

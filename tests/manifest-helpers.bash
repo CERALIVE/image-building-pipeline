@@ -1593,26 +1593,42 @@ fankick_set_state() {
 # unbounded.
 fankick_run() {
   local sysfs="$1" kick_ms="$2" cycles="$3"; shift 3
+  export -f fankick_set_state fankick_attr
   env CERALIVE_FAN_KICK_THERMAL_DIR="$sysfs" \
       CERALIVE_FAN_KICK_MS="$kick_ms" \
       CERALIVE_FAN_KICK_POLL=0.1 \
       CERALIVE_FAN_KICK_MAX_CYCLES="$cycles" \
-      "$@" bash "$(FANKICK_SCRIPT)"
+      "$@" bash -c '
+        if [[ -n "${FANKICK_GOVERNOR_STATES:-}" ]]; then
+          read -r -a governor_states <<<"$FANKICK_GOVERNOR_STATES"
+          governor_tick=0
+          # The real monitor yields after each observed tick and kick write.
+          # Drive the fake governor there, so neither party can miss an edge.
+          sleep() {
+            local attr="$CERALIVE_FAN_KICK_THERMAL_DIR/cooling_device6/cur_state"
+            if [[ -n "${FANKICK_TIMELINE:-}" ]]; then
+              fankick_attr "$attr" >>"$FANKICK_TIMELINE"
+              printf "\n" >>"$FANKICK_TIMELINE"
+            fi
+            if [[ "$1" == "$KICK_SECONDS" ]]; then
+              if [[ -n "${FANKICK_DURING_KICK:-}" ]]; then
+                fankick_set_state "$attr" "$FANKICK_DURING_KICK"
+              fi
+              # Keep the actual kick timer; only poll scheduling is controlled.
+              command sleep "$@"
+            elif [[ "$1" == "$POLL_INTERVAL" ]]; then
+              if (( governor_tick < ${#governor_states[@]} )); then
+                fankick_set_state "$attr" "${governor_states[governor_tick]}"
+                governor_tick=$((governor_tick + 1))
+              fi
+            else
+              command sleep "$@"
+            fi
+          }
+        fi
+        source "$1"
+      ' bash "$(FANKICK_SCRIPT)"
 }
-
-# fankick_wait_until <check-cmd...> — poll until the check succeeds, bounded at 10 s.
-# Lets a test order a fake-governor write after an OBSERVED monitor event instead
-# of after a guessed delay, which a loaded runner can stretch past the kick window.
-fankick_wait_until() {
-  local i
-  for (( i = 0; i < 200; i++ )); do
-    "$@" && return 0
-    sleep 0.05
-  done
-  return 1
-}
-
-fankick_state_is() { [ "$(fankick_attr "$1")" = "$2" ]; }
 
 
 
