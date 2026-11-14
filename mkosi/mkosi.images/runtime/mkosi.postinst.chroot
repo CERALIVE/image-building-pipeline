@@ -302,6 +302,9 @@ DPkg::Post-Invoke {"/usr/libexec/ceralive/ceralive-reprune";};
 EOF
 
   cat >/etc/apt/apt.conf.d/81ceralive-cache <<'EOF'
+// Binary caches are regenerable and otherwise consume the slot reserve.
+Dir::Cache::pkgcache "";
+Dir::Cache::srcpkgcache "";
 Dir::Cache::archives "/data/ceralive/apt-archives/";
 EOF
   mkdir -p /etc/tmpfiles.d

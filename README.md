@@ -1202,6 +1202,9 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
+APT metadata placement and populated-slot space measurement are documented in
+[APT root reserve](docs/apt-root-reserve.md).
+
 The pinned stable CeraUI v2026.11.2 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
