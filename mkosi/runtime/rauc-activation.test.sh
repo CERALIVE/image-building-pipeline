@@ -123,6 +123,7 @@ ok 'unit properties and both boot mounts'
 
 export CERALIVE_RUNTIME_SRC="$ROOT/mkosi/runtime"
 export CERALIVE_RAUC_ACTIVATE_UNIT_DIR="$TMP/root/etc/systemd/system"
+export CERALIVE_LOGIND_CONF_DIR="$TMP/root/etc/systemd/logind.conf.d"
 export CERALIVE_RAUC_ACTIVATE_HELPER_DIR="$TMP/root/usr/libexec/ceralive"
 # shellcheck source=/dev/null
 source "$INSTALLER"

@@ -163,6 +163,7 @@ configure_services() {
   setup_cpu_governor
   setup_hdmirx_edid
   setup_pipewire_system_mode
+  setup_power_policy
   setup_rauc_activation
   setup_slot_sync
   setup_boot_script_sync
@@ -179,6 +180,15 @@ setup_dpkg_recovery() {
   install -D -m 0755 "${src}/ceralive-dpkg-recover.sh" "${helper_dir}/ceralive-dpkg-recover"
   install -D -m 0644 "${src}/ceralive-dpkg-recover.service" "${unit_dir}/ceralive-dpkg-recover.service"
   enable_service ceralive-dpkg-recover.service
+}
+
+# Power-key safety and the optional maintenance entrypoint apply without RAUC.
+setup_power_policy() {
+  local src="${CERALIVE_RUNTIME_SRC:-}"
+  [[ -n "$src" && -f "$src/60-ceralive-power-key.conf" && -f "$src/ceralive-power.sh" ]] \
+    || die 'power policy source missing'
+  install -D -m 0644 "$src/60-ceralive-power-key.conf" "${CERALIVE_LOGIND_CONF_DIR:-/etc/systemd/logind.conf.d}/60-ceralive-power-key.conf"
+  install -D -m 0755 "$src/ceralive-power.sh" "${CERALIVE_POWER_HELPER_DIR:-/usr/libexec/ceralive}/ceralive-power"
 }
 
 # The unit is installed on both architectures from one source; x86's GRUB ESP

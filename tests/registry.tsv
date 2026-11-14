@@ -226,3 +226,8 @@ tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/checked-shutdown.bats	bats	unit	default-bats	planned power actions honor shutdown inhibitors
+tests/real-logind-contract.sh	shell	privileged	opt-in	CERALIVE_LOGIND_TEST_CONTAINER names an exclusive disposable systemd 257 container
+tests/fixtures/logind/input-ioctl.c	fixture	support	not-executed	synthetic evdev ioctl boundary for real logind
+tests/fixtures/logind/mock-logind.sh	fixture	support	not-executed	private sysfs and FIFO input fixture
+tests/fixtures/logind/key.py	fixture	support	not-executed	short and long synthetic power-key events
