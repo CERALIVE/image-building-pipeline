@@ -2,9 +2,12 @@
 # Parse the workflow security boundary; WORKFLOWS_DIR permits isolated mutations.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python3 - "${WORKFLOWS_DIR:-${ROOT}/.github/workflows}" <<'PY'
+python3 - "${WORKFLOWS_DIR:-${ROOT}/.github/workflows}" "${BASH_SOURCE[0]}" <<'PY'
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -15,7 +18,7 @@ RUNNER_FILES = {
 }
 FORBIDDEN_EVENTS = {"pull_request_target", "workflow_run", "issue_comment"}
 MATRIX_RUNNER = re.compile(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}")
-SECRET = re.compile(r"\bsecrets\s*[.\[]|\$\{\{[^}]*\bsecrets\b")
+SECRET = re.compile(r"\bsecrets\s*[.\[]|\$\{\{[^}]*\bsecrets\b", re.IGNORECASE)
 errors = []
 
 
@@ -158,6 +161,36 @@ for path in files:
                 fail(location, "input", f"step {index} must be a mapping")
                 continue
             check_uses(step, f"{location} step {index}")
+
+if not errors and not os.environ.get("WORKFLOWS_DIR"):
+    cases = (
+        ("lowercase-dot", "${{ secrets.X }}"),
+        ("lowercase-bracket", "${{ secrets['X'] }}"),
+        ("lowercase-context", "${{ toJSON(secrets) }}"),
+        ("mixed-dot", "${{ Secrets.X }}"),
+        ("uppercase-dot", "${{ SECRETS.X }}"),
+        ("mixed-bracket", "${{ Secrets['X'] }}"),
+        ("mixed-context", "${{ toJSON(Secrets) }}"),
+    )
+    script = str(Path(sys.argv[2]).resolve())
+    with tempfile.TemporaryDirectory(prefix="workflow-secrets-") as scratch:
+        for name, expression in cases:
+            Path(scratch, "secrets.yml").write_text(
+                "on: pull_request\npermissions: {contents: read}\njobs:\n"
+                "  shellcheck:\n    runs-on: ubuntu-latest\n    env:\n"
+                f"      PROBE: {expression}\n    steps:\n      - run: echo checked\n"
+            )
+            check = subprocess.run(
+                ["bash", script], env={**os.environ, "WORKFLOWS_DIR": scratch},
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            expected = "secrets.yml job shellcheck: rule 2: pull_request cannot reference secrets"
+            if (check.returncode != 1 or expected not in check.stderr
+                    or "contract: PASS" in check.stdout):
+                fail(f"secrets regression {name}", 2,
+                     f"expected job shellcheck rejection with exit 1; got {check.returncode}")
+            else:
+                print(f"secrets regression {name}: rule 2, job shellcheck, exit 1")
 
 for error in errors:
     print(error, file=sys.stderr)
