@@ -233,3 +233,7 @@ tests/bundle-layout-inspect.test.sh	shell	unit	default-shell	Board-specific full
 tests/grow-data-loop-257.test.sh	shell	integration	opt-in	Privileged target257 loop growth preserves nonzero loader gap and fixed partition bytes
 tests/data-readiness.test.sh	shell	unit	default-shell	ROCK data growth readiness and health refusal
 tests/rock-ota.test.sh	shell	unit	default-shell	Signed update geometry and measured-media policy
+tests/attention.test.sh	shell	unit	default-shell	Shared attention producers, output activation, expiry and safety
+tests/attention-console.bats	bats	unit	default-bats	Dedicated diagnostic VT startup persistence and login/font hand-back
+tests/attention-console.test.py	tool	unit	invoked-by-suite	Fake VT state machine driven by attention-console.bats
+tests/attention-vt-vm.test.sh	shell	integration	opt-in	Disposable RAM-only guest exercises real getty and VT persistence/font hand-back

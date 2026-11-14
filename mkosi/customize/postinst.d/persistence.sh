@@ -77,6 +77,17 @@ setup_data_persistence() {
       "${data_partlabel}" "${data_root}" "$grow_order" >>/etc/fstab
   fi
 
+  install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-data-diagnostic.sh" /usr/libexec/ceralive/ceralive-data-diagnostic
+  install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-attention.py" /usr/libexec/ceralive/ceralive-attention
+  mkdir -p /etc/systemd/system/multi-user.target.wants
+  ln -sfn ../ceralive-attention.service /etc/systemd/system/multi-user.target.wants/ceralive-attention.service
+  # VT8 belongs to attention; tty1/tty2 remain independent rescue logins.
+  ln -sfn /dev/null /etc/systemd/system/getty@tty8.service
+  ln -sfn /dev/null /etc/systemd/system/autovt@tty8.service
+  local diagnostic_unit
+  for diagnostic_unit in ceralive-attention.service ceralive-data-diagnostic.socket ceralive-data-diagnostic@.service; do
+    install -m 0644 "${CERALIVE_RUNTIME_SRC:?}/${diagnostic_unit}" "/etc/systemd/system/${diagnostic_unit}"
+  done
   if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
     mkdir -p /etc/systemd/system/local-fs-pre.target.wants
     install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-grow-data.sh" /usr/libexec/ceralive/ceralive-grow-data
@@ -101,13 +112,13 @@ UNIT
     cat >/etc/systemd/system/ceralive-data-ready.service <<'UNIT'
 [Unit]
 Description=Verify ROCK persistent data readiness for health and updates
-RequiresMountsFor=/data
-Wants=ceralive-grow-data.service systemd-growfs@data.service
+Wants=ceralive-attention.service data.mount ceralive-grow-data.service systemd-growfs@data.service
 After=ceralive-grow-data.service data.mount systemd-growfs@data.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/ceralive/ceralive-data-ready
+ExecStartPost=-/usr/bin/systemctl stop ceralive-data-diagnostic.socket
 TimeoutStartSec=30s
 Restart=no
 RemainAfterExit=yes

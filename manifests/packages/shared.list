@@ -15,7 +15,7 @@
 #     CeraUI) → installed in the APPLICATION layer (Stage 3), never fetched from
 #     Debian by this manifest. The SRT package replaces Debian's TLS-flavor
 #     variants in the same offline local transaction; see LAYER-MAP.md §libsrt.
-#   - Debug/diagnostic tooling (python3, strace, tcpdump, htop, lsof, …) →
+#   - Debug/diagnostic tooling (strace, tcpdump, htop, lsof, …) →
 #     development.delta.list, resolved ONLY when CERALIVE_DEBUG_IMAGE=1
 #   - On-device build tooling (build-essential, git, cmake, gdb, nodejs, …) →
 #     NOT shipped at all, in either variant; see removed.md §(e)
@@ -496,3 +496,7 @@ zstd                     # initramfs-tools uses it in the target rootfs to compr
                          # Config/enrollment: mkosi/runtime/hawkbit-updater/. decisions.md Task 5.
 
 systemd-repart           # grow the existing data partition before /data mounts
+
+kbd                     # Startup failure console font loader
+console-setup-linux     # Lat15-TerminusBold32x16 bitmap console font
+python3                 # Shared attention producer and consumer

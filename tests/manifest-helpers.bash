@@ -1636,7 +1636,7 @@ dev_delta_expected() {
   # `pipewire-bin`'s pw-cli/pw-dump/pw-top, which ship on EVERY image.
   printf '%s\n' \
     alsa-utils can-utils ffmpeg htop i2c-tools iotop iperf3 lsof nano \
-    netcat-openbsd nethogs pciutils python3 socat strace \
+    netcat-openbsd nethogs pciutils socat strace \
     tcpdump usbutils vnstat | sort
 }
 

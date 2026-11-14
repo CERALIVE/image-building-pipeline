@@ -220,6 +220,46 @@ find_candidate_leds() {
   (( ${#CANDIDATE_LEDS[@]} > 0 ))
 }
 
+# Attention temporarily borrows the first discovered indicator. Default mode above
+# retains its never-repoint policy; attention always remembers and returns ownership.
+attention_state=${CERALIVE_LED_ATTENTION_STATE:-/run/ceralive-led-attention}
+if [[ ${1:-} == attention ]]; then
+  mode=${2:-clear}
+  if [[ $mode == clear ]]; then
+    if [[ -r $attention_state ]]; then
+      read -r saved_led saved_trigger <"$attention_state"
+      if ! is_reserved "$saved_led" && [[ $saved_led != */* && $saved_trigger =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        printf '%s\n' "$saved_trigger" >"$LED_CLASS_DIR/$saved_led/trigger" || true
+      fi
+      rm -f "$attention_state"
+    fi
+    exit 0
+  fi
+  case "$mode" in info) on=200; off=4800 ;; warn) on=500; off=4500 ;;
+    critical) on=500; off=500 ;; fatal) on=1000; off=3000 ;; *) exit 64 ;; esac
+  find_candidate_leds || exit 0
+  led=${CANDIDATE_LEDS[0]}
+  if [[ -r $attention_state ]]; then
+    read -r saved_led saved_trigger <"$attention_state"
+    # Keep ownership of the original indicator if discovery order changes.
+    found=false
+    for candidate in "${CANDIDATE_LEDS[@]}"; do
+      [[ $candidate != "$saved_led" ]] || found=true
+    done
+    "$found" || exit 0
+    led=$saved_led
+  fi
+  trigger_attr=$LED_CLASS_DIR/$led/trigger
+  if [[ ! -r $attention_state ]]; then
+    trigger_offered "$trigger_attr" timer || exit 0
+    printf '%s %s\n' "$led" "$(active_trigger "$trigger_attr")" >"$attention_state"
+  fi
+  printf 'timer\n' >"$trigger_attr"
+  printf '%s\n' "$on" >"$LED_CLASS_DIR/$led/delay_on"
+  printf '%s\n' "$off" >"$LED_CLASS_DIR/$led/delay_off"
+  exit 0
+fi
+
 deadline=$((SECONDS + WAIT_SECONDS))
 while ! find_candidate_leds; do
   if (( SECONDS >= deadline )); then

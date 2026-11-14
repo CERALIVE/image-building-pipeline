@@ -435,6 +435,18 @@ for consumer in ceralive ceralive-healthcheck rauc rauc-hawkbit-updater; do
   probe_orders_after "${consumer}.service" ceralive-data-ready.service \
     || fail "${consumer} can precede data readiness"
 done
+# Dedicated attention VT must not race either independent login service.
+cat >"${S}/usr/lib/systemd/system/getty@.service" <<'UNIT'
+[Service]
+ExecStart=/bin/true
+UNIT
+for login in getty@tty1.service getty@tty2.service; do
+  probe_orders_after ceralive-attention.service "$login" || fail "attention can precede $login"
+done
+for reserved in getty@tty8.service autovt@tty8.service; do
+  [[ $(readlink "${ETC}/$reserved") == /dev/null ]] || fail "$reserved is not reserved for attention"
+done
+(( $(count_cycles multi-user.target) == 0 )) || fail 'attention/getty ordering introduces a cycle'
 # SSH must retain data-mount/identity ordering but not wait for app/update
 # readiness. Rescue must remain acyclic and independent of readiness too.
 for ssh in ssh.service ssh.socket; do
