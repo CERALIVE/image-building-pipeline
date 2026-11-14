@@ -126,6 +126,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any
 
 try:
@@ -592,6 +593,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     # Always clear inherited environment grants for profiles with no declaration.
     merged.setdefault("capabilities", [])
+    merged["update_board"] = Path(args.board).stem if "os-updates" in merged["capabilities"] else ""
     flat = flatten(merged)
     for key in sorted(flat):
         # Tab-delimited, RAW value. resolve.sh resolves versions.yaml defer
