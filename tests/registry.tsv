@@ -233,3 +233,5 @@ tests/bundle-layout-inspect.test.sh	shell	unit	default-shell	Board-specific full
 tests/grow-data-loop-257.test.sh	shell	integration	opt-in	Privileged target257 loop growth preserves nonzero loader gap and fixed partition bytes
 tests/data-readiness.test.sh	shell	unit	default-shell	ROCK data growth readiness and health refusal
 tests/rock-ota.test.sh	shell	unit	default-shell	Signed update geometry and measured-media policy
+tests/bounded-apt.test.sh	shell	unit	default-shell	Bounded APT metadata rendering and real APT configuration
+tests/bounded-apt-runtime.test.sh	shell	integration	opt-in	Real APT transaction and size-limited volatile index mount

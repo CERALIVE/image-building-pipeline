@@ -61,6 +61,17 @@ if ! declare -F die >/dev/null 2>&1; then
 fi
 
 
+# A separate helper permits rendering and APT config tests without touching the host.
+install_bounded_apt_metadata() {
+  local root="${1%/}"
+  mkdir -p "$root/var/lib/apt/lists" "$root/etc/apt/apt.conf.d"
+  local entry='tmpfs /var/lib/apt/lists tmpfs nosuid,nodev,noexec,size=192M,mode=0755 0 0'
+  if ! grep -Fxq "$entry" "$root/etc/fstab" 2>/dev/null; then
+    printf '%s\n' "$entry" >>"$root/etc/fstab"
+  fi
+  printf 'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n' >"$root/etc/apt/apt.conf.d/82bounded-metadata"
+}
+
 # --- 12. Persist user-mutable state on /data (verbatim, postinst section 12) -
 setup_data_persistence() {
   local data_root="/data" data_partlabel
@@ -78,6 +89,7 @@ setup_data_persistence() {
   fi
 
   if [[ "${BOARD_ID:-}" == rock-5b-plus ]]; then
+    install_bounded_apt_metadata /
     mkdir -p /etc/systemd/system/local-fs-pre.target.wants
     install -D -m 0755 "${CERALIVE_RUNTIME_SRC:?}/ceralive-grow-data.sh" /usr/libexec/ceralive/ceralive-grow-data
     cat >/etc/systemd/system/ceralive-grow-data.service <<UNIT
