@@ -117,3 +117,21 @@ description: >-
   HDMI capture less affected by EMI. Full 4K@60fps capture/encode. M.2 2280 M-key
   slot for NVMe. Onboard RTL8821CS Wi-Fi, 3.7 A USB power budget — powers most USB
   modems without a hub. eMMC/NVMe/microSD targets (16 GB+).
+
+# Board/image services, consumed through /etc/ceralive/release.
+capabilities:
+  - client-internet
+  - wifi-country
+  - sim-autounlock
+  - modem-control
+  - os-updates
+  - addons
+  - kiosk
+  - bluetooth
+  - network-ingest
+  - device-control
+  - system-control
+  - audio
+  - fan
+  - hw-encoder
+  - hdmi-rx
