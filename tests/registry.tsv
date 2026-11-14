@@ -226,3 +226,5 @@ tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
+tests/host-test-harness.test.sh	shell	unit	default-shell	checks scratch forwarding across the privilege boundary and failure propagation
+tests/ext4-population.test.sh	shell	unit	default-shell	x86 native and container formatter tool floor, explicit epoch and filesystem identity

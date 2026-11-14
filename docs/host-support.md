@@ -609,3 +609,21 @@ required when the host CPU is **not** arm64 (it is unnecessary on Apple Silicon)
 - [`mkosi/mkosi.conf`](../mkosi/mkosi.conf) (§28-29) — binfmt/qemu-user-static cross-arch note
 - [`lib/assemble-disk.sh`](../lib/assemble-disk.sh) — the loop-free Stage-4 assembler
 - [`../../test-results/task-16-host-spikes.txt`](../../test-results/task-16-host-spikes.txt) — full evidence + external refs
+
+### Reproducible ext4 host tests
+
+The slot writer requires e2fsprogs 1.47.1 or later, including in the fallback
+builder container. `SOURCE_DATE_EPOCH` clamps imported inode timestamps in those
+versions. `E2FSPROGS_FAKE_TIME` alone fixes filesystem creation time but does not
+clamp source access times on older versions. UUID and directory hash seed remain
+fixed separately. The writer refuses older tools rather than emitting a
+silently non-reproducible slot. The Bats CI job pins Ubuntu 26.04, whose
+distribution e2fsprogs meets that minimum, instead of the migrating latest label.
+
+For a host gate isolated from host process-name signalling, run
+`TMPDIR=/var/tmp BATS_JOBS=1 ci/run-host-tests.sh`. It needs passwordless sudo,
+`unshare` and `setpriv`. The wrapper passes scratch explicitly after sudo and
+sets `LC_ALL=C`; sudo normally strips `TMPDIR`. Use an absolute writable scratch
+directory with enough disk space for sparse slot images. Optional real-contract
+gates can be passed explicitly, for example
+`ci/run-host-tests.sh env CERALIVE_RUN_REAL_RAUC_CONTRACT=required ./run-tests`.
