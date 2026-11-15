@@ -292,14 +292,19 @@ bring_up_ap() {
 # --- clean link-down only (service ExecStop / shutdown) ------------------------
 # The AP profile + the /data flags are RETAINED so the next boot re-evaluates the
 # trigger; the factory-reset force flag is NOT cleared here. The portal listener is
-# stopped and CeraUI is restored to port 80 so a manual `systemctl stop
-# ceralive-provision` does not leave the device with no reachable control plane.
+# stopped and the explicit manual `stop` verb restores CeraUI to port 80.
+# The service ExecStop selects shutdown cleanup when the manager is stopping.
 stop_ap() {
-  log "stopping provisioning AP link (profile + flags retained; portal down, CeraUI restored)"
-  stop_portal_socket
+  local shutdown="${1:-0}"
+  log "stopping provisioning AP link (profile + flags retained; shutdown=${shutdown})"
+  if [[ "$shutdown" == 1 ]]; then
+    "${SYSTEMCTL}" --no-block stop "${PORTAL_SOCKET}" "${PORTAL_SERVICE_GLOB}" >/dev/null 2>&1 || true
+  else
+    stop_portal_socket
+  fi
   remove_dns_capture
-  "${NMCLI}" connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
-  start_ceraui
+  "${TIMEOUT_BIN}" 5 "${NMCLI}" --wait 3 connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+  if [[ "$shutdown" != 1 ]]; then start_ceraui; fi
 }
 
 # --- TEARDOWN: full provisioning-mode exit (MAC6 end-state) --------------------
@@ -386,6 +391,15 @@ connect_target() {
 main() {
   local cmd="${1:-start}"
   case "${cmd}" in
+    service-stop)
+      # A manual unit stop restores the control plane; a shutdown transaction
+      # must never synchronously start jobs it is trying to stop.
+      case "$("${SYSTEMCTL}" is-system-running 2>/dev/null || true)" in
+        running|degraded|starting) stop_ap ;;
+        *) stop_ap 1 ;;
+      esac
+      exit 0 ;;
+    shutdown) stop_ap 1;     exit 0 ;;
     stop)     stop_ap;       exit 0 ;;
     teardown) teardown_ap 0; exit 0 ;;
     connect)  connect_target "${2:-}" ;;   # exits inside (success 0 / failure 1)
