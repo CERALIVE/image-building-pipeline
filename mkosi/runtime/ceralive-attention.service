@@ -1,0 +1,18 @@
+[Unit]
+Description=Shared device attention conditions
+Wants=getty@tty1.service getty@tty2.service
+After=ceralive-led-status.service getty@tty1.service getty@tty2.service
+Conflicts=getty@tty8.service autovt@tty8.service
+Before=getty@tty8.service autovt@tty8.service
+
+[Service]
+ExecStart=/usr/libexec/ceralive/ceralive-attention watch
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=ceralive/attention ceralive/attention-status
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=restart
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

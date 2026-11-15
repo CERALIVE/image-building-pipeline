@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared offline 4096 MiB ext4 slot writer. Sourced by factory assembly and OTA.
+# Shared offline board-sized ext4 slot writer. Sourced by factory assembly and OTA.
 # SLOT_IMAGE_LABEL selects the initial filesystem label; the OTA image uses a
 # neutral label which the device post-install handler replaces from GPT.
 # shellcheck disable=SC2016 # Single-quoted script expands inside the container.
@@ -7,6 +7,7 @@
 SLOT_IMAGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/shared/slot-reserve.sh
 source "${SLOT_IMAGE_DIR}/../shared/slot-reserve.sh"
+source "${SLOT_IMAGE_DIR}/../shared/layout.sh"
 
 det_uuid() {
   local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
@@ -50,11 +51,12 @@ inject_boot_payload() {
 
 # make_slot_image <tree> <out> — caller owns the temporary output lifecycle.
 make_slot_image() {
-  local tree="$1" out="$2" label="${SLOT_IMAGE_LABEL:-rootfs}" uuid runtime image img_dir img_base
+  local tree="$1" out="$2" label="${SLOT_IMAGE_LABEL:-rootfs}" uuid runtime image img_dir img_base rootfs_mb
   [[ -d "${tree}" ]] || { printf 'rootfs tree not found: %s\n' "${tree}" >&2; return 1; }
   [[ -n "${label}" ]] || { printf 'empty slot image label\n' >&2; return 1; }
+  rootfs_mb=$(ceralive_rootfs_mb) || return $?
   uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-${label}")"
-  truncate -s $((4096 * 1024 * 1024)) "${out}"
+  truncate -s "$((rootfs_mb * 1024 * 1024))" "${out}"
   if tar -C "${tree}" -cf /dev/null . 2>/dev/null; then
     require_cmd mkfs.ext4
     # Older mke2fs ignores SOURCE_DATE_EPOCH but honors its own clock override.
@@ -89,5 +91,5 @@ make_slot_image() {
     printf 'populated %s fails ext4 available-byte/inode reserve\n' "${label}" >&2
     return 1
   }
-  [[ "$(stat -c '%s' "${out}")" == "$((4096 * 1024 * 1024))" ]]
+  [[ "$(stat -c '%s' "${out}")" == "$(($(ceralive_rootfs_mb) * 1024 * 1024))" ]]
 }

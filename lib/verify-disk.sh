@@ -46,8 +46,9 @@ source "${HERE}/shared/slot-reserve.sh"
 SECTOR=512
 GAP_MB=16            # raw idbloader+U-Boot+ATF region (no GPT entry)
 BOOT_MB=256          # p1 boot (vfat)
-ROOTFS_MB=4096       # p2/p3 rootfs slots (ext4)
-DATA_FLOOR_MB=2048   # p4 data minimum (ext4, else remainder)
+source "${HERE}/shared/layout.sh"
+ROOTFS_MB="$(ceralive_rootfs_mb)" #       # p2/p3 rootfs slots (ext4)
+DATA_FLOOR_MB="$(ceralive_data_floor_mb)" #   # p4 data minimum (ext4, else remainder)
 # Boot starts after the 16 MB gap: 16 MiB / 512 B = 32768 sectors.
 BOOT_START_SECTOR=$(( GAP_MB * 1024 * 1024 / SECTOR ))
 
@@ -124,6 +125,9 @@ assert_gap() {
 # ---------------------------------------------------------------------------
 do_verify() {
   local img="$1" board="${2:-}" count
+  local BOARD_ID="${2:-${BOARD_ID:-}}" ROOTFS_MB DATA_FLOOR_MB
+  ROOTFS_MB="$(ceralive_rootfs_mb)"
+  DATA_FLOOR_MB="$(ceralive_data_floor_mb)"
   [[ -n "${img}" ]] || die "do_verify: <img> is required"
   [[ -f "${img}" ]] || die "do_verify: image not found: ${img}"
   count="$(part_count "${img}")"

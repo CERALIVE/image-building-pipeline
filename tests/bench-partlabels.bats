@@ -178,7 +178,7 @@ install_rootfs_into() {
   require_disk_tools
   local ab="$BATS_TEST_TMPDIR/verify-ab.img" ss="$BATS_TEST_TMPDIR/verify-ss.img"
   run env CERALIVE_BENCH_LABELS=1 \
-    bash "$ASSEMBLE" build --output "$ab" --total-mb 10513 --no-format
+    bash "$ASSEMBLE" build --board rock-5b-plus --output "$ab" --total-mb 10513 --no-format
   [ "$status" -eq 0 ]
   run env CERALIVE_BENCH_LABELS=1 bash "$VERIFY" do_verify "$ab" rock-5b-plus
   [ "$status" -eq 0 ]
@@ -190,7 +190,7 @@ install_rootfs_into() {
   [ "$status" -ne 0 ]
 
   run env CERALIVE_BENCH_LABELS=1 \
-    bash "$ASSEMBLE" build --output "$ss" --total-mb 8192 --no-format --single-slot
+    bash "$ASSEMBLE" build --board rock-5b-plus --output "$ss" --total-mb 8192 --no-format --single-slot
   [ "$status" -eq 0 ]
   run env CERALIVE_BENCH_LABELS=1 bash "$VERIFY" do_verify "$ss" rock-5b-plus
   [ "$status" -eq 0 ]

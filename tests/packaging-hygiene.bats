@@ -40,13 +40,22 @@ setup() {
 
 # --- Todo 30 image slimming ----------------------------------------------------
 
-@test "slimming: production packages and the broken console-font unit stay absent" {
+@test "slimming: unused packages stay absent and the real console font has a consumer" {
   local package
-  for package in ffmpeg ipcalc u-boot-tools kbd; do
+  for package in ffmpeg ipcalc u-boot-tools; do
     run grep -Eq "^[[:space:]]*${package}([[:space:]]|$)" "$SHARED_LIST"
     [ "$status" -ne 0 ]
   done
 
+  # A font loader is now intentional: the attention consumer uses a real PSF.
+  for package in kbd console-setup-linux; do
+    run grep -Eq "^[[:space:]]*${package}([[:space:]]|$)" "$SHARED_LIST"
+    [ "$status" -eq 0 ]
+  done
+  run grep -Fq "self.run('setfont'" "$PIPELINE_DIR/mkosi/runtime/ceralive-attention.py"
+  [ "$status" -eq 0 ]
+  run grep -Fq '/usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz' "$PIPELINE_DIR/mkosi/runtime/ceralive-attention.py"
+  [ "$status" -eq 0 ]
   [ ! -e "$PIPELINE_DIR/mkosi/runtime/ceralive-console-font.service" ]
   run grep -Eq '^[[:space:]]*[^#[:space:]].*(install_console_font_service|ceralive-console-font)' "$SERVICES_SH"
   [ "$status" -ne 0 ]
