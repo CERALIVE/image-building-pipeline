@@ -395,8 +395,8 @@ main() {
       # A manual unit stop restores the control plane; a shutdown transaction
       # must never synchronously start jobs it is trying to stop.
       case "$("${SYSTEMCTL}" is-system-running 2>/dev/null || true)" in
-        running|degraded|starting) stop_ap ;;
-        *) stop_ap 1 ;;
+        stopping) stop_ap 1 ;;
+        *) stop_ap ;;
       esac
       exit 0 ;;
     shutdown) stop_ap 1;     exit 0 ;;
