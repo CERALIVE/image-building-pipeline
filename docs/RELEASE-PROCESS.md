@@ -230,6 +230,24 @@ It builds and seals one production candidate per board in the
 automated hardware-flashing gate. `concurrency.cancel-in-progress: false` prevents
 a newer release push from cancelling a build in progress.
 
+The only job calls
+[`release-candidate-build.yml`](../.github/workflows/release-candidate-build.yml)
+at `@master` with inherited secrets. The triggering run remains `release.yml`,
+so candidate publication still verifies that workflow path and its push event.
+Before assigning the image builder, the called job requires this repository,
+a push to `release/**` or `v*`, and `github.triggering_actor == 'andrescera'`.
+It has no build approval environment under the sole-admin rule; publish still
+uses the `release` environment. Nested `release/a/b` names match the trigger;
+there is no build environment branch policy restricting them.
+
+Immediately after the full-history checkout, the build compares
+`.github/workflows/release-candidate-build.yml` at `GITHUB_SHA` with
+`origin/master`. Different bytes fail before the build. Any later change to
+that file on master invalidates an untagged release branch's proof: create a
+new release branch at the updated commit, build and hand-test again, then tag
+that proven commit. This keeps tag execution on the same build steps proven
+on the release branch even though the reusable workflow is read from master.
+
 There is no version-bump automation in this repo. Section 1 defines the OS CalVer
 input and tag rule; the resulting rootfs stamp is distinct from the bundle's
 `BUNDLE_VERSION` diagnostic (§4).
@@ -384,9 +402,19 @@ physical board. There is no bypass.
 ## 4. Build and sign
 
 The release workflow performs the real production build before the hardware
-gate on a dedicated `ceralive-image-builder` runner. PR CI remains DRY_RUN-only.
+gate on the dedicated organization runner group `image-builder`, with labels
+`[self-hosted, ceralive-image-builder]`. PR CI remains DRY_RUN-only on
+GitHub-hosted runners without secrets or environments. First-time contributors
+need approval; later fork checks run automatically without gaining runner access.
+The group must select only this repository and the four master workflows:
+`release-candidate-build.yml`, `publish-release.yml`, `real-build-audit.yml`,
+and `runner-admission-probe.yml`. Labels alone never authorize access.
 The release job fails closed unless production RAUC PKI, the pinned Armbian
 archive keyring, and first-party apt GPG/mTLS credentials are supplied as secrets.
+The group creation, runner move and live admission proof are separate
+owner-confirmed operations; file changes alone do not prove isolation.
+See [CI security](agents/ci-security.md) for the exact registration contract,
+owner admission conditions, probes and sole-admin checklist.
 
 The real build is:
 

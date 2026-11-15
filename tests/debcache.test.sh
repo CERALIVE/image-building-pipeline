@@ -648,7 +648,7 @@ if ! grep -Fq -- "--if-none-match '*'" "${UPLOADER}" ||
     ! grep -q 'cmp -s.*existing' "${UPLOADER}"; then
   fail 'R2 upload does not use create-only writes and byte-compare on collision'
 fi
-for workflow in release real-build-audit; do
+for workflow in release-candidate-build real-build-audit; do
   if ! grep -q 'bash ci/upload-build-cache.sh' "${PIPELINE_DIR}/.github/workflows/${workflow}.yml"; then
     fail "${workflow} does not gate the CI writer"
   fi
