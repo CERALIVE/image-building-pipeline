@@ -97,6 +97,7 @@ tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration
 tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
 tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
 tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
+tests/slot-image-identity.test.sh	shell	unit	default-shell	factory slots and the OTA image of one tree differ only in superblocks (shared checksum seed, per-slot UUID after)
 tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/publish-release.test.sh	shell	integration	default-shell	stubbed R2 publisher and CMS signature, serial, promotion, refresh, retention contracts
@@ -126,6 +127,8 @@ tests/apt-first-party-origin.test.sh	shell	integration	default-shell	real offlin
 tests/prune-paths-removefiles.test.sh	shell	integration	default-shell	single-source prune-paths.list generates a real mkosi RemoveFiles= merge (Todo 29)
 tests/reprune-hook.test.sh	shell	integration	default-shell	device reprune hook + apt cache writer, real glob/doc pruning, never fails dpkg (Todo 29)
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
+tests/app-apt-archives-clean.test.sh	shell	unit	default-shell	final rootfs ships no downloaded .deb: app-layer clean ignores the device /data cache redirect and fails on leftovers
+tests/app-build-logs-dropped.test.sh	shell	unit	default-shell	final rootfs carries no build-time apt/dpkg/alternatives logs; unrelated logs and /var/log/apt stay
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel
 tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only where an installed-module sweep proves no consumer

@@ -3542,9 +3542,17 @@ reads their recorded filename/version/architecture/SHA-256 from
 `first-party` provenance. All other first-party names still require the index.
 The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
-`common.sh::resolve_source_date_epoch`). Factory assembly and the OS-bundle
-producer share `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
+`common.sh::resolve_source_date_epoch`). RK3588 factory assembly and the shared
+OS-bundle producer use `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
 deterministic UUID/hash seed, `mkfs.ext4 -d`, and the 512 MiB/inode reserve check.
+Images made through that writer use ONE label-independent checksum and hash seed
+(`slot_image_seed_uuid`, `metadata_csum_seed`) and get their label-derived UUID from
+`tune2fs -U` afterwards, so factory slots and the OTA image of one tree differ only
+in superblock blocks (`tests/slot-image-identity.test.sh`); that is what lets RAUC
+adaptive `block-hash-index` updates reuse the slot's inode tables and directories.
+The x86 factory assembler has its own formatter in `lib/assemble-disk-x86.sh`,
+which still derives the hash seed from each filesystem UUID. Its factory-to-OTA
+metadata therefore does not have this shared-seed guarantee.
 Factory slots start with their own labels; the bundle's neutral-labelled image is
 relabelled after install from the written partition's own GPT PARTLABEL. The signed
 verity `.raucb` container is **not bit-reproducible**: native RAUC signing produces
@@ -3907,6 +3915,14 @@ same glob list.
 `partial/` subdir), so downloaded `.deb`s persist across reboots and future
 software updates instead of the rootfs slot's own (small, RAUC-swapped)
 `/var/cache/apt/archives`.
+The runtime layer downloads `shared.list` BEFORE it writes that file, so those
+packages land in the slot's `/var/cache/apt/archives`, and the app layer inherits the
+redirect: a bare `apt-get clean` there cleans the `/data` path and exits 0. The app
+layer's `clean_apt_archives` therefore names `/var/cache/apt/archives` explicitly and
+fails the build if a `.deb` remains (`tests/app-apt-archives-clean.test.sh`).
+The same layer removes the build's apt/dpkg/alternatives logs from `/var/log` after its
+last transaction (`drop_build_package_logs`, `tests/app-build-logs-dropped.test.sh`):
+nothing reads them, and first boot would otherwise seed them onto `/data/log`.
 
 **Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
 RESOLVED package membership, never a blind architecture check.**

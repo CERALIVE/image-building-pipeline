@@ -1643,6 +1643,15 @@ its rollback hatch are cerastream's
 [`ADR-0010`](https://github.com/CERALIVE/cerastream/blob/main/docs/adr/ADR-0010-pipewire-capture.md);
 this repository supplies the runtime.
 
+Capture clocking belongs to the engine: cerastream sets
+`node.group = pipewire.dummy` on every PipeWire capture stream, including the meter,
+through `pipewiresrc` stream properties (ADR-0010). The image keeps the graph at
+48000 Hz and uses the packaged `Dummy-Driver`; its two configuration fragments
+create no objects and set no clock, driver or resampler overrides.
+`tests/runtime-services.bats` guards that boundary and checks the packaged driver's
+group when a built rootfs is present. The HDMI-RX profile rule selects a profile
+independently of capture clocking.
+
 The image installs trixie's own `pipewire` 1.4.2-1, `wireplumber` **0.5.8-2**,
 `pipewire-alsa`, `gstreamer1.0-pipewire` (the `pipewiresrc` the engine builds its
 capture source from) and `libspa-0.2-bluetooth`.
