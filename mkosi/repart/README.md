@@ -66,9 +66,12 @@ slot, no field rollback). `data` still has a ≥ 2048 MB floor. Both current boa
 ## Why ext4, not squashfs, for the rootfs slots
 
 The frozen contract pins **ext4** for `rootfs_a` / `rootfs_b` (and `data`). The
-current signed RAUC bundle uses `format=plain` and installs `rootfs.tar` into the
-inactive ext4 slot. Do not "compress" the on-disk slots — that would deviate from
-the contract. dm-verity remains future hardening, not a current install dependency.
+signed RAUC bundle is `format=verity` with `adaptive=block-hash-index`; its payload is
+`rootfs.ext4`, a ready-made ext4 image that RAUC writes to the inactive slot rather
+than an archive it unpacks into a freshly formatted one (`lib/build-bundle.sh`).
+Do not "compress" the on-disk slots — that would deviate from the contract. The
+verity applies to the bundle container, not to the on-disk slots, which stay plain
+ext4.
 
 ## Assembly and update integration
 
@@ -76,5 +79,5 @@ the contract. dm-verity remains future hardening, not a current install dependen
   only creates and formats the filesystems.
 - RK3588 slot activation is the shipped RAUC `bootloader=custom` adapter plus the
   FAT-backed bootcount selector in `platform/boot/`.
-- Signed plain-format `*.raucb` bundles are emitted by `lib/build-bundle.sh`.
+- Signed `format=verity` `*.raucb` bundles are emitted by `lib/build-bundle.sh`.
 - **`/var` + WiFi bind-mounts onto `data`** → task 30.
