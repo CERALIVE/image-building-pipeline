@@ -156,6 +156,82 @@ else
   bad 'real RAUC priority fixture clobbered a pre-existing link or left created directories'
 fi
 
+if bash -s "${PIPELINE_DIR}/tests/real-rauc-contract.sh" <<'SH'
+set -euo pipefail
+harness="$1"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+export WORK="$work" gpt_loop="$work/loop"
+# Execute the real formatting/label assertion with device tools replaced:
+# devtmpfs nodes can exist while udev still has no PARTLABEL for lsblk.
+fragment="$(awk '
+  /^sudo -n mkfs.ext4/ { copying=1 }
+  copying && /^sed -e/ { exit }
+  copying { print }
+' "$harness")"
+test -n "$fragment"
+error_trap="$(awk '/^trap .* ERR$/ { print }' "$harness")"
+test -n "$error_trap"
+fragment="${error_trap}
+${fragment}"
+sudo() {
+  [[ "$1" == -n ]] && shift
+  case "$1" in
+    mkfs.ext4) touch "$WORK/pending" ;;
+    udevadm)
+      [[ "$*" == 'udevadm settle --timeout=10' ]] || return 2
+      if [[ "$MODE" == timeout ]]; then
+        printf 'udev queue did not drain\n' >&2
+        return 1
+      fi
+      mv "$WORK/pending" "$WORK/settled"
+      ;;
+    lsblk)
+      if [[ -f "$WORK/settled" ]]; then
+        if [[ "$MODE" == wrong-label ]]; then printf 'wrong-label\n'
+        else printf 'rootfs_b\n'; fi
+      fi
+      ;;
+    *) printf 'unexpected fixture command: %s\n' "$*" >&2; return 2 ;;
+  esac
+}
+udevadm() { return 0; }
+export -f sudo udevadm
+MODE=delayed bash -euo pipefail -c "$fragment"
+rm -f "$WORK/settled"
+if MODE=timeout bash -euo pipefail -c "$fragment" >"$work/timeout.log" 2>&1; then
+  printf 'udev timeout was ignored\n' >&2
+  exit 1
+fi
+grep -Fq 'udev queue did not drain' "$work/timeout.log"
+grep -Fq 'real RAUC command failed:' "$work/timeout.log"
+if MODE=wrong-label bash -euo pipefail -c "$fragment" >"$work/wrong-label.log" 2>&1; then
+  printf 'wrong GPT PARTLABEL was accepted\n' >&2
+  exit 1
+fi
+grep -Fq 'lsblk -ndo PARTLABEL' "$work/wrong-label.log"
+# The exit trap must show redirected GPT stderr and preserve the failure code.
+on_exit="$(awk '/^on_exit\(\) \{/ { copying=1 } copying { print } copying && /^}$/ { exit }' "$harness")"
+printf 'GPT service stderr fixture\n' >"$work/service-gpt.log"
+printf 'GPT client stderr fixture\n' >"$work/client-gpt.log"
+cleanup() { return 0; }
+export -f cleanup
+set +e
+bash -c "${on_exit}
+trap on_exit EXIT
+exit 23" >"$work/exit.log" 2>&1
+rc=$?
+set -e
+[[ "$rc" == 23 ]]
+grep -Fq 'GPT service stderr fixture' "$work/exit.log"
+grep -Fq 'GPT client stderr fixture' "$work/exit.log"
+SH
+then
+  ok 'real RAUC GPT assertion waits for delayed udev metadata and rejects timeout or wrong labels'
+else
+  bad 'real RAUC GPT assertion raced udev or accepted a timeout or wrong label'
+fi
+
 if python3 - "${PIPELINE_DIR}" <<'PY'
 from pathlib import Path
 import os

@@ -222,7 +222,7 @@ asserts the rollback contract end-to-end, and is wired into the canonical unit s
   emitting a signed `.raucb` (+ `.sha256`) ALONGSIDE the `.raw`, stamped with the
   board-specific `COMPATIBLE_STRING` (`ceralive-<board-id>`) and the shared build
   timestamp. `build-bundle.sh` is board-agnostic, so this mirrors the RK3588
-  `custom` path verbatim — same rootfs.tar artifact, same `BUNDLE_*` env.
+  `custom` path verbatim — same `rootfs.ext4` slot image, same `BUNDLE_*` env.
 
 **Still deferred:**
 
