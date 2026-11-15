@@ -1,0 +1,400 @@
+name: Reusable release candidate build
+
+# Builds the exact production candidate image (raw.xz + signed .raucb bundle + loader
+# + rollback probe) and uploads it as one immutable artifact for a human to flash
+# and hand-test on real hardware BEFORE a manual release is cut. There is no
+# automated hardware-flashing gate on this push — images are validated locally.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.repository == 'CERALIVE/image-building-pipeline' && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/v')) && github.triggering_actor == 'andrescera'
+    runs-on:
+      group: image-builder
+      labels: [self-hosted, ceralive-image-builder]
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [rock-5b-plus, orange-pi-5-plus]
+    # A self-hosted runner has no ambient job budget, so a build that wedges
+    # (a hung git fetch, a stalled docker pull) would hold the only image
+    # builder until someone notices. The bound is deliberately far above a
+    # real run — a cold candidate builds two builder images and the kernel
+    # from source — so it can only ever catch a hang, never a slow build.
+    timeout-minutes: 240
+    env:
+      DOCKER_CONTEXT: default
+      CERALIVE_RESOURCE_MEMINFO_FILE: /proc/meminfo
+      # Cache directories use the manifest's board_id, not necessarily this stem.
+      CERALIVE_RELEASE_BOARD: ${{ matrix.board }}
+      CERALIVE_MKOSI_CACHE_MAX_BYTES: '2147483648'
+      # The ONLY declaration of the generated paths this persistent runner may
+      # delete. It is an explicit allowlist, never a glob, and the post-checkout
+      # "Assert canonical generated paths" step proves it equals the build's own
+      # allowlist in lib/paths.sh. Pre-checkout cleanup cannot call a repo script,
+      # which is exactly why the declaration lives here and is asserted later.
+      CERALIVE_GENERATED_CLEANUP_PATHS: 'mkosi/build mkosi/cache .mkosi-workspace'
+      CERALIVE_RUNNER_CLEANUP_IMAGE: debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+    steps:
+      - name: Reject reruns of immutable release candidates
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          [[ "${RUN_ATTEMPT}" == 1 ]] || {
+            echo "::error::Immutable release candidates must run once; create a newly named proof branch."
+            exit 1
+          }
+      - name: Remove stale generated runner paths before checkout
+        env:
+          CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
+          CLEANUP_PATHS: ${{ env.CERALIVE_GENERATED_CLEANUP_PATHS }}
+        run: |
+          set -euo pipefail
+          targets=()
+          for rel in ${CLEANUP_PATHS}; do
+            case "${rel}" in
+              /*|*..*|*'*'*|*'?'*|*'['*)
+                echo "::error::refusing to delete non-literal path '${rel}'"; exit 1 ;;
+            esac
+            targets+=("/work/${rel}")
+          done
+          (( ${#targets[@]} > 0 ))
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${CLEANUP_IMAGE}" \
+            rm -rf -- "${targets[@]}"
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require build steps identical to master
+        run: |
+          git diff --quiet "${GITHUB_SHA}" origin/master -- .github/workflows/release-candidate-build.yml || { echo '::error::build steps on master differ from this commit: re-prove on a new release/** branch'; exit 1; }
+      - name: Resolve OS release version
+        env:
+          OS_RELEASE_VERSION: ${{ vars.CERALIVE_OS_RELEASE_VERSION }}
+        run: |
+          set -euo pipefail
+          version="${OS_RELEASE_VERSION}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          fi
+          [[ "${version}" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::OS release version must be YYYY.M.P CalVer: use a vYYYY.M.P tag or set the required CERALIVE_OS_RELEASE_VERSION Actions variable for release branches."
+            exit 2
+          }
+          bash ci/check-os-version-month.sh "${version}"
+          printf 'CERALIVE_OS_RELEASE_VERSION=%s\n' "${version}" >>"${GITHUB_ENV}"
+      - name: Refresh first-party release evidence
+        env:
+          # Optional read-only token for the private first-party repos; when unset gh falls back
+          # to the runner user's login. Refreshes release evidence only and never edits pins.
+          GH_TOKEN: ${{ secrets.FIRST_PARTY_RELEASE_READ_TOKEN }}
+        run: python3 ci/check-first-party-pins.py --refresh --max-age-hours 24
+      - name: First-party release pin currency
+        run: python3 ci/check-first-party-pins.py --max-age-hours 24
+      - name: Enforce immutable kernel candidate identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ci/check-kernel-version-monotonic.py --candidate --board "${CERALIVE_RELEASE_BOARD}"
+      - name: Resolve board cache directory
+        run: |
+          set -euo pipefail
+          cache_dir="$(./ci/emit-canonical-paths.sh --board "${CERALIVE_RELEASE_BOARD}" --get board_mkosi_cache_dir)"
+          printf 'CERALIVE_MKOSI_CACHE_DIR=%s\n' "${cache_dir}" >>"${GITHUB_ENV}"
+      - name: Assert canonical generated paths
+        env:
+          DECLARED_CACHE_DIR: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          DECLARED_CLEANUP_PATHS: ${{ env.CERALIVE_GENERATED_CLEANUP_PATHS }}
+        run: |
+          ./ci/check-canonical-paths.sh \
+            --board "${CERALIVE_RELEASE_BOARD}" \
+            --cache-dir "${DECLARED_CACHE_DIR}" \
+            --cleanup "${DECLARED_CLEANUP_PATHS}"
+      - name: Resolve release cache keys
+        id: cache-meta
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+          MKOSI_TOOL_KEY: ${{ hashFiles('.mkosi-version') }}
+          MKOSI_SOURCE_KEY: >-
+            ${{ hashFiles('build', 'lib/**/*.sh', 'mkosi/**/*', 'manifests/**/*', 'ci/Dockerfile') }}
+          BUILDER_SOURCE_KEY: >-
+            ${{ hashFiles('ci/Dockerfile', 'ci/requirements-ci.txt', '.mkosi-version') }}
+        run: |
+          set -euo pipefail
+          board="${CERALIVE_RELEASE_BOARD}"
+          repository="${REPOSITORY//\//-}"
+          # The TARGET SUITE is part of the mkosi cache identity, and it has to be
+          # in the RESTORE PREFIX, not just the key. mkosi names its own base layer
+          # `debian~<release>~<arch>~base.cache`, so a suite bump makes every cached
+          # tree unusable — but `restore-keys` is a PREFIX match, so without this
+          # axis a trixie build would still restore the whole bookworm-era cache,  # suite-literal-ok: names the retired suite whose cache trees this axis exists to stop restoring
+          # then carry those dead trees against the 2 GiB cap and risk evicting the
+          # entry it actually wants. Reading it from the one mapping keeps this in
+          # lockstep with manifests/target-release.env instead of restating a suite.
+          # shellcheck source=../../lib/shared/target-release-lib.sh
+          source lib/shared/target-release-lib.sh
+          target_release_load
+          builder_scope="ceralive-builder-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-tool-${MKOSI_TOOL_KEY}"
+          builder_image="ceralive-mkosi-builder:${BUILDER_SOURCE_KEY}"
+          mkosi_prefix="mkosi-${repository}-${RUNNER_OS_NAME}-${RUNNER_ARCH_NAME}-${board}-release-${RELEASE}-tool-${MKOSI_TOOL_KEY}-source-"
+          {
+            echo "builder_scope=${builder_scope}"
+            echo "builder_image=${builder_image}"
+            echo "builder_source_key=${BUILDER_SOURCE_KEY}"
+            echo "mkosi_key=${mkosi_prefix}${MKOSI_SOURCE_KEY}"
+            echo "mkosi_restore_prefix=${mkosi_prefix}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Verify production builder resource budget
+        run: ./ci/check-builder-resources.sh
+      - name: Set up BuildKit
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build canonical mkosi builder with reusable layers
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ci
+          file: ci/Dockerfile
+          tags: ${{ steps.cache-meta.outputs.builder_image }}
+          labels: |
+            org.ceralive.builder.source-key=${{ steps.cache-meta.outputs.builder_source_key }}
+          load: true
+          cache-from: type=gha,scope=${{ steps.cache-meta.outputs.builder_scope }}
+          cache-to: type=gha,mode=min,scope=${{ steps.cache-meta.outputs.builder_scope }}
+      - name: Restore board-scoped mkosi build cache
+        if: ${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          key: ${{ steps.cache-meta.outputs.mkosi_key }}
+          restore-keys: ${{ steps.cache-meta.outputs.mkosi_restore_prefix }}
+      # A debug/fault-injection kernel variant must never reach a release
+      # artifact. The check is a property check, not a name blocklist: it
+      # rejects any variant whose declared Kconfig fragments enable a symbol
+      # from manifests/kernel/forbidden-symbols.list, so a future debug variant
+      # is covered without editing this workflow. `--self-test` runs first so a
+      # guard that can only answer "yes" fails the job instead of passing it.
+      - name: Refuse a non-releasable kernel variant
+        env:
+          CERALIVE_KERNEL_VARIANT: ${{ env.CERALIVE_KERNEL_VARIANT }}
+        run: |
+          set -euo pipefail
+          ./ci/check-release-variant.sh --self-test
+          ./ci/check-release-variant.sh
+      - name: Materialize release trust inputs
+        env:
+          RAUC_RELEASE_PKI_TAR_B64: ${{ secrets.RAUC_RELEASE_PKI_TAR_B64 }}
+          ARMBIAN_APT_KEYRING_B64: ${{ secrets.ARMBIAN_APT_KEYRING_B64 }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${RUNNER_TEMP}/release-pki"
+          printf '%s' "${RAUC_RELEASE_PKI_TAR_B64}" | base64 -d | tar -xz -C "${RUNNER_TEMP}/release-pki"
+          printf '%s' "${ARMBIAN_APT_KEYRING_B64}" | base64 -d > "${RUNNER_TEMP}/armbian-keyring.gpg"
+      - name: Build exact production candidate
+        env:
+          # Also what makes the BSP content drift-guard STRICT rather than
+          # advisory (lib/fetch/verify.sh::bsp_drift_strict): a fleet artifact
+          # may not silently absorb an unreviewed same-version kernel-BSP
+          # re-spin, which is the one substitution the exact version pin cannot
+          # catch. BSP_DRIFT_STRICT=0 is the deliberate opt-out.
+          CERALIVE_BUILD_MODE: production
+          CERALIVE_REQUIRE_KERNEL_APT: '1'
+          CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
+          RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
+          ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          APT_CLIENT_CRT_B64: ${{ secrets.APT_CLIENT_CRT_B64 }}
+          APT_CLIENT_KEY_B64: ${{ secrets.APT_CLIENT_KEY_B64 }}
+          MKOSI_BUILDER_IMAGE: ${{ steps.cache-meta.outputs.builder_image }}
+          CERALIVE_IMAGE_BUILD_COMMIT: ${{ github.sha }}
+        # `set -o pipefail` is load-bearing, not boilerplate: without it the tee
+        # becomes the pipeline's exit status and a FAILED production build would
+        # report success.
+        run: |
+          set -euo pipefail
+          ./build "${CERALIVE_RELEASE_BOARD}" --release 2>&1 | tee "${RUNNER_TEMP}/candidate-build.log"
+      # A production candidate must be clean, not merely successful: the build
+      # exits 0 while emitting deprecation notices, ignored repart keys and
+      # chroot service-start failures. This is the only place a REAL production
+      # build log exists, so it is the only place the census can be enforced.
+      - name: Enforce the build-log census
+        run: |
+          set -euo pipefail
+          python3 ./ci/check-build-log-census.py --expect-count 34 docs/build-log-census.md
+          ./ci/check-build-log.sh --self-test
+          ./ci/check-build-log.sh "${RUNNER_TEMP}/candidate-build.log"
+      - name: Verify uncompressed flash image
+        env:
+          RAUC_KEYRING_FILE: ${{ runner.temp }}/release-pki/root-ca.pem
+        run: |
+          set -euo pipefail
+          mapfile -t raws < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raw')
+          mapfile -t bundles < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raucb')
+          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 ))
+          raw_bytes="$(stat -c %s "${raws[0]}")"
+          tests/preflash-verify.sh \
+            --image "${raws[0]}" \
+            --bundle "${bundles[0]}" \
+            --board "${CERALIVE_RELEASE_BOARD}" \
+            --keyring "${RAUC_KEYRING_FILE}" \
+            --target-size-bytes "${raw_bytes}"
+      - name: Publish verified shared build cache when provisioned
+        env:
+          R2_BUILD_CACHE_ACCOUNT_ID: ${{ secrets.R2_BUILD_CACHE_ACCOUNT_ID }}
+          R2_BUILD_CACHE_BUCKET: ${{ secrets.R2_BUILD_CACHE_BUCKET }}
+          R2_BUILD_CACHE_ACCESS_KEY_ID: ${{ secrets.R2_BUILD_CACHE_ACCESS_KEY_ID }}
+          R2_BUILD_CACHE_SECRET_ACCESS_KEY: ${{ secrets.R2_BUILD_CACHE_SECRET_ACCESS_KEY }}
+          APT_GPG_PUBLIC_B64: ${{ secrets.APT_GPG_PUBLIC_B64 }}
+          ARMBIAN_APT_KEYRING: ${{ runner.temp }}/armbian-keyring.gpg
+        run: |
+          set -euo pipefail
+          if [[ -n "${R2_BUILD_CACHE_ACCOUNT_ID}" && -n "${R2_BUILD_CACHE_BUCKET}" &&
+                -n "${R2_BUILD_CACHE_ACCESS_KEY_ID}" && -n "${R2_BUILD_CACHE_SECRET_ACCESS_KEY}" ]]; then
+            bash ci/upload-build-cache.sh "${CERALIVE_RELEASE_BOARD}"
+          else
+            echo 'r2.build-cache BLOCKED-if-absent: R2_BUILD_CACHE_* secrets are not provisioned; no upload attempted'
+          fi
+      - name: Build candidate-bound signed rollback probe
+        env:
+          CERALIVE_RAUC_PKI_DIR: ${{ runner.temp }}/release-pki
+        run: |
+          set -euo pipefail
+          source ci/board-identity.sh
+          board_identity_load "${CERALIVE_RELEASE_BOARD}"
+          export COMPATIBLE_STRING="${BOARD_IDENTITY_COMPATIBLE}"
+          mapfile -t roots < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.rootfs.tar')
+          (( ${#roots[@]} == 1 ))
+          mkdir -p "${RUNNER_TEMP}/rollback-root/etc/systemd/system" "${RUNNER_TEMP}/rollback-bundle"
+          tar -xf "${roots[0]}" -C "${RUNNER_TEMP}/rollback-root"
+          ln -sf /dev/null "${RUNNER_TEMP}/rollback-root/etc/systemd/system/ceralive.service"
+          BUNDLE_VERSION="${GITHUB_SHA}-rollback-probe" \
+            BUNDLE_OUT_DIR="${RUNNER_TEMP}/rollback-bundle" BUNDLE_TS=bad \
+            ./lib/build-bundle.sh "${CERALIVE_RELEASE_BOARD}" "${RUNNER_TEMP}/rollback-root"
+      - name: Fetch hash-pinned RK3588 Maskrom loader
+        run: ./ci/fetch-rk3588-loader.sh "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin"
+      - id: meta
+        name: Seal candidate metadata
+        run: |
+          set -euo pipefail
+          mapfile -t raws < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raw')
+          mapfile -t bundles < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.raucb')
+          mapfile -t dev_debs < <(find "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/debs" -maxdepth 1 -type f -name 'srtla_*.deb')
+          mapfile -t locks < <(find "images/${CERALIVE_RELEASE_BOARD}" -maxdepth 1 -type f -name '*.packages.lock.json')
+          (( ${#raws[@]} == 1 && ${#bundles[@]} == 1 && ${#dev_debs[@]} == 1 && ${#locks[@]} == 1 ))
+          mkdir -p candidate/dev-debs
+          ./ci/seal-raw-candidate.sh --raw "${raws[0]}" --candidate-dir candidate
+          cp "${RUNNER_TEMP}/release-pki/root-ca.pem" candidate/
+          cp "${bundles[0]}" candidate/good.raucb
+          cp "${RUNNER_TEMP}/rollback-bundle/bad.raucb" candidate/bad.raucb
+          cp "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin" candidate/
+          cp "${dev_debs[0]}" candidate/dev-debs/
+          cp "${locks[0]}" candidate/packages.lock.json
+          cp "mkosi/.staging/${CERALIVE_RELEASE_BOARD}/kernel-build/kernel-artifact.json" candidate/
+          printf '%s\n' "${CERALIVE_OS_RELEASE_VERSION}" > candidate/os-release-version
+          raw_name="$(basename "${raws[0]}").xz"; bundle_name=good.raucb
+          loader_name=rk3588_spl_loader_v1.15.113.bin
+          bundle_release_name="$(basename "${bundles[0]}")"
+          [[ "${bundle_release_name}" =~ ^[0-9]{8}T[0-9]{6}Z\.raucb$ ]]
+          ( cd candidate && sha256sum good.raucb > good.raucb.sha256 )
+          printf '%s\n' "${bundle_release_name}" > candidate/release-bundle-name.txt
+          {
+            echo "artifact_name=${CERALIVE_RELEASE_BOARD}-${GITHUB_SHA}"
+            echo "raw_filename=${raw_name}"
+            echo "raw_sha256=$(cut -d' ' -f1 candidate/raw.sha256)"
+            echo "raw_compressed_sha256=$(cut -d' ' -f1 "candidate/${raw_name}.sha256")"
+            echo "bundle_filename=${bundle_name}"
+            echo "keyring_filename=root-ca.pem"
+            echo "loader_filename=${loader_name}"
+            echo "loader_sha256=$(sha256sum "candidate/${loader_name}" | cut -d' ' -f1)"
+          } >> "${GITHUB_OUTPUT}"
+      - id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Bound board-scoped mkosi cache
+        if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        run: |
+          set -euo pipefail
+          cache_dir="${CERALIVE_MKOSI_CACHE_DIR}"
+          max_bytes="${CERALIVE_MKOSI_CACHE_MAX_BYTES}"
+          builder_image="${{ steps.cache-meta.outputs.builder_image }}"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          # Single source of truth: compare against what the build resolves,
+          # never against a second copy of the literal.
+          expected_cache_dir="$(./ci/emit-canonical-paths.sh --board "${CERALIVE_RELEASE_BOARD}" --get board_mkosi_cache_dir)"
+          [[ "${cache_dir}" == "${expected_cache_dir}" ]]
+          [[ "${max_bytes}" =~ ^[0-9]+$ ]]
+          docker run --rm \
+            --env CACHE_DIR="${cache_dir}" \
+            --env CACHE_DIR_EXPECTED="${expected_cache_dir}" \
+            --env CACHE_UID="${runner_uid}" \
+            --env CACHE_GID="${runner_gid}" \
+            --env CACHE_MAX_BYTES="${max_bytes}" \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${builder_image}" \
+            bash -euo pipefail -c '
+              [[ "${CACHE_DIR}" == "${CACHE_DIR_EXPECTED}" ]]
+              [[ "${CACHE_UID}" =~ ^[0-9]+$ && "${CACHE_GID}" =~ ^[0-9]+$ ]]
+              [[ "${CACHE_MAX_BYTES}" =~ ^[0-9]+$ ]]
+              cache_path="/work/${CACHE_DIR}"
+              mkdir -p "${cache_path}"
+              cache_bytes="$(du -sb --apparent-size "${cache_path}" | awk "{print \$1}")"
+              if (( cache_bytes > CACHE_MAX_BYTES )); then
+                echo "::warning::mkosi cache is ${cache_bytes} bytes; clearing it before save (limit ${CACHE_MAX_BYTES})"
+                find "${cache_path}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+              fi
+              final_bytes="$(du -sb --apparent-size "${cache_path}" | awk "{print \$1}")"
+              (( final_bytes <= CACHE_MAX_BYTES ))
+              chown -R "${CACHE_UID}:${CACHE_GID}" "/work/${CACHE_DIR}"
+              echo "mkosi cache bytes=${final_bytes} limit=${CACHE_MAX_BYTES} path=${CACHE_DIR}"
+            '
+      - name: Save board-scoped mkosi build cache
+        if: ${{ success() && github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CERALIVE_MKOSI_CACHE_DIR }}
+          key: ${{ steps.cache-meta.outputs.mkosi_key }}
+      - name: Remove generated runner paths after job
+        if: ${{ always() }}
+        env:
+          CLEANUP_IMAGE: ${{ env.CERALIVE_RUNNER_CLEANUP_IMAGE }}
+          CLEANUP_PATHS: ${{ env.CERALIVE_GENERATED_CLEANUP_PATHS }}
+        run: |
+          set -euo pipefail
+          targets=()
+          for rel in ${CLEANUP_PATHS}; do
+            case "${rel}" in
+              /*|*..*|*'*'*|*'?'*|*'['*)
+                echo "::error::refusing to delete non-literal path '${rel}'"; exit 1 ;;
+            esac
+            targets+=("/work/${rel}")
+          done
+          (( ${#targets[@]} > 0 ))
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges \
+            --volume "${GITHUB_WORKSPACE}:/work" \
+            "${CLEANUP_IMAGE}" \
+            rm -rf -- "${targets[@]}"
+      - name: Remove release secrets and temporary roots
+        if: ${{ always() }}
+        run: |
+          rm -rf "${RUNNER_TEMP}/release-pki" "${RUNNER_TEMP}/armbian-keyring.gpg" \
+            "${RUNNER_TEMP}/rollback-root" "${RUNNER_TEMP}/rollback-bundle"
+          rm -f "${RUNNER_TEMP}/rk3588_spl_loader_v1.15.113.bin"

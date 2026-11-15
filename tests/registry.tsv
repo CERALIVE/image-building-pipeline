@@ -80,6 +80,7 @@ tests/packaging-hygiene.bats	bats	unit	default-bats	absence guards for removed s
 tests/mkosi-contract.bats	bats	unit	default-bats	build-log census signatures and the lint that governs them
 
 # --- shell suites (run order) --------------------------------------------
+tests/audio-card-reprobe.test.sh	shell	unit	default-shell	Selected sound card reprobe, input refusal, per-card throttle and bounded udev failures
 tests/brand-assets-integrity.test.sh	shell	unit	default-shell	vendored brand mark matches brand-assets.lock.json; notice and installer wiring
 tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party apt chain: gpg, mTLS, curl fallback, fatal failure legs
 tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
@@ -153,6 +154,7 @@ tests/kernel-artifact-cache.test.sh	shell	unit	default-shell	content-keyed kerne
 tests/immutable-r2-publication.test.sh	shell	integration	default-shell	create-only immutable publication with exact-byte recovery
 tests/recovery-script-contract.test.sh	shell	unit	default-shell	recovery.scr loads boot artifacts directly from p2 or p3
 tests/production-ci-scope-contract.test.sh	shell	unit	default-shell	production CI scope stays disjoint from bench-only knobs
+tests/workflow-security-contract.test.sh	shell	unit	default-shell	fork-safe workflow triggers, runners, permissions, credentials and immutable third-party actions
 tests/orchestrate-build-lock.test.sh	shell	integration	default-shell	per-board flock serialises staging, different boards stay parallel
 tests/boot-script-sanitize.test.sh	shell	unit	default-shell	the A/B selector against absent setexpr and an undefined loadaddr
 tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/identity asserter/extractor

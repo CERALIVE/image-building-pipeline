@@ -365,6 +365,10 @@ still provide `CERALIVE_RAUC_PKI_DIR` explicitly. The kernel-stage leg also need
 [`docs/kernel-staging.md`](docs/kernel-staging.md). The real-Avahi leg uses private
 network namespaces and D-Bus sockets to prove simultaneous first boot and
 late-network-merge reconciliation without touching the host publication.
+The real RAUC GPT fixture settles udev metadata after formatting before reading
+PARTLABELs, with a ten-second deadline. Failed commands and GPT service/client
+logs are printed on failure; the default rootless transition tests cover the
+metadata race and negative controls.
 
 The Avahi harness keeps its small, private fixture under `/var/tmp` regardless
 of `TMPDIR`: libdbus rejects socket paths longer than 99 bytes, so a long
@@ -398,6 +402,13 @@ do not depend on the Bats job's checkout.
 The same PR unit-test job also runs `python3 ci/upstream-watch.py --self-test`.
 It uses committed fixtures without network access or credentials; the live,
 issue-only upstream reconciliation remains in its separate scheduled workflow.
+
+The default suite includes `tests/workflow-security-contract.test.sh` [EXISTS].
+It parses workflow YAML to reject unsafe triggers, pull-request jobs with
+non-hosted runners, secrets, environments, reusable workflow calls or elevated
+permissions, persisted checkout credentials, and mutable third-party action refs.
+Only the named release workflows may select runners outside the hosted allowlist.
+Set `WORKFLOWS_DIR` to a scratch workflow directory to exercise failure cases.
 
 Production RAUC publication follows [`docs/RELEASE-PROCESS.md`](docs/RELEASE-PROCESS.md)
 §5. Its low-level `ci/publish-immutable-r2-pair.sh` helper requires the
@@ -585,7 +596,8 @@ ci/check-build-log.sh --census-report <build.log>                        # count
 The lint rejects a `BLOCKING` signature, a `FIXED` regression, a signature in no
 table at all, and an `ACCEPTED` signature that appears more often than its
 baseline. There are no wildcard exceptions: every entry is compared with `==`
-against a normalized line. It runs in `release.yml` right after the production
+against a normalized line. It runs in `release-candidate-build.yml`, called by
+`release.yml` at master, right after the production
 candidate build, which is the only place a real production build log exists — the
 PR gate is `DRY_RUN=1` and never executes the image layers.
 
@@ -773,7 +785,7 @@ committed baseline `manifests/bsp-baseline.json`.
 
 - A differing version **or** a same-version content-hash re-spin prints a
   `BSP drift` banner. On the **release path** — any build with
-  `CERALIVE_BUILD_MODE=production`, which is what `release.yml` sets and what
+  `CERALIVE_BUILD_MODE=production`, which is what `release-candidate-build.yml` sets and what
   `ci/build-hardware-candidates.sh` refuses unless the board's trust anchor
   really is a production root — that banner is **fatal**. A development build
   reports it and continues, so local iteration is not blocked.
@@ -831,14 +843,13 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.11.1 (tag commit `77fae5e`) using its exact
-per-architecture Debian versions, `2026.11.1-20261106T235637.77fae5e` (amd64) and
-`2026.11.1-20261106T235641.77fae5e` (arm64). It retains the unified device update
-orchestrator. Both downloaded Debian
-assets matched their published SHA-256 sidecars and GitHub asset digests.
-APT serving and hardware were not checked for this pin; the release catalog
-refresh remains a separate final commit.
-See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt--2026-11-06).
+CeraUI is pinned to stable release v2026.11.2 (tag commit `31b06d5`) using its exact
+per-architecture Debian versions, `2026.11.2-20261110T235721.31b06d5` (amd64) and
+`2026.11.2-20261110T235725.31b06d5` (arm64), confirmed against release asset names
+and the refreshed catalog. It retains the unified device update orchestrator.
+The owner selected this UI version for future images alongside sender `srtla=4.2.0`.
+APT serving and hardware were not checked for these pins.
+See the [combined pin receipt](docs/first-party-pin-currency.md#srtla-and-ceraui-pin-receipt--2026-11-12).
 This pin update does not build or qualify an image, or authorize an OS release.
 Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
@@ -868,7 +879,7 @@ to fill the local cache; corrupt remote bytes warn and fall back to origin.
 `CERALIVE_DEBCACHE=0` still disables the whole `.deb` cache and `DRY_RUN=1`
 consults neither tier. Apt indexes and signing metadata are never cached.
 
-Only `release.yml` and `real-build-audit.yml` upload, after build verification
+Only `release-candidate-build.yml` (called by `release.yml`) and `real-build-audit.yml` upload, after build verification
 and only when all `R2_BUILD_CACHE_*` secrets are present. The uploader verifies
 staged bytes against signed metadata/pins and kernel artifacts against manifest,
 deb/DTB and Kconfig gates; S3 `put-object --if-none-match '*'` prevents overwrites
@@ -1203,7 +1214,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.11.1 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.11.2 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images
@@ -1667,8 +1678,15 @@ Measured cost: **+20.9 MiB net** (18 packages added, 2 removed) — see
 WirePlumber picks that profile deterministically whenever the card enumerated one,
 which is the case on any board probed with HDMI audio present. When the card was
 probed with no signal at all, ACP can describe no input profile, the card parks at
-`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until something
-re-enumerates the card — a known, deliberate limitation. The `pro-audio` floor that
+`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until the card
+is re-enumerated. The image installs the root-owned, mode-0755 helper
+`/usr/libexec/ceralive/ceralive-audio-reprobe` for the engine to request this when
+the operator selects a kernel card with no PipeWire node. It accepts only an exact
+ALSA card id, sends remove then add for that card, and limits attempts to one per
+card per 30 seconds, including failures. Each udev command has a one-second limit.
+The engine must still observe a usable node; helper success alone proves no audio.
+Host tests cover the helper and installation; boot-without-signal recovery on a
+physical receiver remains unqualified. The `pro-audio` floor that
 used to cover that case is removed: it published a capture node whose PCM cannot
 start without a signal (`set_hw_params: Link has been severed`), and the engine's
 always-on meter then leaked one PipeWire capture pipeline every 30 s against it —

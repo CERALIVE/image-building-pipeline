@@ -17,7 +17,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
-RELEASE_WORKFLOW="${RELEASE_WORKFLOW:-${PIPELINE_DIR}/.github/workflows/release.yml}"
+RELEASE_WORKFLOW="${RELEASE_WORKFLOW:-${PIPELINE_DIR}/.github/workflows/release-candidate-build.yml}"
 
 fail() { echo "BUG: $*" >&2; exit 1; }
 
@@ -40,7 +40,7 @@ do
 done
 
 # The two privilege domains must be LEAVES of the board root, not siblings of it:
-# release.yml saves and restores the board root, so a domain outside it would be
+# release-candidate-build.yml saves and restores the board root, so a domain outside it would be
 # a cache CI silently never persists.
 board_root="$("${PIPELINE_DIR}/ci/emit-canonical-paths.sh" --board rock-5b-plus --get board_mkosi_cache_dir)"
 for domain in container native; do

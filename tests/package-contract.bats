@@ -871,14 +871,14 @@ PY
 }
 
 @test "fetch-debs CeraUI registry pin matches the concrete device package release" {
-  local expected_ceraui_pin="v2026.11.1"
+  local expected_ceraui_pin="v2026.11.2"
   local arch expected_device_version device_version
 
   [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
   for arch in amd64 arm64; do
     case "$arch" in
-      amd64) expected_device_version="2026.11.1-20261106T235637.77fae5e" ;;
-      arm64) expected_device_version="2026.11.1-20261106T235641.77fae5e" ;;
+      amd64) expected_device_version="2026.11.2-20261110T235721.31b06d5" ;;
+      arm64) expected_device_version="2026.11.2-20261110T235725.31b06d5" ;;
     esac
     device_version="$(ARCH="$arch" bash -c 'source "$1" >/dev/null; first_party_pinned_version ceralive-device' _ "$FETCH_DEBS")"
     [ "$device_version" = "$expected_device_version" ]

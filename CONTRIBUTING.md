@@ -22,6 +22,12 @@ License: By contributing, you agree your work is dual-licensed under MIT OR Apac
 3. Test the image on hardware; collect build logs from the mkosi output directory
 4. Submit a PR with a clear description and a checklist of what you tested
 
+Pull request checks run on GitHub-hosted runners with a read-only token and no
+secrets or environments. First-time contributors need a maintainer's approval
+before checks run; later contributions run automatically. Workflow-restricted
+runner groups and job admission conditions keep fork code off the image builder
+and kernel release runners. See the [CI security contract](docs/agents/ci-security.md).
+
 ## Development Conventions
 
 - Shell: `set -euo pipefail`, guard `systemctl` and network in chroot

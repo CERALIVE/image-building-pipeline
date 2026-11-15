@@ -1,9 +1,9 @@
 libsrt1.5-ceralive=1.5.7+ceralive.2
 cerastream=2026.9.8
 gstreamer1.0-libuvcsrc=2026.9.0
-ceralive-device[amd64]=2026.11.1-20261106T235637.77fae5e
-ceralive-device[arm64]=2026.11.1-20261106T235641.77fae5e
-srtla=4.1.0
+ceralive-device[amd64]=2026.11.2-20261110T235721.31b06d5
+ceralive-device[arm64]=2026.11.2-20261110T235725.31b06d5
+srtla=4.2.0
 modemmanager=1.24.2-2~ceralive.3
 libmm-glib0=1.24.2-2~ceralive.3
 libmbim-glib4=1.34.0-1~ceralive.3
