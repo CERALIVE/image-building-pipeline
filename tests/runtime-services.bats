@@ -2668,7 +2668,7 @@ pw_run() {
     bash -c "source '$POSTINST_ENTRY'; setup_pipewire_system_mode"
 }
 
-PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
+PW_RUNTIME_DIR() { printf '%s' "${PW_RUNTIME_SRC:-$PIPELINE_DIR/mkosi/runtime}/pipewire"; }
 
 @test "pipewire: the trixie-native package set is present and BlueALSA is gone from shared.list" {
   # Package NAMES and their exclusivity, asserted on the one file that decides the
@@ -2859,6 +2859,145 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   # would load module-rt a SECOND time rather than reconfigure the first.
   run bash -c "grep -vE '^[[:space:]]*#' '$(PW_RUNTIME_DIR)/10-ceralive-system.conf' | grep -E 'context\.modules'"
   [ "$status" -ne 0 ]
+}
+
+@test "pipewire: image fragments leave capture clocking to the engine" {
+  local fragment
+  for fragment in 10-ceralive-system.conf 10-ceralive-headless.conf; do
+    # The engine joins the stock Dummy-Driver through stream-properties. Image
+    # objects or device rules must not compete with that clock or its resampler.
+    run python3 "$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py" ownership \
+      "$(PW_RUNTIME_DIR)/$fragment"
+    printf '%s: %s\n' "$fragment" "$output"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "pipewire: the default graph rate stays at 48000 with no alternate rates" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local system="$(PW_RUNTIME_DIR)/10-ceralive-system.conf"
+  local headless="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  run python3 "$checker" rate "$system" "$headless"
+  [ "$status" -eq 0 ]
+  [ "$output" = 48000 ]
+  run python3 "$checker" allowed-rates "$system" "$headless"
+  [ "$status" -eq 0 ]
+  [ "$output" = '[48000]' ]
+}
+
+@test "pipewire: rate guard rejects inline overrides and retains declaration history" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fixture="$BATS_TEST_TMPDIR/rate.conf" override
+  local valid='context.properties = { default.clock.rate = 48000 default.clock.allowed-rates = [ 48000 ] }'
+  for override in \
+    'context.properties = { default.clock.rate = 44100 default.clock.allowed-rates = [ 44100 ] }' \
+    'context.properties = { default.clock.rate = 48000 default.clock.allowed-rates = [ 48000 44100 ] }' \
+    'rules = [ { actions = { update-props = { "default.clock.rate": 44100 } } } ]'; do
+    printf '%s\n%s\n' "$valid" "$override" >"$fixture"
+    run python3 "$checker" rate "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *44100* ]]
+    # Restoring 48000 later must not hide the earlier bad declaration.
+    printf '%s\n' "$valid" >>"$fixture"
+    run python3 "$checker" rate "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *44100* ]]
+  done
+  # A later section replaces the earlier one: both effective fields are required.
+  printf '%s\ncontext.properties = { default.clock.rate = 48000 }\n' "$valid" >"$fixture"
+  run python3 "$checker" allowed-rates "$fixture"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Effective default.clock.allowed-rates"* ]]
+}
+
+@test "pipewire: rate guard checks the other fragment and ignores commented overrides" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local system="$BATS_TEST_TMPDIR/system.conf" headless="$BATS_TEST_TMPDIR/headless.conf"
+  printf '%s\n' 'context.properties={default.clock.rate=48000 default.clock.allowed-rates=[48000]}' >"$system"
+  printf '%s\n' '# default.clock.rate = 44100' 'rules = [ { default.clock.allowed-rates = [44100] } ]' >"$headless"
+  run python3 "$checker" rate "$system" "$headless"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"default.clock.allowed-rates"*44100* ]]
+}
+
+@test "pipewire: ownership guard rejects every forbidden key across SPA assignment forms" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fixture="$BATS_TEST_TMPDIR/ownership.conf" key value declaration
+  for key in context.objects node.group priority.driver node.driver resample.disable node.force-rate node.lock-rate; do
+    case "$key" in
+      context.objects) value='[]' ;;
+      node.group) value='pipewire.dummy' ;;
+      *) value=0 ;;
+    esac
+    for declaration in "$key $value" "\"$key\": $value" "$key=$value" \
+      "$(printf '\"%s\"\n  =\n  %s' "$key" "$value")"; do
+      printf 'rules = [ { actions = { update-props = { %s } } } ]\n' "$declaration" >"$fixture"
+      run python3 "$checker" ownership "$fixture"
+      [ "$status" -ne 0 ]
+      [[ "$output" == *"image sets $key"* ]]
+    done
+  done
+  printf '%s\n' '"\u0070riority.driver" = 0' >"$fixture"
+  run python3 "$checker" ownership "$fixture"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"image sets priority.driver"* ]]
+}
+
+@test "pipewire: packaged driver guard requires direct properties in the actual args" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fixture="$BATS_TEST_TMPDIR/driver.conf" properties
+  local markers='factory.name=support.node.driver node.name=Dummy-Driver node.group=pipewire.dummy'
+  for properties in \
+    "unused = { $markers }" \
+    "args = { unused = { $markers } }" \
+    'args = { factory.name=support.node.driver node.name=Dummy-Driver node.group=pipewire.wrong }'; do
+    printf 'context.objects = [ { factory=spa-node-factory %s } ]\n' "$properties" >"$fixture"
+    run python3 "$checker" driver "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Missing Dummy-Driver args"* ]]
+  done
+}
+
+@test "pipewire: clock guards accept realistic reformatting and benign comments" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fragment="$BATS_TEST_TMPDIR/benign.conf" packaged="$BATS_TEST_TMPDIR/packaged.conf"
+  cat >"$fragment" <<'CONF'
+# context.objects = [] priority.driver 0 node.group = pipewire.dummy
+# node.driver true resample.disable true node.force-rate 44100 node.lock-rate true
+"context.properties": {
+  "default.clock.rate"=48000 # A compact assignment keeps the same rate.
+  "default.clock.allowed-rates"
+    =
+    [48000]
+  node.description = "priority.driver # context.objects"
+}
+# default.clock.rate=44100 default.clock.allowed-rates=[44100]
+CONF
+  run python3 "$checker" ownership "$fragment"
+  [ "$status" -eq 0 ]
+  run python3 "$checker" rate "$fragment"
+  [ "$status" -eq 0 ]
+  [ "$output" = 48000 ]
+  run python3 "$checker" allowed-rates "$fragment"
+  [ "$status" -eq 0 ]
+  [ "$output" = '[48000]' ]
+  cat >"$packaged" <<'CONF'
+"context.objects": [
+  {
+    factory spa-node-factory
+    # unused = { node.name = Dummy-Driver } is only a comment.
+    "args"
+    =
+    {
+      "factory.name": "support.node.driver",
+      node.name=Dummy-Driver
+      node.group pipewire.dummy
+    }
+  }
+]
+CONF
+  run python3 "$checker" driver "$packaged"
+  [ "$status" -eq 0 ]
 }
 
 @test "pipewire: the WirePlumber profile is HEADLESS — no seat, no session bus, no reservation" {
@@ -3090,6 +3229,14 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
     cmp -s "$emitted/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
     run bash -c "ls -1 '$emitted/etc/wireplumber/wireplumber.conf.d' | wc -l"
     [ "$output" -eq 1 ]
+
+    # The engine's stream group needs the packaged driver, with both properties
+    # in the same args object; a Freewheel-Driver group cannot satisfy this.
+    local packaged="$emitted/usr/share/pipewire/pipewire.conf"
+    [ -f "$packaged" ]
+    run python3 "$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py" driver "$packaged"
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ]
   done
 }
 
