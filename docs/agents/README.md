@@ -6,6 +6,7 @@ Every original section is preserved below, including historical findings and def
 
 | Original heading | Preserved file | Governed paths / scope |
 |---|---|---|
+| CI SECURITY [PARTIAL: runner settings and live probes pending] | [ci-security.md](ci-security.md) | `.github/workflows/`; `tests/workflow-security-contract.test.sh`; runner registration and contributor checks |
 | Overview (preamble) | [overview.md](overview.md) | `docs/uvc-package-migration.md` |
 | ROLE IN THE GROUP | [role-in-the-group.md](role-in-the-group.md) | Repository role, layout and contribution scope |
 | STRUCTURE | [structure.md](structure.md) | Repository role, layout and contribution scope |

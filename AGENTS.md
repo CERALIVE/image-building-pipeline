@@ -37,12 +37,15 @@ python3 ci/validate-manifests.py
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required CERALIVE_RUN_REAL_RAUC_CONTRACT=required CERALIVE_RUN_REAL_KERNEL_STAGE_CONTRACT=required CERALIVE_RUN_REAL_PRIVILEGE_DROP_CONTRACT=required ./run-tests
 ```
 Python dependencies: `ci/requirements-ci.txt`; tools/provisioning: `v2-ci.yml`.
+Workflow security: `tests/workflow-security-contract.test.sh` checks fork boundaries,
+runner groups, owner admission, checkout credentials and third-party action SHAs;
+`WORKFLOWS_DIR` selects QA fixtures.
 The kernel-stage contract also needs `CERALIVE_KERNEL_STAGE_ROOTFS`, a pre-exported
 native Debian rootfs; see [staging](docs/kernel-staging.md).
 Build/boot/release lanes are distinct from the lint/test gate; never claim unrun hardware qualification.
 
 ## UPDATE RELEASE BOUNDARY [PARTIAL]
-The CeraUI v2026.11.1 pin selects the released unified APT/RAUC orchestrator.
+The CeraUI v2026.11.2 pin selects the released unified APT/RAUC orchestrator.
 Read [Update Paths](README.md#update-paths--unified-orchestrator-image-qualification-partial)
 for the two-board drill scope, origin protection and verified-other-slot mirror rule;
 [release process](docs/RELEASE-PROCESS.md) owns verity bundles and signed image channels.
@@ -64,9 +67,11 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Family kernel-only builds, fingerprints and image-equivalent Bluetooth/UHID firmware checks [EXISTS] | [Kernel-only lane](docs/kernel-build-from-source.md#kernel-only-build-lane-exists) |
 | Immutable kernel versions, APT image reuse and signed OS kernel floors [EXISTS] | [Artifact reuse](docs/kernel-build-from-source.md#released-kernel-reuse-exists); [channel publishing](docs/RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent) |
 | Immutable kernel candidates and owner-approved single-job KVM release runners [PARTIAL: settings/publication manual] | [Kernel release runbook](docs/kernel-release.md) |
+| Fork CI, image-builder admission, owner-only jobs and runner registration [PARTIAL: group/move/probes owner-gated] | [CI security contract](docs/agents/ci-security.md) |
 | Kernel activation, boot identity, durable overlays/quarantine and owner-gated capability [PARTIAL] | [Activation lifecycle](docs/ota-activation.md) |
 | First-boot WiFi provisioning portal [PARTIAL]: brand mark, lock, notice and fail-soft rendering | [Portal contract](docs/agents/add-on-subsystem.md); [flow and brand refresh](docs/wifi-provisioning.md) |
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
+| Selected audio card re-enumeration [PARTIAL: host tests only] | [Audio contract](docs/agents/key-facts.md); `tests/audio-card-reprobe.test.sh` |
 | Unsafe build/runtime patterns | [ANTI-PATTERNS](docs/agents/anti-patterns.md) |
 | Known issues, deferred work and hardware acceptance limits | [KNOWN ISSUES / DEFERRED](docs/agents/known-issues-deferred.md) |
 

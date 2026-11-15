@@ -3,7 +3,7 @@
 # /mnt/rauc/* mount and briefly exposes real rootfs_a/rootfs_b PARTLABELs to
 # host udev. Run ONLY on an ephemeral CI runner or disposable VM; NEVER run on
 # a developer host. The default local suite must not execute this leg.
-set -euo pipefail
+set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
@@ -154,10 +154,10 @@ cleanup() {
 
 on_exit() {
   local rc=$?
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM ERR
   if (( rc != 0 )); then
     local log
-    for log in "${WORK}"/{bundle-build,service-interrupted,client-interrupted,service-retry,client-retry,rotation-build,rotation-extract,rotation-sign,service-rotation,client-rotation}.log; do
+    for log in "${WORK}"/{bundle-build,service-interrupted,client-interrupted,service-retry,client-retry,service-gpt,client-gpt,rotation-build,rotation-extract,rotation-sign,service-rotation,client-rotation}.log; do
       if [[ -s "${log}" ]]; then
         printf 'real RAUC failure context: %s\n' "${log##*/}" >&2
         sed -n '1,80p' "${log}" >&2
@@ -170,6 +170,7 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'rc=$?; printf "real RAUC command failed: line=%s status=%s command=%s\n" "${LINENO}" "${rc}" "${BASH_COMMAND}" >&2' ERR
 
 start_service() {
   local log="$1" _
@@ -375,6 +376,10 @@ fi
 [[ -b "${gpt_loop}p1" && -b "${gpt_loop}p2" ]]
 sudo -n mkfs.ext4 -q -F -L rootfs_a "${gpt_loop}p1"
 sudo -n mkfs.ext4 -q -F -L rootfs_b "${gpt_loop}p2"
+# Block nodes precede udev's PARTLABEL metadata; mkfs also queues change events.
+if command -v udevadm >/dev/null 2>&1; then
+  sudo -n udevadm settle --timeout=10
+fi
 [[ "$(sudo -n lsblk -ndo PARTLABEL "${gpt_loop}p2")" == rootfs_b ]]
 sed -e "s|^device=${WORK}/slot-a.ext4$|device=${gpt_loop}p1|" \
     -e "s|^device=${WORK}/slot-b.ext4$|device=${gpt_loop}p2|" \

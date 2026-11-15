@@ -412,7 +412,7 @@ sectioned_keys() {
   source "$paths"
   local declared
   declared="$(grep -E '^\s*CERALIVE_GENERATED_CLEANUP_PATHS:' \
-    "$PIPELINE_DIR/.github/workflows/release.yml" | sed -E "s/.*: '(.*)'.*/\1/")"
+    "$PIPELINE_DIR/.github/workflows/release-candidate-build.yml" | sed -E "s/.*: '(.*)'.*/\1/")"
   [ "$declared" = "${CERALIVE_REL_CLEANUP_PATHS[*]}" ]
 }
 

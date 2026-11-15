@@ -263,7 +263,7 @@ class PinCurrencyTest(unittest.TestCase):
 
     def test_real_workflow_wiring(self) -> None:
         import yaml
-        for filename in ("v2-ci.yml", "release.yml", "real-build-audit.yml"):
+        for filename in ("v2-ci.yml", "release-candidate-build.yml", "real-build-audit.yml"):
             workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
             steps = [step for job in workflow["jobs"].values() for step in job["steps"]
                      if "check-first-party-pins.py" in step.get("run", "") and "--refresh" not in step["run"]]
@@ -291,7 +291,7 @@ class ReleaseEvidenceRefreshWiringTest(unittest.TestCase):
         return [step for job in workflow["jobs"].values() for step in job["steps"]]
 
     def test_release_builds_refresh_evidence_before_the_currency_check(self) -> None:
-        for filename in ("release.yml", "real-build-audit.yml"):
+        for filename in ("release-candidate-build.yml", "real-build-audit.yml"):
             steps = self.steps(filename)
             refresh = [i for i, s in enumerate(steps) if "--refresh" in s.get("run", "")]
             check = [i for i, s in enumerate(steps) if "check-first-party-pins.py" in s.get("run", "")

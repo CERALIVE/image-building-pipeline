@@ -2,6 +2,31 @@
 
 ## KEY FACTS
 
+**Runtime test timing [EXISTS: host fixtures, not hardware qualification].**
+The hostname fixture keeps the production 120-second ownership deadline and
+still bounds each candidate to four probes; a four-second deadline incorrectly
+treated scheduler delays in synchronous command stubs as Avahi failures.
+Hostname values, collision handling and consumer restart assertions are unchanged.
+Malformed-response fixtures explicitly retain their existing four-second failure
+budget; they must not busy-poll a deliberately unready fake for 120 seconds.
+
+The recent Rock Type-C correction test fixes `date +%s` at marker mtime plus
+nine seconds. The existing older-than-ten-seconds case still permits a new
+cycle. Time spent scheduling fixture commands cannot change the attachment age.
+
+Fan tests drive fake-governor transitions at the real monitor's poll-sleep
+boundary, after priming and after the preceding tick has consumed its state.
+They sample the actual `cur_state` file at each sleep boundary, including after
+the boost write, and retain the real kick sleep. A mid-kick governor decision
+runs after that observation and before the timer returns. No background writer
+or sampler can outrun the monitor, miss a transient kick, or outlive the test.
+Production discovery, edge detection, writes, timers and restoration are unchanged.
+
+The hung-Git fixture sleeps indefinitely, so only the real `timeout(1)` timer
+can terminate it and permit the retry. Both attempts use the normal 30-second
+fixture deadline; a one-second deadline also killed healthy stubs on loaded
+runners. The test still requires exactly two attempts and the pinned tree.
+
 **Kernel releases [PARTIAL: owner settings/publication pending].**
 `ci/kernel-release.py` retains the immutable local candidate engine. Its
 `--publish` adapter requires the exact master workflow, first attempt, approved
@@ -1212,8 +1237,15 @@ files and policy instead of Ubuntu's older `rauc`/`rauc-service` pair. It fails
 on a version mismatch, provisions the non-root `ceralive-ota` fixture account,
 starts a system D-Bus, reloads its installed policy, and
 then invokes the real RAUC contract; the harness requires its normal system-bus service
-name and does not replace that check with a session bus or a skipped test. The
-real harness's GPT loop detach can prompt udev to delete the last
+name and does not replace that check with a session bus or a skipped test.
+The GPT fixture waits for block nodes and settles udev's queued metadata changes
+after formatting, before asserting `lsblk PARTLABEL`; node existence alone does
+not mean the udev database is ready. The settle has a ten-second deadline and a
+timeout still fails the contract. An inherited ERR trap prints the failed command,
+line and status, and the exit trap includes the GPT service/client stderr logs.
+The rootless transition contract injects pending metadata, a settle timeout and a
+wrong label, and checks failure diagnostics without starting privileged tools.
+The real harness's GPT loop detach can prompt udev to delete the last
 `/dev/disk/by-partlabel` entry and its directory: it settles those removal events
 before making a unique fixture-owned label under `sudo mkdir -p`, never forces a
 replacement of a host `rootfs_b` link, and removes its own link and only directories
@@ -4962,8 +4994,22 @@ has never carried this rule, sat flat at 49 fds for 2 h 30 m on the same engine.
 **The trade is stated rather than buried.** Removing the floor restores PR #180's
 original defect IN THE DEGRADED SET ONLY — a board probed with no HDMI audio parks
 the card at `off` and `hw:CARD=HDMIIN` leaves `list-devices` until something
-re-enumerates it. That is an operator-visible limitation, and it is strictly better
-than the alternative: the floor's benefit in that same degraded set was never
+re-enumerates it. The image now installs
+`/usr/libexec/ceralive/ceralive-audio-reprobe` from
+`mkosi/runtime/ceralive-audio-reprobe.sh` during `setup_pipewire_system_mode`.
+The root-run installer gives it mode 0755. The coordinated engine caller requests
+one re-enumeration only when a selected kernel card has no live PipeWire node.
+The helper accepts one `^[A-Za-z0-9_-]{1,32}$` id, matches it exactly against
+`/sys/class/sound/card*/id`, and sends sound remove/add events for that card alone.
+An exclusive nonblocking card lock and
+`/run/ceralive/audio-reprobe-<id>.stamp` enforce 30 seconds between attempts,
+including failed attempts. Malformed or future stamps refuse the request.
+Each udev command is bounded to one second; a failed remove never sends add.
+`CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, and installer destination
+`CERALIVE_LIBEXEC_DIR` support offline fixtures. The helper and installer are
+host-tested; physical no-signal-boot recovery still needs receiver qualification.
+
+This keeps the safe profile policy: the floor's benefit in the degraded set was never
 demonstrated (the node it publishes cannot start without a signal), while its cost is
 a proven fleet-wide engine death.
 
@@ -6068,7 +6114,7 @@ deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not 
 reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
 `cooling_device2` that must never be written, so any hardcoded index and any
 hand-invented kick value fails the suite. It pins the kick→restore round trip against
-an independently sampled `cur_state` timeline, the bounded window, all three
+a `cur_state` timeline sampled at the monitor's sleep boundaries, the bounded window, all three
 never-fire edges, startup priming, the mid-kick governor-re-assert race, a
 second cooldown/reheat cycle firing again (the property that makes a oneshot wrong),
 the `max_state`-is-READ-never-a-literal contract, the no-`pwm1`/`mode`/trip rule, the

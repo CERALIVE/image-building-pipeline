@@ -161,7 +161,7 @@ load manifest-helpers
 @test "hostname: malformed Avahi snapshots fail closed without persisting identity" {
   local root="$BATS_TEST_TMPDIR/malformed-probe"
   make_hostname_fixture "$root"
-  run run_hostname_script "$root" "" malformed
+  CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" malformed
   [ "$status" -ne 0 ]
   [[ "$output" == *"index=<missing>"* ]]
   [[ "$output" == *"system-hostname=<missing>"* ]]
@@ -492,7 +492,7 @@ SH
   for scenario in misleading-state misleading-name; do
     root="$BATS_TEST_TMPDIR/$scenario"
     make_hostname_fixture "$root"
-    run run_hostname_script "$root" "" "$scenario"
+    CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" "$scenario"
     [ "$status" -ne 0 ]
     [[ "$output" == *"index=<missing>"* ]]
     [[ "$output" == *"system-hostname=<missing>"* ]]
@@ -506,7 +506,7 @@ SH
   for scenario in multiline-state multiline-name; do
     root="$BATS_TEST_TMPDIR/$scenario"
     make_hostname_fixture "$root"
-    run run_hostname_script "$root" "" "$scenario"
+    CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" "$scenario"
     [ "$status" -ne 0 ]
     [[ "$output" == *"index=<missing>"* ]]
     [[ "$output" == *"hostname-file=<missing>"* ]]
@@ -833,6 +833,8 @@ EOF
   rm "$root/run/failed"
   : >"$root/iio/writes"
 
+  # Keep this attachment nine seconds old even if the runner is descheduled.
+  export TYPEC_TEST_NOW="$(( $(stat -c %Y "$root/run/corrected") + 9 ))"
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ ! -s "$root/iio/writes" ]
@@ -2330,19 +2332,9 @@ SH
   local timeline="$BATS_TEST_TMPDIR/fk-edge-timeline"
   fankick_fake_thermal "$sysfs" 6 0
 
-  # Governor moves it 0 -> 1 shortly after the monitor primes.
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1 ) &
-  # Sample cur_state independently so the kick is observed, not inferred.
-  ( for _ in $(seq 1 24); do
-      fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
-      printf '\n' >>"$timeline"
-      sleep 0.1
-    done ) &
-  local sampler=$!
-
-  run fankick_run "$sysfs" 800 16
+  run fankick_run "$sysfs" 800 16 \
+    FANKICK_GOVERNOR_STATES=1 FANKICK_TIMELINE="$timeline"
   [ "$status" -eq 0 ]
-  wait "$sampler"
 
   [[ "$output" == *"nudging to state 6"* ]]
   [[ "$output" == *"max_state"* ]]
@@ -2363,17 +2355,9 @@ SH
   local timeline="$BATS_TEST_TMPDIR/fk-bounded-timeline"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 2 ) &
-  ( for _ in $(seq 1 30); do
-      fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
-      printf '\n' >>"$timeline"
-      sleep 0.1
-    done ) &
-  local sampler=$!
-
-  run fankick_run "$sysfs" 500 20
+  run fankick_run "$sysfs" 500 20 \
+    FANKICK_GOVERNOR_STATES=2 FANKICK_TIMELINE="$timeline"
   [ "$status" -eq 0 ]
-  wait "$sampler"
 
   # Nothing external ever moved it off max_state, so if it is not at max_state
   # by the end, the monitor's own bounded window is what ended the kick.
@@ -2400,8 +2384,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-nonzero"
   fankick_fake_thermal "$sysfs" 6 1
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 3 ) &
-  run fankick_run "$sysfs" 300 12
+  run fankick_run "$sysfs" 300 12 FANKICK_GOVERNOR_STATES=3
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "3" ]
@@ -2411,8 +2394,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-tozero"
   fankick_fake_thermal "$sysfs" 6 2
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 0 ) &
-  run fankick_run "$sysfs" 300 12
+  run fankick_run "$sysfs" 300 12 FANKICK_GOVERNOR_STATES=0
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "0" ]
@@ -2425,8 +2407,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-atmax"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 6 ) &
-  run fankick_run "$sysfs" 300 12
+  run fankick_run "$sysfs" 300 12 FANKICK_GOVERNOR_STATES=6
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "6" ]
@@ -2446,19 +2427,16 @@ SH
 }
 
 @test "fan kickstart: a governor decision made DURING the kick wins — it is not overwritten by the restore" {
-  local sysfs="$BATS_TEST_TMPDIR/fk-race" log="$BATS_TEST_TMPDIR/fk-race.log"
-  local attr="$sysfs/cooling_device6/cur_state" monitor rc=0 out
+  local sysfs="$BATS_TEST_TMPDIR/fk-race" timeline="$BATS_TEST_TMPDIR/fk-race-timeline"
+  local attr="$sysfs/cooling_device6/cur_state" out
   fankick_fake_thermal "$sysfs" 6 0
 
-  fankick_run "$sysfs" 2500 30 >"$log" 2>&1 &
-  monitor=$!
-  fankick_wait_until grep -q 'currently state 0' "$log"
-  fankick_set_state "$attr" 1
-  fankick_wait_until fankick_state_is "$attr" 6
-  fankick_set_state "$attr" 4
-  wait "$monitor" || rc=$?
-  out="$(<"$log")"
-  [ "$rc" -eq 0 ]
+  run fankick_run "$sysfs" 2500 30 \
+    FANKICK_GOVERNOR_STATES=1 FANKICK_DURING_KICK=4 FANKICK_TIMELINE="$timeline"
+  out="$output"
+  [ "$status" -eq 0 ]
+  [[ "$out" == *"currently state 0"* ]]
+  grep -qx '6' "$timeline"
   [[ "$out" == *"nudging to state 6"* ]]
   [[ "$out" == *"re-asserted state 4"* ]]
   [[ "$out" != *"state 1 handed back"* ]]
@@ -2469,10 +2447,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-cycles"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1
-    sleep 0.9;  fankick_set_state "$sysfs/cooling_device6/cur_state" 0
-    sleep 0.4;  fankick_set_state "$sysfs/cooling_device6/cur_state" 1 ) &
-  run fankick_run "$sysfs" 300 26
+  run fankick_run "$sysfs" 300 26 FANKICK_GOVERNOR_STATES="1 0 1"
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c 'nudging to state 6')" -eq 2 ]
 }
@@ -2689,6 +2664,7 @@ pw_run() {
     PIPEWIRE_TMPFILES_DIR="$root/etc/tmpfiles.d" \
     PIPEWIRE_DBUS_DIR="$root/etc/dbus-1/system.d" \
     CERASTREAM_PIPEWIRE_DROPIN_DIR="$root/etc/systemd/system/cerastream.service.d" \
+    CERALIVE_LIBEXEC_DIR="$root/usr/libexec/ceralive" \
     bash -c "source '$POSTINST_ENTRY'; setup_pipewire_system_mode"
 }
 
@@ -2742,6 +2718,10 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ -f "$root/etc/tmpfiles.d/ceralive-pipewire.conf" ]
   [ -f "$root/etc/dbus-1/system.d/ceralive-pipewire-bluez.conf" ]
   [ -f "$root/etc/systemd/system/cerastream.service.d/40-pipewire.conf" ]
+  local helper="$root/usr/libexec/ceralive/ceralive-audio-reprobe"
+  [ "$(stat -c %a "$helper")" = 755 ]
+  [ "$(stat -c %u "$helper")" = "$EUID" ]
+  cmp "$PIPELINE_DIR/mkosi/runtime/ceralive-audio-reprobe.sh" "$helper"
 
   run cat "$root/calls"
   [ "$status" -eq 0 ]

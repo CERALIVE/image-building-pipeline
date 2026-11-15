@@ -71,9 +71,12 @@ Set these GitHub controls before registering any runner:
   the image publisher's write key. `R2_IMAGES_ENDPOINT` is that bucket's S3 API
   endpoint. Environment variable `OTA_MANIFEST_ROOT_CA_B64` is the base64
   **public** OTA manifest verification root. No signing key is needed.
-- Repository Actions settings: **Require approval for all outside
-  collaborators** for fork pull requests. Do not allow PR workflows access to
-  this runner group. A label by itself is not an access control.
+- Repository Actions settings: **Require approval for first-time contributors**
+  for fork pull requests. Workflow-restricted runner groups and admission
+  conditions protect runners even after a contributor's first merge; approval
+  history is not the isolation control. Do not allow PR workflows access to this
+  runner group. A label by itself is not an access control. See the
+  [CI security contract](agents/ci-security.md).
 
 The scripts require user-accessible `/dev/kvm`, QEMU, `qemu-img`, `xorriso`,
 Python/PyYAML, curl and authenticated `gh` on the host. A group-scoped JIT

@@ -71,11 +71,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect non-documentation changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         with:
           predicate-quantifier: 'every'
           filters: |
@@ -93,6 +94,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install ShellCheck
         run: |
@@ -133,6 +136,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - uses: actions/setup-python@v7
@@ -163,6 +167,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -344,6 +350,8 @@ jobs:
       EDID_DIR: mkosi/runtime/edid
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -633,6 +641,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -704,6 +714,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Plan targets the per-board/per-OS R2 keys (DRY_RUN, signed inputs)
         env:
@@ -777,6 +789,8 @@ jobs:
         board: [rock-5b-plus, x86-minipc]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -903,6 +917,8 @@ jobs:
       RUNNER_OVERHEAD_BUDGET_MINUTES: '10'
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install qemu-system-x86 + OVMF (EFI/GRUB x86 image boots via UEFI)
         run: |
@@ -985,6 +1001,8 @@ jobs:
         board: [rock-5b-plus, x86-minipc]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -1031,6 +1049,8 @@ jobs:
     continue-on-error: ${{ vars.XRUNNER_PARITY_BLOCKING != 'true' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Download every per-runner sidecar
         uses: actions/download-artifact@v8

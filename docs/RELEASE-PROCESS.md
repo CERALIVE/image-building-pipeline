@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.11.1's unified update orchestrator.
+channel publisher and pins stable CeraUI v2026.11.2's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -230,6 +230,24 @@ It builds and seals one production candidate per board in the
 automated hardware-flashing gate. `concurrency.cancel-in-progress: false` prevents
 a newer release push from cancelling a build in progress.
 
+The only job calls
+[`release-candidate-build.yml`](../.github/workflows/release-candidate-build.yml)
+at `@master` with inherited secrets. The triggering run remains `release.yml`,
+so candidate publication still verifies that workflow path and its push event.
+Before assigning the image builder, the called job requires this repository,
+a push to `release/**` or `v*`, and `github.triggering_actor == 'andrescera'`.
+It has no build approval environment under the sole-admin rule; publish still
+uses the `release` environment. Nested `release/a/b` names match the trigger;
+there is no build environment branch policy restricting them.
+
+Immediately after the full-history checkout, the build compares
+`.github/workflows/release-candidate-build.yml` at `GITHUB_SHA` with
+`origin/master`. Different bytes fail before the build. Any later change to
+that file on master invalidates an untagged release branch's proof: create a
+new release branch at the updated commit, build and hand-test again, then tag
+that proven commit. This keeps tag execution on the same build steps proven
+on the release branch even though the reusable workflow is read from master.
+
 There is no version-bump automation in this repo. Section 1 defines the OS CalVer
 input and tag rule; the resulting rootfs stamp is distinct from the bundle's
 `BUNDLE_VERSION` diagnostic (§4).
@@ -261,17 +279,17 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects stable CeraUI **v2026.11.1**
-(tag commit `77fae5eb21d3e6b7125325dcbc4d1fcbe09638a4`), published
-2026-11-06T23:58:19Z. The exact Debian versions are
-`2026.11.1-20261106T235641.77fae5e` (arm64) and
-`2026.11.1-20261106T235637.77fae5e` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.11.1`. Downloaded asset hashes match both SHA-256 sidecars
-and GitHub asset digests, and Debian control fields confirm both identities.
+The current image pin selects stable CeraUI **v2026.11.2**
+(tag commit `31b06d54ff2e338805d84602a292e9dc95d8de2e`), published
+2026-11-10T23:58:58Z. The exact Debian versions are
+`2026.11.2-20261110T235725.31b06d5` (arm64) and
+`2026.11.2-20261110T235721.31b06d5` (amd64), with repo-local provenance
+`CeraUI.pin: v2026.11.2`. Release asset names and the authenticated release
+catalog confirm these versions.
 APT serving, installation and hardware were not checked for this pin. See the
-[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt--2026-11-06).
-The committed release catalog is unchanged pending a separate final refresh
-commit after the owner decides the prerequisite PR merge order. Pinning is not
+[pin receipt](first-party-pin-currency.md#srtla-and-ceraui-pin-receipt--2026-11-12).
+The catalog refresh and owner-selected CeraUI bump accompany `srtla=4.2.0`.
+Pinning is not
 image qualification or OS stable/beta authorization; OS 2026.10.97 remains
 private-drill only and channel pointers are unchanged.
 
@@ -384,9 +402,19 @@ physical board. There is no bypass.
 ## 4. Build and sign
 
 The release workflow performs the real production build before the hardware
-gate on a dedicated `ceralive-image-builder` runner. PR CI remains DRY_RUN-only.
+gate on the dedicated organization runner group `image-builder`, with labels
+`[self-hosted, ceralive-image-builder]`. PR CI remains DRY_RUN-only on
+GitHub-hosted runners without secrets or environments. First-time contributors
+need approval; later fork checks run automatically without gaining runner access.
+The group must select only this repository and the four master workflows:
+`release-candidate-build.yml`, `publish-release.yml`, `real-build-audit.yml`,
+and `runner-admission-probe.yml`. Labels alone never authorize access.
 The release job fails closed unless production RAUC PKI, the pinned Armbian
 archive keyring, and first-party apt GPG/mTLS credentials are supplied as secrets.
+The group creation, runner move and live admission proof are separate
+owner-confirmed operations; file changes alone do not prove isolation.
+See [CI security](agents/ci-security.md) for the exact registration contract,
+owner admission conditions, probes and sole-admin checklist.
 
 The real build is:
 
