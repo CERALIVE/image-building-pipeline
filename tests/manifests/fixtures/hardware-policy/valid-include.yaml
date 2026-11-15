@@ -1,0 +1,2 @@
+hardware_policy:
+  include_module_classes: [discrete-gpu]

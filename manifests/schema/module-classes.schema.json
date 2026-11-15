@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ceralive.tv/schema/v2/module-classes.schema.json",
+  "title": "CeraLive hardware module classes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "preserved_roots", "classes"],
+  "properties": {
+    "schema": { "const": 1 },
+    "preserved_roots": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._+-]*$" },
+      "uniqueItems": true
+    },
+    "classes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description", "attachable", "module_path_globs", "firmware_prefixes", "kconfig_symbols"],
+        "properties": {
+          "description": { "type": "string", "minLength": 1 },
+          "attachable": { "type": "boolean" },
+          "module_path_globs": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^kernel/[A-Za-z0-9_.*?+/-]+$" },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "firmware_prefixes": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/firmware_prefix" },
+            "uniqueItems": true
+          },
+          "kconfig_symbols": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "firmware_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._+-]*(/[A-Za-z0-9_-][A-Za-z0-9._+-]*)*$"
+    }
+  }
+}

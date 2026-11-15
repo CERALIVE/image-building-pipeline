@@ -1,0 +1,4 @@
+hardware_policy:
+  exclude_module_classes: [discrete-gpu, x86-igpu]
+  sweep_candidates: [qcom, i915]
+  sweep_candidate_files: [fixture.bin]

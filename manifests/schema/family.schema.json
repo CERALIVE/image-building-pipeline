@@ -17,6 +17,29 @@
     "serial_console"
   ],
   "properties": {
+    "hardware_policy": {
+      "description": "Family exclusions and proof-gated firmware sweep candidates. Boards may only add excluded classes back.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exclude_module_classes"],
+      "properties": {
+        "exclude_module_classes": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "uniqueItems": true
+        },
+        "sweep_candidates": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._+-]*(/[A-Za-z0-9_-][A-Za-z0-9._+-]*)*$" },
+          "uniqueItems": true
+        },
+        "sweep_candidate_files": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._+-]*$" },
+          "uniqueItems": true
+        }
+      }
+    },
     "arch": {
       "description": "Target CPU architecture in mkosi's identifier space (consumed by mkosi --architecture; see lib/orchestrate.sh). 'arm64' covers rk3588; 'x86-64' covers Intel N100/N200 + AMD mini-PCs. mkosi has NO 'amd64' — its x86 identifier is 'x86-64' (learnings task 13). 'amd64' is retained only as a legacy alias that orchestrate.sh maps to mkosi x86-64; NEW x86 families use 'x86-64' directly. NOTE: the Debian *package* arch is still 'amd64' (e.g. linux-image-amd64) — that lives in kernel_packages, never here.",
       "type": "string",
