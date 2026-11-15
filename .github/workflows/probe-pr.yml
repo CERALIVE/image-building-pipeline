@@ -1,0 +1,13 @@
+name: Runner admission pull request probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    uses: CERALIVE/image-building-pipeline/.github/workflows/release-candidate-build.yml@master
+  probe:
+    uses: CERALIVE/image-building-pipeline/.github/workflows/runner-admission-probe.yml@master
