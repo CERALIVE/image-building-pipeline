@@ -39,13 +39,9 @@ create_ceralive_structure() {
   mkdir -p /etc/ceralive
 
   log_info "writing /etc/ceralive/release branding"
-  cat >/etc/ceralive/release <<'EOF'
-NAME="CeraLive"
-PRETTY_NAME="CeraLive Streaming Appliance"
-ID=ceralive
-VERSION_ID="1"
-BUILD_BRANCH="stable"
-EOF
+  # shellcheck source=/dev/null
+  source "${BASH_SOURCE[0]%/*}/board-identity.sh"
+  write_board_identity /etc/ceralive/release "${BOARD_ID}" "${FAMILY}" "${CAPABILITIES:-}"
 
   log_info "setting ownership for ${CERALIVE_USER} home + var tree"
   chown -R "${CERALIVE_USER}:${CERALIVE_USER}" "/home/${CERALIVE_USER}" /var/opt/ceralive

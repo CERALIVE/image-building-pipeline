@@ -361,7 +361,7 @@ run_mkosi_build() {
   # the invoking environment) so the same set works on host mkosi 26 and the
   # trixie-builder mkosi 25.3 (which disagree on the [Content]/[Build] section).
   local env_names=(
-    ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
+    ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY CAPABILITIES SERIAL_CONSOLE DTB_NAME
     OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
     CERALIVE_BUILD_APT_PROXY
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
@@ -386,7 +386,7 @@ run_mkosi_build() {
   # platform bootloader integration (mkosi.finalize → install-boot.sh): the U-Boot
   # boot.scr / recovery.scr fdtfile and the board env come from the manifest, never
   # hardcoded.
-  export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
+  export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY CAPABILITIES SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
   export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
   # Kernel-from-source DTB install mapping. EMPTY on a prebuilt-BSP resolve — a

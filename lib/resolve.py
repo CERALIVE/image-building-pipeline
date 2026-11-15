@@ -590,6 +590,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 if name not in fetched
             ]
 
+    # Always clear inherited environment grants for profiles with no declaration.
+    merged.setdefault("capabilities", [])
     flat = flatten(merged)
     for key in sorted(flat):
         # Tab-delimited, RAW value. resolve.sh resolves versions.yaml defer

@@ -33,3 +33,20 @@ description: >-
   hardware encode (Gen12 graphics) with x264 software fallback (decision D1).
   Assumes an internal NVMe/SATA SSD (>= 32 GB). No board-specific quirks or
   device-tree overlays — a stock x86 platform needs none.
+
+# Board/image services, consumed through /etc/ceralive/release.
+capabilities:
+  - client-internet
+  - wifi-country
+  - sim-autounlock
+  - modem-control
+  - os-updates
+  - addons
+  - kiosk
+  - bluetooth
+  - network-ingest
+  - device-control
+  - system-control
+  - audio
+  - fan
+  - hw-encoder

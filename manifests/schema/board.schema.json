@@ -22,6 +22,12 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
+    "capabilities": {
+      "description": "Image services and board hardware available to the control plane; absent means none.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" }
+    },
     "dtb_name": {
       "description": "Device-tree blob filename for this board (e.g. 'rk3588-rock-5b-plus.dtb'). Maps to DTB_FILE in configs/devices/*.conf. Use the literal 'none' on x86/ACPI boards that have no device tree.",
       "type": "string",

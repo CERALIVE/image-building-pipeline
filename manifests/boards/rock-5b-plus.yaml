@@ -94,3 +94,22 @@ description: >-
   full-featured streaming appliance. M.2 B-key 42 mm slot for 4G/5G cellular
   modems (no 52 mm support) with a required SIM-detection workaround. Onboard
   RTL8852BE Wi-Fi, 5.45 A USB power budget. eMMC/NVMe/microSD targets (16 GB+).
+
+# Board/image services, consumed through /etc/ceralive/release.
+capabilities:
+  - client-internet
+  - wifi-country
+  - sim-autounlock
+  - modem-control
+  - os-updates
+  - addons
+  - kiosk
+  - bluetooth
+  - network-ingest
+  - device-control
+  - system-control
+  - audio
+  - fan
+  - hw-encoder
+  - hdmi-rx
+  - b-key-modem
