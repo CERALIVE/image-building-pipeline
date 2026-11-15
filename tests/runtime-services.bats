@@ -2668,7 +2668,7 @@ pw_run() {
     bash -c "source '$POSTINST_ENTRY'; setup_pipewire_system_mode"
 }
 
-PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
+PW_RUNTIME_DIR() { printf '%s' "${PW_RUNTIME_SRC:-$PIPELINE_DIR/mkosi/runtime}/pipewire"; }
 
 @test "pipewire: the trixie-native package set is present and BlueALSA is gone from shared.list" {
   # Package NAMES and their exclusivity, asserted on the one file that decides the
@@ -2859,6 +2859,33 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   # would load module-rt a SECOND time rather than reconfigure the first.
   run bash -c "grep -vE '^[[:space:]]*#' '$(PW_RUNTIME_DIR)/10-ceralive-system.conf' | grep -E 'context\.modules'"
   [ "$status" -ne 0 ]
+}
+
+@test "pipewire: image fragments leave capture clocking to the engine" {
+  local fragment body="$BATS_TEST_TMPDIR/pw-clock-body"
+  for fragment in 10-ceralive-system.conf 10-ceralive-headless.conf; do
+    sed 's/#.*//' "$(PW_RUNTIME_DIR)/$fragment" >"$body"
+    # The engine joins the stock Dummy-Driver through stream-properties. Image
+    # objects or device rules must not compete with that clock or its resampler.
+    run grep -En '(^|[[:space:]{,])"?(context\.objects|node\.group|priority\.driver|node\.driver|resample\.disable|node\.force-rate|node\.lock-rate)"?[[:space:]]*[:=]' "$body"
+    printf '%s: %s\n' "$fragment" "$output"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "pipewire: the default graph rate stays at 48000 with no alternate rates" {
+  local body="$BATS_TEST_TMPDIR/pw-rate-body"
+  sed 's/#.*//' "$(PW_RUNTIME_DIR)/10-ceralive-system.conf" >"$body"
+  run awk '$1 == "default.clock.rate" { print $3 }' "$body"
+  [ "$status" -eq 0 ]
+  [ "$output" = 48000 ]
+  run awk '$1 == "default.clock.allowed-rates" {
+    sub(/^[^=]*=[[:space:]]*/, "")
+    gsub(/[[:space:]]/, "")
+    print
+  }' "$body"
+  [ "$status" -eq 0 ]
+  [ "$output" = '[48000]' ]
 }
 
 @test "pipewire: the WirePlumber profile is HEADLESS — no seat, no session bus, no reservation" {
@@ -3090,6 +3117,20 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
     cmp -s "$emitted/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
     run bash -c "ls -1 '$emitted/etc/wireplumber/wireplumber.conf.d' | wc -l"
     [ "$output" -eq 1 ]
+
+    # The engine's stream group needs the packaged driver, with both properties
+    # in the same args object; a Freewheel-Driver group cannot satisfy this.
+    local packaged="$emitted/usr/share/pipewire/pipewire.conf"
+    [ -f "$packaged" ]
+    local body="$BATS_TEST_TMPDIR/pw-packaged-body"
+    sed 's/#.*//' "$packaged" >"$body"
+    awk '
+      BEGIN { RS = "}" }
+      /(^|[[:space:]{])factory\.name[[:space:]]*=[[:space:]]*"?support\.node\.driver"?([[:space:]]|$)/ &&
+      /(^|[[:space:]{])node\.name[[:space:]]*=[[:space:]]*"?Dummy-Driver"?([[:space:]]|$)/ &&
+      /(^|[[:space:]{])node\.group[[:space:]]*=[[:space:]]*"?pipewire\.dummy"?([[:space:]]|$)/ { found = 1 }
+      END { exit !found }
+    ' "$body"
   done
 }
 
