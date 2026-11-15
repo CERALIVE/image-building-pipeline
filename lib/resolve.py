@@ -688,7 +688,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
             ]
 
     if "hardware_policy" in merged:
-        registry = load_module_classes(Path(args.family).parent.parent)
+        # A synthetic family (tests) can live outside manifests; the registry is pipeline data.
+        registry = load_module_classes(
+            Path(__file__).resolve().parent.parent / "manifests"
+        )
         merged.pop("hardware_policy")
         merged.update(hardware_policy_params(
             base.get("hardware_policy", {}), board_base.get("hardware_policy", {}),
