@@ -175,8 +175,22 @@ EOF
 mkdir -p "$TMP/root/etc/systemd/system/multi-user.target.wants"
 ln -s ../ceralive-rauc-activate.service "$TMP/root/etc/systemd/system/multi-user.target.wants/ceralive-rauc-activate.service"
 ln -s ../zz-activate-probe.service "$TMP/root/etc/systemd/system/multi-user.target.wants/zz-activate-probe.service"
-if ! systemd-analyze verify --root "$TMP/root" multi-user.target 2>&1 | grep -Fq 'Found ordering cycle'; then
+# A cycle is the expected result here. Capture the diagnostic before matching:
+# pipefail plus grep -q can otherwise reject the expected verifier failure or
+# a producer SIGPIPE after grep exits early.
+systemd-analyze verify --root "$TMP/root" multi-user.target >"$TMP/probe-verify" 2>&1 || true
+if ! grep -Fq 'Found ordering cycle' "$TMP/probe-verify"; then
+  command cat "$TMP/probe-verify"
   fail 'ordering probe did not observe activation After=rauc.service'
+fi
+# Removing the actual ordering edge must remove the probe cycle. This keeps
+# an unrelated fixture cycle from satisfying the positive control above.
+sed -i 's/^After=rauc.service dbus.service$/After=dbus.service/' \
+  "$TMP/root/etc/systemd/system/ceralive-rauc-activate.service"
+systemd-analyze verify --root "$TMP/root" multi-user.target >"$TMP/probe-negative" 2>&1 || true
+if grep -Fq 'Found ordering cycle' "$TMP/probe-negative"; then
+  command cat "$TMP/probe-negative"
+  fail 'ordering probe still reports a cycle without activation After=rauc.service'
 fi
 ok 'dynamic ordering probe: activation is after RAUC'
 

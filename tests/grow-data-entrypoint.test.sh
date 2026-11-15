@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Execute the shipped main function in a fresh shell; mock only external I/O.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+export GROW_TEST_WORK="$work"
+cat >"$work/harness" <<'HARNESS'
+#!/bin/bash
+set -euo pipefail
+source mkosi/runtime/ceralive-grow-data.sh
+scenario=$1
+prefix=""; slot=a; fixture_root_bytes=4294967296
+case "$scenario" in bench-*) prefix=x ;; esac
+case "$scenario" in *-b) slot=b ;; esac
+root_node="/dev/mockdisk0p2"; [[ "$slot" != b ]] || root_node="/dev/mockdisk0p3"
+findmnt() { [[ "$*" == '-nro SOURCE /' ]]; [[ "$scenario" != findmnt-fail ]] || return 1; echo /dev/root; }
+readlink() { [[ "$*" == '-f /dev/root' ]]; echo "$root_node"; }
+# A block-device eligibility seam avoids creating nodes or touching real disks.
+grow_data_is_block_device() {
+  [[ "$scenario" != nonblock ]] || return 1
+  [[ "$1" == "$root_node" || "$1" == /dev/mockdisk0 ]]
+}
+inventory() {
+  case "$*" in
+    '-bdnro SIZE /dev/mockdisk0') if [[ $scenario == too-small ]]; then echo 14999999999; else echo 20000000000; fi ;;
+    '-bdnro SIZE /dev/mockdisk0p'[23]) echo "$fixture_root_bytes" ;;
+    '-dnro RO /dev/mockdisk0') if [[ $scenario == readonly ]]; then echo 1; else echo 0; fi ;;
+    '-dnro PARTLABEL /dev/mockdisk0p'[23])
+      if [[ "$scenario" == wrong-root ]]; then echo data; else echo "${prefix}rootfs_${slot}"; fi ;;
+    '-dnro PKNAME /dev/mockdisk0p'[23])
+      if [[ "$scenario" == wrong-parent ]]; then echo ../other-disk; else echo mockdisk0; fi ;;
+    '--bytes --noheadings --raw --paths --sort PARTN --output TYPE,PARTLABEL,PARTTYPE,SIZE,PARTN,START /dev/mockdisk0')
+      [[ "$scenario" != inventory-fail ]] || return 1
+      echo 'disk    20000000000'
+      echo "part ${prefix}boot bc13c2ff-59e6-4262-a352-b275fd6f7172 268435456 1 32768"
+      echo "part ${prefix}rootfs_a 0fc63daf-8483-4772-8e79-3d69d8477de4 $fixture_root_bytes 2 557056"
+      b_start=$((557056 + fixture_root_bytes / 512))
+      data_start=$((b_start + fixture_root_bytes / 512))
+      [[ "$scenario" != single-a ]] || data_start=$b_start
+      case "$scenario" in
+        physical-reordered) b_start=$((data_start + 524288)); data_start=$((557056 + fixture_root_bytes / 512)) ;;
+        overlap) data_start=$((data_start - 8)) ;;
+        same-start) data_start=$b_start ;;
+        invalid-start) data_start=unknown ;;
+        missing-start) data_start="" ;;
+      esac
+      if [[ "$scenario" != single-a ]]; then
+        echo "part ${prefix}rootfs_b 0fc63daf-8483-4772-8e79-3d69d8477de4 $fixture_root_bytes 3 $b_start"
+      fi
+      [[ "$scenario" != missing-data ]] || return 0
+      n=4; [[ "$scenario" != single-a ]] || n=3
+      label="${prefix}data"; [[ "$scenario" != malformed ]] || label=unknown
+      echo "part $label 0fc63daf-8483-4772-8e79-3d69d8477de4 268435456 $n $data_start"
+      [[ "$scenario" != duplicate ]] || echo "part $label 0fc63daf-8483-4772-8e79-3d69d8477de4 268435456 5 $((data_start + 524288))" ;;
+    *) echo "unexpected lsblk invocation: $*" >&2; return 1 ;;
+  esac
+}
+lsblk() {
+  if [[ "$*" == --bytes* ]]; then
+    case "$scenario" in
+      order-3142) inventory "$@" | awk 'NR==1{print;next} {row[$5]=$0} END{print row[3];print row[1];print row[4];print row[2]}' ;;
+      order-reverse) inventory "$@" | tac ;;
+      *) inventory "$@" ;;
+    esac
+  else inventory "$@"; fi
+}
+mktemp() { [[ "$*" == '-d /run/ceralive-grow-data.XXXXXX' ]]; command mktemp -d "$GROW_TEST_WORK/run.XXXXXX"; }
+systemd-repart() {
+  [[ $# -eq 5 && "$1" == --definitions=* && "$2" == --empty=refuse && "$3" == --dry-run=no && "$4" == --discard=no && "$5" == /dev/mockdisk0 ]]
+  printf '%s\n' "$@" >"$GROW_TEST_WORK/invoked"
+  command cp -a "${1#--definitions=}" "$GROW_TEST_WORK/definitions"
+  [[ "$scenario" != repart-fail ]] || return 1
+}
+grow_data_main "${prefix}data"
+HARNESS
+for scenario in root-a root-b bench-a bench-b single-a order-3142 order-reverse; do
+  GROW_TEST_WORK="$work/$scenario"; export GROW_TEST_WORK; mkdir "$GROW_TEST_WORK"
+  bash "$work/harness" "$scenario"
+  [[ "$(tail -1 "$GROW_TEST_WORK/invoked")" == /dev/mockdisk0 ]]
+  count=4; [[ "$scenario" != single-a ]] || count=3
+  [[ "$(find "$GROW_TEST_WORK/definitions" -type f | wc -l)" -eq "$count" ]]
+  [[ "$(grep -l '^SizeMaxBytes=' "$GROW_TEST_WORK/definitions"/*.conf | wc -l)" -eq "$((count - 1))" ]]
+  [[ ! -e "$GROW_TEST_WORK/definitions/05.conf" ]]
+  [[ -z "$(find "$GROW_TEST_WORK" -maxdepth 1 -name 'run.*' -print)" ]] # EXIT cleanup ran
+  echo "$scenario entrypoint targets only its backing disk with ordered fixed-root definitions"
+done
+for scenario in too-small readonly nonblock wrong-root wrong-parent findmnt-fail inventory-fail missing-data malformed duplicate physical-reordered overlap same-start invalid-start missing-start; do
+  GROW_TEST_WORK="$work/$scenario"; export GROW_TEST_WORK; mkdir "$GROW_TEST_WORK"
+  if bash "$work/harness" "$scenario"; then echo "accepted $scenario"; exit 1; fi
+  [[ ! -e "$GROW_TEST_WORK/invoked" ]]
+  [[ -z "$(find "$GROW_TEST_WORK" -maxdepth 1 -name 'run.*' -print)" ]]
+  echo "$scenario rejected before repart"
+done
+GROW_TEST_WORK="$work/repart-fail"; export GROW_TEST_WORK; mkdir "$GROW_TEST_WORK"
+if bash "$work/harness" repart-fail; then echo 'swallowed repart failure'; exit 1; fi
+[[ -f "$GROW_TEST_WORK/invoked" && -z "$(find "$GROW_TEST_WORK" -maxdepth 1 -name 'run.*' -print)" ]]
+# The real eligibility check must still reject ordinary files.
+source mkosi/runtime/ceralive-grow-data.sh
+if grow_data_is_block_device "$work/harness"; then echo 'accepted regular file'; exit 1; fi
+echo 'growth entrypoint discovery, targeting, failures and cleanup pass'

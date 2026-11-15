@@ -30,8 +30,8 @@ populate_rootfs_slot() {
   [[ -n "${start_sector}" && -n "${size_sectors}" ]] \
     || die "could not read ${slot_label} (p${part_num}) geometry from ${img}"
   local size_bytes=$(( size_sectors * SECTOR ))
-  [[ "${size_bytes}" -eq $((4096 * 1024 * 1024)) ]] \
-    || die "${slot_label} geometry ${size_bytes} does not match the frozen 4096 MiB slot"
+  [[ "${size_bytes}" -eq $(($(ceralive_rootfs_mb) * 1024 * 1024)) ]] \
+    || die "${slot_label} geometry ${size_bytes} does not match the selected slot size"
 
   log_info "populating ${slot_label} (p${part_num}) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
   # Build the pre-sized slot image ALONGSIDE the output .raw, never in a bare

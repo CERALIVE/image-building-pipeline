@@ -1294,7 +1294,7 @@ EOF
     [[ "$info" == *'Bundle Format:  verity'* ]]
     [[ "$info" == *'Adaptive:  block-hash-index'* ]]
     [[ "$info" == *"Compatible:     'ceralive-rock-5b-plus'"* ]]
-    run env PATH="$shim:$PATH" COMPATIBLE_STRING=ceralive-rock-5b-plus SOURCE_DATE_EPOCH=1700000000 E2FSPROGS_FAKE_TIME="$clock" \
+    run env PATH="$shim:$PATH" BOARD_ID=rock-5b-plus COMPATIBLE_STRING=ceralive-rock-5b-plus SOURCE_DATE_EPOCH=1700000000 E2FSPROGS_FAKE_TIME="$clock" \
       bash -c 'source "$1/lib/common.sh"; source "$1/lib/disk/slot-image.sh"; make_slot_image "$2" "$3"' \
       _ "$PIPELINE_DIR" "$tree" "$BATS_TEST_TMPDIR/$i/rootfs.ext4"
     [ "$status" -eq 0 ]

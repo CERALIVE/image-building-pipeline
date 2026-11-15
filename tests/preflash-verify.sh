@@ -54,6 +54,7 @@ source "${PIPELINE_DIR}/lib/rauc-bundle-inspect.sh"
 # shellcheck source=ci/board-identity.sh
 source "${PIPELINE_DIR}/ci/board-identity.sh"
 source "${PIPELINE_DIR}/lib/shared/slot-reserve.sh"
+source "${PIPELINE_DIR}/lib/shared/layout.sh"
 IMAGES_DIR="${IMAGES_DIR:-${PIPELINE_DIR}/images}"
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,11 @@ newest_artifact() {
 }
 
 check_gpt_geometry() {
+  local BOARD_ID="${2:-${BOARD_ID:-}}" ROOTFS_SIZE ROOTFS_B_START DATA_START DATA_MIN_SIZE
+  ROOTFS_SIZE=$(( $(ceralive_rootfs_mb) * 2048 ))
+  ROOTFS_B_START=$(( ROOTFS_A_START + ROOTFS_SIZE ))
+  DATA_START=$(( ROOTFS_B_START + ROOTFS_SIZE ))
+  DATA_MIN_SIZE=$(( $(ceralive_data_floor_mb) * 2048 ))
   local img="$1"
   require_tool sgdisk || { fail "GPT geometry: A/B (boot + rootfs_a + rootfs_b + data)"; return; }
   local labels count verify_out
@@ -120,7 +126,7 @@ check_gpt_geometry() {
       && [[ "${p1_start}" == "${BOOT_START}" && "${p1_size}" == "${BOOT_SIZE}" ]] \
       && [[ "${p2_start}" == "${ROOTFS_A_START}" && "${p2_size}" == "${ROOTFS_SIZE}" ]] \
       && [[ "${p3_start}" == "${ROOTFS_B_START}" && "${p3_size}" == "${ROOTFS_SIZE}" ]] \
-      && [[ "${p4_start}" == "${DATA_START}" && "${p4_size}" -ge 4194304 ]] \
+      && [[ "${p4_start}" == "${DATA_START}" && "${p4_size}" -ge "${DATA_MIN_SIZE}" ]] \
       && [[ "${p4_last}" -eq "${expected_last}" && "${p4_size}" -eq $((expected_last - DATA_START + 1)) ]]; then
     pass "GPT geometry: exact A/B starts/sizes and unique labels"
     info "partitions (${count}): ${norm}"
@@ -648,12 +654,17 @@ check_rootfs_populated() {
 }
 
 check_target_capacity() {
-  local img="$1" target_bytes="$2" image_bytes
+  local img="$1" target_bytes="$2" board="$3" image_bytes required_bytes
   image_bytes="$(stat -c '%s' "${img}")"
-  if (( target_bytes >= image_bytes )); then
-    pass "Target media capacity: ${target_bytes} bytes >= image ${image_bytes} bytes"
+  required_bytes="$(BOARD_ID="$board" ceralive_min_media_bytes)"
+  if [[ "$board" == rock-5b-plus && "$required_bytes" == 15000000000 ]]; then
+    info 'ROCK 5B+ requires a 16 GB card or larger (measured floor 15000000000 bytes).'
+  fi
+  (( required_bytes >= image_bytes )) || required_bytes="$image_bytes"
+  if (( target_bytes >= required_bytes )); then
+    pass "Target media capacity: ${target_bytes} bytes >= required ${required_bytes} bytes (image ${image_bytes})"
   else
-    fail "Target media capacity: ${target_bytes} bytes < image ${image_bytes} bytes"
+    fail "Target media capacity: ${target_bytes} bytes < required ${required_bytes} bytes (image ${image_bytes}); target is below image/profile minimum"
   fi
 }
 
@@ -693,14 +704,14 @@ run_gate() {
   [[ -f "${raw}" ]]    || { fail "image present: ${raw}"; }
   [[ -f "${bundle}" ]] || { fail "bundle present: ${bundle}"; }
   if [[ -f "${raw}" ]]; then
-    check_gpt_geometry "${raw}"
+    check_gpt_geometry "${raw}" "${board}"
     check_gap_magic    "${raw}"
     check_second_stage_fit "${raw}"
     check_boot_partition "${raw}" "${boot_off}"
     check_boot_state     "${raw}" "${boot_off}"
     check_rootfs_populated "${raw}" 2 rootfs_a "${keyring}"
     check_rootfs_populated "${raw}" 3 rootfs_b "${keyring}"
-    check_target_capacity "${raw}" "${target_bytes}"
+    check_target_capacity "${raw}" "${target_bytes}" "${board}"
   fi
   [[ -f "${bundle}" ]] && check_rauc_bundle "${bundle}" "${board}" "${keyring}"
 

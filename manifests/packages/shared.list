@@ -494,3 +494,5 @@ zstd                     # initramfs-tools uses it in the target rootfs to compr
                          # bookworm dependency list. An active line here would still break  # suite-literal-ok: warns against reusing the previously targeted suite's dependency names
                          # the whole-list `apt-get install` on any host without the backport.
                          # Config/enrollment: mkosi/runtime/hawkbit-updater/. decisions.md Task 5.
+
+systemd-repart           # grow the existing data partition before /data mounts
