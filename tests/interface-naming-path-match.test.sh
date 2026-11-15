@@ -162,28 +162,12 @@ cd "\${ROOT}"
 mkdir -p etc
 # Redirect the function's absolute writes into the sandbox root.
 etc_mkdir() { :; }
-CERALIVE_INTERFACES_eth0='${VENDOR_ETH0}' \
-CERALIVE_INTERFACES_wlan0='${VENDOR_WLAN0}' \
-CERALIVE_INTERFACES_eth1='' \
-  bash -c '
-    set -euo pipefail
-    source "${POSTINST_LIB}"
-    log() { :; }
-    # Re-point the two absolute paths install_interface_naming() writes.
-    mkdir -p "'"\${ROOT}"'/etc/systemd/network" "'"\${ROOT}"'/etc/sysctl.d"
-    install_interface_naming_sandboxed() {
-      local role var val match
-      for role in eth0 eth1 wlan0; do
-        var="CERALIVE_INTERFACES_\${role}"
-        val="\${!var:-}"
-        [[ -n "\${val}" && "\${val}" != FIXME* ]] || continue
-        match="\$(link_path_match "\${val}")"
-        printf "[Match]\nPath=%s\n\n[Link]\nName=%s\n" "\${match}" "\${role}" \
-          >"'"\${ROOT}"'/etc/systemd/network/10-ceralive-\${role}.link"
-      done
-    }
-    install_interface_naming_sandboxed
-  '
+CERALIVE_INTERFACES_eth0='${VENDOR_ETH0}'
+CERALIVE_INTERFACES_wlan0='${VENDOR_WLAN0}'
+CERALIVE_INTERFACES_eth1=''
+# Redirect only filesystem destinations; execute the production function body.
+eval "\$(declare -f install_interface_naming | sed 's|/etc/|${WORK}/root/etc/|g')"
+install_interface_naming
 
 f="\${ROOT}/etc/systemd/network/10-ceralive-eth0.link"
 [ -f "\$f" ] || { echo "B5: no eth0 .link file was written"; exit 1; }
@@ -200,5 +184,194 @@ if bash "${REPRO}"; then
 else
   fail "the real install_interface_naming()/link_path_match() does not produce a kernel-portable Path="
 fi
+
+# Part C: emitted policy, with systemd 257 first-match/NamePolicy semantics.
+# Stock policies are the Debian 257 files observed on both bench boards.
+# This is an offline contract; real net_setup_link/coldplug proof is a board gate.
+python3 - "${PIPELINE_DIR}" "${WORK}" <<'PY'
+import configparser
+import fnmatch
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import yaml
+
+pipeline, work = map(Path, sys.argv[1:])
+usb = "73-usb-net-by-mac.link"
+usb_wlan = "20-ceralive-usb-wlan.link"
+default = "99-default.link"
+assert "10-ceralive-wlan0.link" < usb_wlan < usb < default
+stock = {
+    usb: "[Match]\nPath=*-usb-*\nProperty=ID_NET_NAME_MAC=*\n[Link]\nNamePolicy=mac\n",
+    default: "[Match]\nOriginalName=*\n[Link]\n"
+             "NamePolicy=keep kernel database onboard slot path\n"
+             "AlternativeNamesPolicy=database onboard slot path mac\nMACAddressPolicy=persistent\n",
+}
+# Independent pre-change physical contract, not derived from the writer's output.
+physical_paths = {
+    "rock-5b-plus": {
+        "eth0": "platform-fe190000.pcie-pci-0004:41:00.0 platform-*.pcie-pci-0004:41:00.0",
+        "wlan0": "platform-fe170000.pcie-pci-0002:21:00.0 platform-*.pcie-pci-0002:21:00.0",
+    },
+    "orange-pi-5-plus": {
+        "eth0": "platform-a40c00000.pcie-pci-0003:31:00.0 platform-*.pcie-pci-0003:31:00.0",
+        "eth1": "platform-a41000000.pcie-pci-0004:41:00.0 platform-*.pcie-pci-0004:41:00.0",
+    },
+    "x86-minipc": {},
+}
+errors = []
+
+
+def check(condition: bool, message: str) -> None:
+    if not condition:
+        errors.append(message)
+
+
+def parse(text: str) -> configparser.ConfigParser:
+    policy = configparser.ConfigParser(interpolation=None)
+    policy.optionxform = str
+    policy.read_string(text)
+    return policy
+
+
+def resulting_name(policies: dict[str, str], device: dict[str, str | int]) -> tuple[str, str]:
+    for filename, text in sorted(policies.items()):
+        policy = parse(text)
+        match = policy["Match"]
+        if "Path" in match and not any(
+            fnmatch.fnmatchcase(str(device["id_path"]), token) for token in match["Path"].split()
+        ):
+            continue
+        if "Type" in match and match["Type"] != device["type"]:
+            continue
+        if "Property" in match and not device["mac"]:
+            continue
+        link = policy["Link"]
+        # link-config.c::link_generate_new_name, with NamePolicy enabled.
+        for token in link.get("NamePolicy", "").split():
+            if token == "keep" and device["assign"] in (3, 4):
+                return filename, str(device["name"])
+            if token == "kernel" and device["assign"] == 2:
+                return filename, str(device["name"])
+            value = device.get(token, "")
+            if value:
+                return filename, str(value)
+        return filename, link.get("Name", str(device["name"]))
+    raise AssertionError(f"no first-match policy for {device}")
+
+
+for board, paths in physical_paths.items():
+    root = work / board
+    manifest = yaml.safe_load((pipeline / "manifests/boards" / f"{board}.yaml").read_text())
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CERALIVE_INTERFACES_")}
+    env.update({f"CERALIVE_INTERFACES_{role}": value
+                for role, value in manifest.get("interfaces", {}).items()})
+    subprocess.run(["bash", "-euc", r'''
+source "$1/mkosi/customize/postinst-lib.sh"
+log() { :; }
+body="$(declare -f install_interface_naming)"
+eval "${body//\/etc\//$2/etc/}"
+install_interface_naming
+''', "installer", str(pipeline), str(root)], env=env, check=True)
+    network = root / "etc/systemd/network"
+    old = {f"10-ceralive-{role}.link": f"[Match]\nPath={path}\n\n[Link]\nName={role}\n"
+           for role, path in paths.items()}
+    if "wlan0" not in paths:
+        old["10-ceralive-wlan0.link"] = "[Match]\nType=wlan\n\n[Link]\nName=wlan0\n"
+    emitted = {path.name: path.read_text() for path in network.glob("*.link")}
+    check(emitted.keys() == old.keys() | {usb_wlan},
+          f"I-PHYSICAL-NAMES {board}: changed link file set")
+    for filename, text in old.items():
+        actual = parse(emitted[filename])
+        baseline = parse(text)
+        if filename == "10-ceralive-wlan0.link":
+            check(actual["Link"].pop("NamePolicy", "") == "keep",
+                  f"I-USER-NO-RENAME {board}: WLAN policy must start with keep")
+        check(dict(actual["Match"]) == dict(baseline["Match"])
+              and dict(actual["Link"]) == dict(baseline["Link"]),
+              f"I-PHYSICAL-NAMES {board}: changed physical match/name policy in {filename}")
+    current = stock | emitted
+    dropins = sorted(network.glob(f"{usb}.d/*.conf"))
+    check(dropins == [], f"I-PHYSICAL-NAMES {board}: stock USB73 must have no image drop-in")
+    wlan_policy = parse(emitted[usb_wlan])
+    check(dict(wlan_policy["Match"]) ==
+          {"Path": "*-usb-*", "Property": "ID_NET_NAME_MAC=*", "Type": "wlan"}
+          and dict(wlan_policy["Link"]) == {"NamePolicy": "keep mac"},
+          f"I-USER-NO-RENAME {board}: USB keep must be WLAN-only before stock USB73")
+    previous = stock | old
+    # Non-WLAN USB replays must retain stock USB73's MAC policy, even at type 4.
+    for label, path, mac, renamed in (
+        ("USB Ethernet", "platform-xhci-usb-0:3:1.0", "enx001122334455", "uplink0"),
+        ("USB ECM modem", "platform-xhci-usb-0:4:1.0", "enx001122334466", "modem0"),
+        ("USB RNDIS modem", "platform-xhci-usb-0:5:1.0", "enx001122334477", "rndis0"),
+    ):
+        for assign, current_name in ((1, "eth9"), (2, "enp0s1u3"), (4, mac), (4, renamed)):
+            device = dict(id_path=path, type="ether", name=current_name,
+                          mac=mac, path="enp0s1u3", assign=assign)
+            expected = (usb, mac)
+            before = resulting_name(previous, device)
+            after = resulting_name(current, device)
+            check(before == expected,
+                  f"I-PHYSICAL-NAMES {board} {label}: fixture missed stock USB73: {before}")
+            check(after == expected,
+                  f"I-PHYSICAL-NAMES {board} {label} type={assign} current={current_name}: "
+                  f"old={before} new={after}, expected={expected}")
+            print(f"I-PHYSICAL-NAMES {board} {label} type={assign} current={current_name}: "
+                  f"old={before} new={after}")
+    # Include onboard vendor/mainline, second PCIe, USB MAC and missing-MAC paths.
+    cases = [
+        ("platform-fe170000.pcie-pci-0002:21:00.0", "wlan", "wlan0", "wlx001122334455", "wlP2p33s0"),
+        ("platform-a40800000.pcie-pci-0002:21:00.0", "wlan", "wlan0", "wlx001122334455", "wlP2p33s0"),
+        ("pci-0000:03:00.0", "wlan", "wlan1", "wlx001122334466", "wlp3s0"),
+        ("platform-xhci-usb-0:1:1.0", "wlan", "wlan2", "wlx001122334477", "wlp0s1u1"),
+        ("platform-xhci-usb-0:2:1.0", "wlan", "wlan3", "", "wlp0s1u2"),
+        ("platform-fe1c0000.ethernet", "ether", "eth2", "enx001122334488", "end0"),
+    ]
+    for role, path in paths.items():
+        if role.startswith("eth"):
+            cases.extend((token.replace("*", "a41000000"), "ether", role,
+                          "enx001122334499", "enP4p65s0") for token in path.split())
+    for path, kind, name, mac, path_name in cases:
+        device = dict(id_path=path, type=kind, name=name, mac=mac, path=path_name)
+        for assign in (1, 2):
+            device["assign"] = assign
+            before = resulting_name(previous, device)
+            after = resulting_name(current, device)
+            expected_winner = usb_wlan if kind == "wlan" and before[0] == usb else before[0]
+            check(after == (expected_winner, before[1]),
+                  f"I-PHYSICAL-NAMES {board} type={assign} {path}: {before} != {after}")
+            print(f"I-PHYSICAL-NAMES {board} type={assign} {path}: {after}")
+        if kind == "wlan":
+            for assign in (3, 4):
+                for userspace_name in ("clap-wlan0", "clap-a1b2c3d4", "custom-ap"):
+                    device.update(assign=assign, name=userspace_name)
+                    winner, result = resulting_name(current, device)
+                    check((winner, result) == (expected_winner, userspace_name),
+                          f"I-USER-NO-RENAME {board} type={assign} {path}: {winner} -> {result}")
+        # Initramfs has already assigned the final physical name; coldplug keeps it.
+        device.update(assign=1, name=name)
+        _, settled = resulting_name(previous, device)
+        device.update(assign=4, name=settled)
+        check(resulting_name(current, device)[1] == settled,
+              f"I-PHYSICAL-NAMES {board}: coldplug changed initramfs name {settled}")
+        if kind == "wlan":
+            # N-3: a DIFFERENT physical name from initramfs exposes keep's limit.
+            device.update(assign=4, name=path_name)
+            before = resulting_name(previous, device)
+            after = resulting_name(current, device)
+            check(after[1] == path_name,
+                  f"N-3 {board}: pre-named physical assignment 4 was not kept")
+            if before[0] == "10-ceralive-wlan0.link":
+                check(before[1] == "wlan0" and before[1] != after[1],
+                      f"N-3 {board}: fixture did not expose old-rule re-renaming")
+            print(f"N-3-COLDPLUG {board} {path}: old={before} new={after}; "
+                  "S-NAMES requires built-initrd/early-boot reachability proof")
+
+if errors:
+    raise SystemExit("\n".join(errors))
+print("I-USER-NO-RENAME / I-PHYSICAL-NAMES: PASS (offline kernel-name fixtures; N-3 artifact proof separate)")
+PY
 
 echo "interface-naming-path-match regression: PASS"
