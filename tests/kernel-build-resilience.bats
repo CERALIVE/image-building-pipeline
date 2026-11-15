@@ -128,7 +128,7 @@ case "$verb" in
       exit 128
     fi
     note "clone attempt=$n CLEAN $work"
-    if [ "$n" -le "$(ctl sleep_until)" ]; then exec sleep 30; fi
+    if [ "$n" -le "$(ctl sleep_until)" ]; then exec sleep infinity; fi
     if [ "$n" -le "$(ctl partial_until)" ]; then
       mkdir -p "$work/.git"
       : >"$work/.git/index.lock"
@@ -157,7 +157,7 @@ case "$verb" in
       exit 128
     fi
     note "fetch attempt=$n CLEAN $repo"
-    if [ "$n" -le "$(ctl sleep_until)" ]; then exec sleep 30; fi
+    if [ "$n" -le "$(ctl sleep_until)" ]; then exec sleep infinity; fi
     if [ "$n" -le "$(ctl partial_until)" ]; then
       : >"$repo/.git/index.lock"
       : >"$repo/.git/partial.pack"
@@ -456,7 +456,9 @@ container_script_body() {
   # An unbounded git that has stopped making progress does not exit on its own;
   # this is the leg that proves the wrapper is real and not decorative.
   printf '1' >"$GIT_STUB_DIR/sleep_until"
-  TIMEOUT=1 run_fetch "$WORK/linux" v7.1.5
+  # A healthy attempt needs the normal fixture budget too. The first attempt
+  # cannot finish by itself, so only the real timeout can make the retry happen.
+  run_fetch "$WORK/linux" v7.1.5
   [ "$status" -eq 0 ]
   [ "$(attempt_count)" -eq 2 ]
   [ "$(head_of "$WORK/linux")" = "$PINNED_SHA" ]
