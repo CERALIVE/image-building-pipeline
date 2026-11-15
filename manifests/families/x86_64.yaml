@@ -51,6 +51,9 @@ firmware_packages:
   - firmware-linux-nonfree
   - intel-microcode
 
+hardware_policy:
+  exclude_module_classes: []
+
 # x86 RAUC A/B selection rides UEFI/GRUB (EFI System Partition + bootloader env),
 # NOT raw-GPT bootcount (rk3588's 'custom') and NOT fw_setenv ('uboot'). 'efi' is
 # the bootloader adapter for the x86 EFI/GRUB target.

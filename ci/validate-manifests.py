@@ -34,6 +34,9 @@ import yaml
 from jsonschema import Draft202012Validator
 
 PIPELINE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PIPELINE_DIR / "lib"))
+from resolve import hardware_policy_params, load_module_classes
+
 SCHEMA_DIR = PIPELINE_DIR / "manifests" / "schema"
 ROUTES = {"families": "family.schema.json", "boards": "board.schema.json"}
 ADDON_SCHEMA = "addon.schema.json"
@@ -194,7 +197,7 @@ def validate_single_file(path_str: str) -> int:
     return 0
 
 
-def main() -> int:
+def main(manifests_dir: Path = PIPELINE_DIR / "manifests") -> int:
     rc = 0
 
     # 1. Self-validate every schema up-front.
@@ -209,17 +212,22 @@ def main() -> int:
     Draft202012Validator.check_schema(addon_schema)
     print(f"OK   schema self-valid: {ADDON_SCHEMA}")
     addon_validator = Draft202012Validator(addon_schema)
+    module_schema = load_schema("module-classes.schema.json")
+    Draft202012Validator.check_schema(module_schema)
+    print("OK   schema self-valid: module-classes.schema.json")
 
     checked = 0
 
     # 2. YAML board/family manifests.
-    manifests = sorted((PIPELINE_DIR / "manifests").glob("**/*.yaml"))
+    manifests = sorted(manifests_dir.glob("**/*.yaml"))
     if not manifests:
         print("FAIL no manifests found under manifests/", file=sys.stderr)
         return 1
 
+    families = {}
+    boards = {}
     for path in manifests:
-        subdir = path.relative_to(PIPELINE_DIR / "manifests").parts[0]
+        subdir = path.relative_to(manifests_dir).parts[0]
         validator = validators.get(subdir)
         if validator is None:
             continue
@@ -232,7 +240,28 @@ def main() -> int:
                 field = "/".join(map(str, err.absolute_path)) or "(root)"
                 print(f"FAIL {path}: field '{field}': {err.message}", file=sys.stderr)
         else:
-            print(f"OK   {subdir[:-1]:6} {path.relative_to(PIPELINE_DIR)}")
+            print(f"OK   {subdir[:-1]:6} {path.relative_to(manifests_dir)}")
+            if subdir == "families":
+                families[path.stem] = instance
+            else:
+                boards[path] = instance
+
+    # Class semantics are shared with the build resolver, including board add-backs.
+    registry = load_module_classes(manifests_dir)
+    for name, family in families.items():
+        hardware_policy_params(
+            family.get("hardware_policy", {}), {}, registry, f"families/{name}",
+        )
+    for path, board in boards.items():
+        name = board["family"]
+        if name not in families:
+            print(f"FAIL {path}: family: '{name}' is missing or invalid", file=sys.stderr)
+            rc = 1
+            continue
+        hardware_policy_params(
+            families[name].get("hardware_policy", {}), board.get("hardware_policy", {}),
+            registry, str(path),
+        )
 
     # 3. JSON add-on descriptors.
     addons: list[dict] = []
@@ -280,4 +309,9 @@ if __name__ == "__main__":
             )
             sys.exit(2)
         sys.exit(validate_single_file(argv[1]))
+    if argv:
+        if len(argv) != 2 or argv[0] != "--manifests":
+            print("usage: validate-manifests.py [--manifests <directory>]", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(main(Path(argv[1])))
     sys.exit(main())

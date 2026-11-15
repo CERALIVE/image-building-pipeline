@@ -1,0 +1,3 @@
+hardware_policy:
+  exclude_module_classes: []
+  sweep_candidates: [brcm/nested]

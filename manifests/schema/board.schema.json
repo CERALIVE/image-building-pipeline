@@ -12,6 +12,19 @@
     "description"
   ],
   "properties": {
+    "hardware_policy": {
+      "description": "Board add-backs only: each class must be excluded by the referenced family.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["include_module_classes"],
+      "properties": {
+        "include_module_classes": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "uniqueItems": true
+        }
+      }
+    },
     "family": {
       "description": "Filename stem of the family manifest this board inherits (e.g. 'rk3588' -> families/rk3588.yaml; 'x86_64' -> families/x86_64.yaml). REQUIRED — the board pulls arch, branch, kernel/uboot/dtb/firmware packages, bootloader adapter and partition template from the referenced family. Underscores are permitted so arch-named family stems (x86_64) match their filename verbatim.",
       "type": "string",

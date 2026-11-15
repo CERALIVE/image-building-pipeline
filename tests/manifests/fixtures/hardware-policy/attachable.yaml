@@ -1,0 +1,9 @@
+schema: 1
+preserved_roots: [brcm]
+classes:
+  discrete-gpu:
+    description: Attachable classes cannot be excluded by a family.
+    attachable: true
+    module_path_globs: [kernel/drivers/test/**]
+    firmware_prefixes: [test]
+    kconfig_symbols: [TEST]
