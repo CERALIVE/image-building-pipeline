@@ -1,0 +1,9 @@
+schema: 1
+preserved_roots: [brcm]
+classes:
+  invalid:
+    description: Must not classify the parent of Bluetooth firmware.
+    attachable: false
+    module_path_globs: [kernel/drivers/test/**]
+    firmware_prefixes: [intel]
+    kconfig_symbols: [TEST]

@@ -1,0 +1,9 @@
+schema: 1
+preserved_roots: [brcm]
+classes:
+  invalid:
+    description: Must not classify a preserved firmware root.
+    attachable: false
+    module_path_globs: [kernel/drivers/test/**]
+    firmware_prefixes: [brcm]
+    kconfig_symbols: [TEST]

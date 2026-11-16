@@ -229,6 +229,16 @@ tests/manifests/fixtures/invalid-family-missing-arch.yaml	fixture	support	not-ex
 tests/manifests/fixtures/valid-board-interfaces.yaml	fixture	support	not-executed	positive board manifest fixture
 tests/manifests/fixtures/valid-board.yaml	fixture	support	not-executed	positive board manifest fixture
 tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive family manifest fixture
+tests/manifests/fixtures/hardware-policy/unknown-class.yaml	fixture	support	not-executed	unknown family exclusion rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/preserved-prefix.yaml	fixture	support	not-executed	preserved class prefix rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/bluetooth-parent.yaml	fixture	support	not-executed	Bluetooth parent prefix rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/bluetooth-child.yaml	fixture	support	not-executed	Bluetooth child prefix rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/unexcluded-include.yaml	fixture	support	not-executed	invalid board add-back rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/board-exclude.yaml	fixture	support	not-executed	board exclusion rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/attachable.yaml	fixture	support	not-executed	attachable exclusion rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/preserved-candidate.yaml	fixture	support	not-executed	nested preserved sweep candidate rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/valid-excludes.yaml	fixture	support	not-executed	family exclusions and duplicate sweep prefix exercised by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/valid-include.yaml	fixture	support	not-executed	board add-back exercised by manifest-schema.bats
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved

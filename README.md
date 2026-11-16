@@ -274,6 +274,19 @@ be converted by OTA.
 └── CONTRIBUTING.md        # Contribution rules
 ```
 
+## Hardware policy [EXISTS: manifest data]
+
+[`manifests/hardware/module-classes.yaml`](manifests/hardware/module-classes.yaml)
+defines hardware classes and preserved firmware roots. Families declare excluded
+classes and sweep candidates; boards can add excluded classes back. The resolver
+emits deduplicated firmware prefixes, module globs and Kconfig symbols, and forwards
+the firmware parameters into mkosi. This data does not yet change image content
+or kernel configuration. Bluetooth roots remain protected; x86 declares no
+exclusions and resolves an empty sweep list.
+
+See [the policy contract](docs/hardware-policy.md) for field ownership, validation
+and the emitted parameters.
+
 ## Quick Start
 
 ```bash

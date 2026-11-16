@@ -125,8 +125,10 @@ pins), the COMPLETE contract is re-asserted here against the MERGED result -- so
 from __future__ import annotations
 
 import argparse
+import re
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, TypedDict
 
 try:
     import yaml
@@ -215,6 +217,101 @@ def deep_merge(base: Any, override: Any) -> Any:
         return merged
     # arrays: override replaces; scalars: override wins.
     return override
+
+
+class ModuleClass(TypedDict):
+    description: str
+    attachable: bool
+    module_path_globs: list[str]
+    firmware_prefixes: list[str]
+    kconfig_symbols: list[str]
+
+
+class ModuleClasses(TypedDict):
+    schema: int
+    preserved_roots: list[str]
+    classes: dict[str, ModuleClass]
+
+
+class HardwarePolicy(TypedDict, total=False):
+    exclude_module_classes: list[str]
+    include_module_classes: list[str]
+    sweep_candidates: list[str]
+    sweep_candidate_files: list[str]
+
+
+def load_module_classes(manifests: Path) -> ModuleClasses:
+    """Validate class data, preserving every declared Bluetooth firmware root."""
+    path = manifests / "hardware/module-classes.yaml"
+    registry: ModuleClasses = load_yaml(str(path))
+    validate(
+        registry,
+        load_json(str(Path(__file__).resolve().parent.parent
+                      / "manifests/schema/module-classes.schema.json")),
+        str(path),
+    )
+    roots = []
+    for line in (manifests / "rk3588-bluetooth-firmware-roots.txt").read_text().splitlines():
+        fields = line.split()
+        if fields and not fields[0].startswith("#"):
+            roots.append(fields[2])
+    for name, entry in registry["classes"].items():
+        for prefix in entry["firmware_prefixes"]:
+            field = f"{path}: classes/{name}/firmware_prefixes"
+            if prefix.split("/")[0] in registry["preserved_roots"]:
+                _die(f"schema invalid: {field}: '{prefix}' is under a preserved root")
+            for root in roots:
+                literal = re.split(r"[*?\[]", root, maxsplit=1)[0]
+                parent = literal.rstrip("/")
+                if (prefix == parent or literal.startswith(prefix + "/")
+                        or prefix.startswith(parent + "/")
+                        or (literal != root and prefix.startswith(literal))):
+                    _die(
+                        f"schema invalid: {field}: '{prefix}' overlaps "
+                        f"Bluetooth firmware root '{root}'"
+                    )
+    return registry
+
+
+def hardware_policy_params(
+    family: HardwarePolicy, board: HardwarePolicy, registry: ModuleClasses, path: str
+) -> dict[str, list[str]]:
+    """Resolve family exclusions minus board add-backs into consumer parameters."""
+    excluded = family.get("exclude_module_classes", [])
+    included = board.get("include_module_classes", [])
+    classes = registry["classes"]
+    for name in excluded:
+        if name not in classes:
+            _die(f"schema invalid: {path}: exclude_module_classes: unknown class '{name}'")
+        if classes[name]["attachable"]:
+            _die(f"schema invalid: {path}: exclude_module_classes: '{name}' is attachable")
+    for name in included:
+        if name not in excluded:
+            _die(
+                f"schema invalid: {path}: include_module_classes: '{name}' "
+                "is not excluded by the family"
+            )
+    candidates = family.get("sweep_candidates", [])
+    for prefix in candidates:
+        if prefix.split("/")[0] in registry["preserved_roots"]:
+            _die(
+                f"schema invalid: {path}: sweep_candidates: '{prefix}' "
+                "is under a preserved root"
+            )
+    effective = [classes[name] for name in excluded if name not in included]
+    return {
+        "firmware_sweep_prefixes": _dedupe(
+            candidates + [p for entry in effective for p in entry["firmware_prefixes"]]
+        ),
+        "firmware_sweep_files": family.get("sweep_candidate_files", []),
+        "firmware_preserved_roots": registry["preserved_roots"],
+        "hardware_excluded_module_globs": _dedupe(
+            [p for entry in effective for p in entry["module_path_globs"]]
+        ),
+        "hardware_excluded_kconfig": _dedupe(
+            [s for entry in effective for s in entry["kconfig_symbols"]]
+        ),
+    }
 
 
 DEFAULT_VARIANT = "default"
@@ -589,6 +686,17 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 name for name in merged["kernel_source"]["suppressed_packages"]
                 if name not in fetched
             ]
+
+    if "hardware_policy" in merged:
+        # A synthetic family (tests) can live outside manifests; the registry is pipeline data.
+        registry = load_module_classes(
+            Path(__file__).resolve().parent.parent / "manifests"
+        )
+        merged.pop("hardware_policy")
+        merged.update(hardware_policy_params(
+            base.get("hardware_policy", {}), board_base.get("hardware_policy", {}),
+            registry, f"{args.family} + {args.board}",
+        ))
 
     flat = flatten(merged)
     for key in sorted(flat):

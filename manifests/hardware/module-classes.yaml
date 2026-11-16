@@ -1,0 +1,40 @@
+schema: 1
+preserved_roots: [brcm, rtl_bt, rtw88, rtw89, rockchip, mediatek, iwlwifi]
+classes:
+  discrete-gpu:
+    description: Desktop graphics cards outside the family's supported hardware.
+    attachable: false
+    module_path_globs:
+      - kernel/drivers/gpu/drm/nouveau/**
+      - kernel/drivers/gpu/drm/amd/amdgpu/**
+      - kernel/drivers/gpu/drm/radeon/**
+    firmware_prefixes: [nvidia, amdgpu, radeon]
+    kconfig_symbols: [DRM_NOUVEAU, DRM_AMDGPU, DRM_RADEON]
+  x86-igpu:
+    description: Intel integrated graphics, retained by families that use it.
+    attachable: false
+    module_path_globs:
+      - kernel/drivers/gpu/drm/i915/**
+      - kernel/drivers/gpu/drm/xe/**
+    firmware_prefixes: [i915, xe]
+    kconfig_symbols: [DRM_I915, DRM_XE]
+  datacenter-net:
+    description: Datacenter Ethernet adapters and switch drivers.
+    attachable: false
+    module_path_globs:
+      - kernel/drivers/net/ethernet/mellanox/**
+      - kernel/drivers/net/ethernet/netronome/**
+      - kernel/drivers/net/ethernet/marvell/prestera/**
+      - kernel/drivers/net/ethernet/broadcom/bnx2x/**
+    # mrvl/prestera remains inside the preserved Bluetooth root mrvl/.
+    firmware_prefixes: [mellanox, netronome, bnx2x]
+    kconfig_symbols: [MLXSW_CORE, MLX4_CORE, MLX4_EN, MLX5_CORE, NFP, PRESTERA, BNX2X]
+  camera-ipu:
+    description: Intel camera image processing units and their VSC helpers.
+    attachable: false
+    module_path_globs:
+      - kernel/drivers/media/pci/intel/**
+      - kernel/drivers/staging/media/ipu3/**
+      - kernel/drivers/misc/mei/mei-vsc*
+    firmware_prefixes: [intel/ipu, intel/vsc]
+    kconfig_symbols: [VIDEO_INTEL_IPU6, VIDEO_IPU3_CIO2, VIDEO_IPU3_IMGU, INTEL_VSC, INTEL_MEI_VSC, INTEL_MEI_VSC_HW]
