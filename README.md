@@ -196,8 +196,13 @@ content, and only then records `os_release_version` in its schema-4 tuple.
 The six existing Todo-44 artifacts predate this check and lack the stamp; they
 must be rebuilt before any OS-update drill publication. Neither the wrapper nor
 the old artifacts constitute a released or board-qualified image.
-Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
-reserve helper. The OTA's neutral-labelled ext4 image is relabelled after install
+RK3588 and x86 factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d`
+writer and reserve helper. A shared checksum/hash seed preserves metadata across
+their distinct label-derived UUIDs, so images of one tree differ only in
+superblocks and adaptive updates can reuse their metadata blocks. The
+[storage contract](docs/agents/key-facts.md) describes the host fixture coverage;
+x86 hardware qualification remains pending.
+The OTA's neutral-labelled ext4 image is relabelled after install
 from the written partition's own GPT PARTLABEL, whether production (`rootfs_a/b`)
 or bench (`xrootfs_a/b`); an unreadable label aborts installation. New OS bundles
 are `format=verity` with `adaptive=block-hash-index`; cert-rotation bundles also

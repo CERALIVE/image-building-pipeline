@@ -3563,7 +3563,7 @@ reads their recorded filename/version/architecture/SHA-256 from
 `first-party` provenance. All other first-party names still require the index.
 The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
-`common.sh::resolve_source_date_epoch`). RK3588 factory assembly and the shared
+`common.sh::resolve_source_date_epoch`). RK3588 and x86 factory assembly and the shared
 OS-bundle producer use `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
 deterministic UUID/hash seed, `mkfs.ext4 -d`, and the 512 MiB/inode reserve check.
 Images made through that writer use ONE label-independent checksum and hash seed
@@ -3571,9 +3571,11 @@ Images made through that writer use ONE label-independent checksum and hash seed
 `tune2fs -U` afterwards, so factory slots and the OTA image of one tree differ only
 in superblock blocks (`tests/slot-image-identity.test.sh`); that is what lets RAUC
 adaptive `block-hash-index` updates reuse the slot's inode tables and directories.
-The x86 factory assembler has its own formatter in `lib/assemble-disk-x86.sh`,
-which still derives the hash seed from each filesystem UUID. Its factory-to-OTA
-metadata therefore does not have this shared-seed guarantee.
+The x86 factory assembler uses that same writer for its frozen 4096 MiB rootfs_a
+partition, including the host and unreadable-tree container paths.
+`tests/lib/x86-slot-image-identity.sh` compares the real GPT partition with OTA
+bytes and checks its label, UUID and surrounding disk bytes. This is host fixture
+coverage; x86 hardware and real adaptive-transfer qualification remain pending.
 Factory slots start with their own labels; the bundle's neutral-labelled image is
 relabelled after install from the written partition's own GPT PARTLABEL. The signed
 verity `.raucb` container is **not bit-reproducible**: native RAUC signing produces

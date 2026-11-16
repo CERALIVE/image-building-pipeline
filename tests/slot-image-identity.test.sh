@@ -308,4 +308,11 @@ PY
 then ok 'container receives the shared seed, final UUID, label and fixed clock for all three images'
 else bad 'container environment contract differs from the slot identities'; fi
 
+# 8. Exercise the separate x86 factory entry against OTA through real GPT p2.
+if bash "${here}/lib/x86-slot-image-identity.sh"; then
+  ok 'x86 factory native/container slots share OTA metadata and preserve identity'
+else
+  bad 'x86 factory native/container slot identity failed'
+fi
+
 [[ "${FAIL}" -eq 0 ]]
