@@ -283,7 +283,7 @@ emits deduplicated firmware prefixes, module globs and Kconfig symbols, and forw
 the firmware parameters into mkosi. The platform layer sweeps those firmware
 prefixes after installing firmware packages, retaining any prefix requested by
 an installed module or built-in driver and keeping everything when that inventory
-cannot be read completely. Preserved and Bluetooth roots remain
+cannot be read completely or its metadata is malformed. Preserved and Bluetooth roots remain
 protected. Kernel configuration is unchanged; x86 declares no exclusions and
 resolves an empty sweep list. See the [prune contract](docs/bluetooth-firmware-closure.md#what-the-prune-may-and-may-not-delete).
 

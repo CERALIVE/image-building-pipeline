@@ -28,7 +28,10 @@ firmware_sweep_module_refs() (
   mapfile -d '' -t builtin_lists <"${work}/builtin-lists"
   mapfile -d '' -t builtin_modinfo <"${work}/builtin-modinfo"
 
-  local refs="" ref out ko entry builtin data
+  local refs="" record="" line="" ref out ko head name key value builtin sibling path
+  local -i records=0
+  local -A seen=() expected=()
+  local -a paths=()
   for ko in "${mods[@]}"; do
     # One unreadable module would omit a possible consumer, so it voids the proof.
     out="$(modinfo -F firmware "${ko}" 2>/dev/null)" || return 1
@@ -38,37 +41,59 @@ firmware_sweep_module_refs() (
       refs+="${ref}"$'\t'"${ko#"${moddir}/"}"$'\n'
     done <<<"${out}"
   done
+  # modules.builtin.modinfo is the kernel's concatenated .modinfo section:
+  # NUL-terminated <module>.<key>=<value> records, one trailing NUL. Values may
+  # contain newlines, so records are split on NUL, never on lines.
   for builtin in "${builtin_modinfo[@]}"; do
-    data="$(tr '\0' '\n' <"${builtin}")" || return 1
-    while IFS= read -r entry; do
-      [[ "${entry}" == *.firmware=* ]] || continue
-      ref="${entry#*.firmware=}"
-      ref="${ref#"${ref%%[!/]*}"}"
-      [[ -n "${ref}" ]] || continue
-      refs+="${ref}"$'\t'"${entry%%.firmware=*} (built-in)"$'\n'
-    done <<<"${data}"
+    [[ -r "${builtin}" ]] || return 1
+    while IFS= read -r -d '' record; do
+      [[ -n "${record}" && "${record}" == *=* ]] || return 1
+      head="${record%%=*}"
+      [[ "${head}" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+$ ]] || return 1
+      name="${head%%.*}"
+      key="${head#*.}"
+      value="${record#*=}"
+      seen["${builtin}|${name}"]=1
+      records+=1
+      case "${key}" in
+        firmware)
+          value="${value#"${value%%[!/]*}"}"
+          [[ -n "${value}" ]] || continue
+          refs+="${value}"$'\t'"${name} (built-in)"$'\n'
+          ;;
+        file)
+          read -r -a paths <<<"${value}"
+          for path in "${paths[@]}"; do
+            expected["${builtin}|kernel/${path}.ko"]=1
+          done
+          ;;
+      esac
+    done <"${builtin}"
+    # A trailing record without its NUL is truncated metadata, not proof.
+    [[ -z "${record}" ]] || return 1
   done
-  # A built-in inventory that lists drivers needs usable metadata beside it.
+  # modules.builtin is derived from the same records, so a listed driver without
+  # its record means the pair is truncated or mismatched.
   for builtin in "${builtin_lists[@]}"; do
-    data="$(cat -- "${builtin}")" || return 1
-    case "${data}" in
-      *[![:space:]]*) ;;
-      *) continue ;;
-    esac
-    [[ -f "${builtin}.modinfo" && -r "${builtin}.modinfo" && -s "${builtin}.modinfo" ]] \
-      || return 1
-    data="$(tr '\0' '\n' <"${builtin}.modinfo")" || return 1
-    while IFS= read -r entry; do
-      [[ "${entry}" == *.firmware=* ]] || continue
-      ref="${entry#*.firmware=}"
-      ref="${ref#"${ref%%[!/]*}"}"
-      [[ -n "${ref}" ]] || continue
-      refs+="${ref}"$'\t'"${entry%%.firmware=*} (built-in)"$'\n'
-    done <<<"${data}"
+    [[ -r "${builtin}" ]] || return 1
+    sibling="${builtin}.modinfo"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -n "${line}" ]] || continue
+      path="${line#kernel/}"
+      path="${path%.ko}"
+      name="${path##*/}"
+      name="${name//-/_}"
+      if [[ -n "${seen["${sibling}|${name}"]:-}" \
+            || -n "${expected["${sibling}|${line}"]:-}" ]]; then
+        continue
+      fi
+      return 1
+    done <"${builtin}"
   done
-  # Empty is provable only when the kernel states its inventory; a tree with no
-  # .ko and no built-in facts has nothing to prove the consumer set against.
-  (( ${#mods[@]} + ${#builtin_lists[@]} + ${#builtin_modinfo[@]} > 0 )) || return 1
+  # Empty is provable only from an explicit fact: installed modules, an explicit
+  # modules.builtin list, or non-empty built-in metadata records. An orphan
+  # empty metadata file is absence of proof, not an empty inventory.
+  (( ${#mods[@]} + ${#builtin_lists[@]} + records > 0 )) || return 1
   printf '%s' "${refs}" | awk 'NF' | sort -u
 )
 

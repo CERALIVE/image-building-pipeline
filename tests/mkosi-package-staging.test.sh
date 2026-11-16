@@ -202,8 +202,9 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${MKOSI_INSTALL_CALLS}"' \
 	>"${RUN_DIR}/bin/mkosi-install"
 printf '%s\n' '#!/bin/sh' 'printf "raw apt-get invoked\\n" >&2' 'exit 90' \
 	>"${RUN_DIR}/bin/apt-get"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${RM_CALLS}"' \
-	>"${RUN_DIR}/bin/rm"
+printf '%s\n' '#!/bin/sh' \
+	'case "$*" in *"/usr/lib/firmware/"*) printf "%s\\n" "$*" >>"${RM_CALLS}" ;; esac' \
+	'exec /bin/rm "$@"' >"${RUN_DIR}/bin/rm"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${MKOSI_CHROOT_CALLS}"' \
 	>"${RUN_DIR}/bin/mkosi-chroot"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"${RUN_DIR}/bin/modinfo"

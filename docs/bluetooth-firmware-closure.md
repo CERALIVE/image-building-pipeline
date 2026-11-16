@@ -348,7 +348,11 @@ siblings. The reference collector includes installed modules and built-in
 `modules.builtin.modinfo` entries; each kept candidate logs its driver and path.
 The scan is all-or-nothing: an unreadable module, a failed tree walk, or a
 built-in inventory without usable metadata makes the consumer set unprovable and
-keeps every candidate. An empty module tree never authorises deletion on its own.
+keeps every candidate. Built-in metadata is validated as NUL-terminated
+`<module>.<key>=<value>` records, and every driver listed in `modules.builtin`
+must have its record; truncated or malformed data voids the proof. An explicit
+empty `modules.builtin` is a valid empty inventory; an orphan empty metadata
+file is not, and an empty module tree never authorises deletion on its own.
 A preserved candidate is fatal before any deletion. An empty family prefix
 list is an explicit no-op, including when no firmware directory exists.
 

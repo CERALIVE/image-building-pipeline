@@ -336,6 +336,68 @@ OUT="$(FIRMWARE_SWEEP_FILES=custom.bin run_prune "${ROOT}" "${WORK}/refs-empty")
 check no "$(present "${ROOT}" custom.bin)" "file candidates come from family policy"
 check yes "$(present "${ROOT}" r8a779x_usb3_rom.mem)" "a file outside the family policy survives"
 
+# modules.builtin.modinfo records are NUL-terminated module.key=value entries;
+# readable bytes that do not form complete records are not proof.
+ROOT="${WORK}/builtin-malformed"
+seed_root "${ROOT}"
+MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+printf 'kernel/switch.ko\n' >"${MODS}/modules.builtin"
+printf 'switch.firmwa' >"${MODS}/modules.builtin.modinfo"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" microchip)" "a malformed built-in record authorises no deletion"
+check yes "$(present "${ROOT}" qcom)" "a malformed built-in record keeps unrelated candidates"
+[[ "${OUT}" == *unprovable* ]] && ok "malformed built-in metadata explains itself" || bad "malformed built-in diagnostic absent"
+
+ROOT="${WORK}/builtin-truncated"
+seed_root "${ROOT}"
+MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+printf 'kernel/switch.ko\nkernel/nouveau.ko\n' >"${MODS}/modules.builtin"
+printf 'switch.firmware=microchip/mscc_vsc8584_revb_int8051_fb48.bin\0nouveau.firmwa' \
+  >"${MODS}/modules.builtin.modinfo"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" microchip)" "a truncated metadata tail keeps the earlier referenced family"
+check yes "$(present "${ROOT}" qcom)" "a truncated metadata tail keeps unrelated candidates"
+check yes "$(present "${ROOT}" nvidia)" "a listed driver missing its records keeps its candidate"
+[[ "${OUT}" == *unprovable* ]] && ok "truncated built-in metadata explains itself" || bad "truncated built-in diagnostic absent"
+
+ROOT="${WORK}/builtin-empty-orphan"
+seed_root "${ROOT}"
+MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+rm -f "${MODS}/kernel/drivers/net/fake.ko"
+: >"${MODS}/modules.builtin.modinfo"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" qcom)" "an empty orphan metadata file is not an inventory"
+check yes "$(present "${ROOT}" r8a779x_usb3_rom.mem)" "an empty orphan metadata file keeps the file candidate too"
+[[ "${OUT}" == *unprovable* ]] && ok "empty orphan metadata explains itself" || bad "empty orphan diagnostic absent"
+
+ROOT="${WORK}/builtin-valid-license"
+seed_root "${ROOT}"
+MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+printf 'kernel/switch.ko\n' >"${MODS}/modules.builtin"
+printf 'switch.license=GPL\0' >"${MODS}/modules.builtin.modinfo"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check no "$(present "${ROOT}" qcom)" "valid non-firmware records still permit a proven removal"
+check no "$(present "${ROOT}" microchip)" "a listed built-in without firmware references is prunable"
+
+ROOT="${WORK}/builtin-explicit-empty"
+seed_root "${ROOT}"
+MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+rm -f "${MODS}/kernel/drivers/net/fake.ko"
+: >"${MODS}/modules.builtin"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check no "$(present "${ROOT}" qcom)" "an explicit empty built-in inventory permits a proven removal"
+
+ROOT="${WORK}/builtin-only"
+seed_root "${ROOT}"
+MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+rm -f "${MODS}/kernel/drivers/net/fake.ko"
+printf 'switch.firmware=microchip/mscc_vsc8584_revb_int8051_fb48.bin\0switch.license=GPL\0' \
+  >"${MODS}/modules.builtin.modinfo"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" microchip)" "a built-in-only inventory still protects its firmware"
+check no "$(present "${ROOT}" qcom)" "a valid built-in-only metadata file proves unreferenced removals"
+[[ "${OUT}" == *"switch (built-in)"* ]] && ok "the kept built-in candidate names its driver" || bad "built-in driver identity lost: ${OUT}"
+
 # ---------------------------------------------------------------------------
 # 4. The real modinfo, so the flag and the invocation cannot rot silently.
 # ---------------------------------------------------------------------------

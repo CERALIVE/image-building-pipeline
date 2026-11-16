@@ -2517,10 +2517,14 @@ build input, so changing it under the released package version fails the
 immutable candidate-identity gate; the next kernel revision bump owns the move.
 The scan is all-or-nothing: both `find` walks must complete, every discovered
 module must answer `modinfo`, and every built-in metadata file must be read.
-A `modules.builtin` list that names drivers requires a non-empty
-`modules.builtin.modinfo` beside it. Any failure leaves the consumer set
-unprovable, prints the warning and removes NOTHING; an empty module tree is
-provable only when the kernel states an inventory, never by absence alone.
+`modules.builtin.modinfo` is parsed as the kernel emits it — NUL-terminated
+`<module>.<key>=<value>` records from the vmlinux `.modinfo` section, ending in
+one NUL. Truncated or malformed records, and a driver listed in
+`modules.builtin` without a matching record, void the proof; non-firmware
+records such as `license` are normal. Any failure leaves the consumer set
+unprovable, prints the warning and removes NOTHING. An explicit empty
+`modules.builtin` is a valid empty inventory; an orphan empty metadata file is
+absence of proof.
 A kept candidate names its driver and reference;
 nested candidates such as `intel/ipu` are checked independently of their parent.
 Preserved candidates fail before any deletion. Bluetooth candidate and retained
