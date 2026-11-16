@@ -398,6 +398,97 @@ check yes "$(present "${ROOT}" microchip)" "a built-in-only inventory still prot
 check no "$(present "${ROOT}" qcom)" "a valid built-in-only metadata file proves unreferenced removals"
 [[ "${OUT}" == *"switch (built-in)"* ]] && ok "the kept built-in candidate names its driver" || bad "built-in driver identity lost: ${OUT}"
 
+# The pinned producer joins owning names with ":" and their .file paths with
+# spaces. Supplied paths must agree in both directions, even for equal basenames.
+for scenario in ordinary separate normalized group group-consumer group-license-only \
+  contradictory missing-path extra-path mismatched-group invalid-group; do
+  ROOT="${WORK}/producer-${scenario}"
+  seed_root "${ROOT}"
+  MODS="${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588"
+  rm -f "${MODS}/kernel/drivers/net/fake.ko"
+  mkdir -p "${ROOT}/usr/lib/firmware/vendorx/server" "${ROOT}/usr/lib/firmware/vendorx/server2"
+  for object in vendorx/server/blob vendorx/server2/sibling intel/ibt-0040.sfi custom.bin; do
+    printf 'firmware %s\n' "${object}" >"${ROOT}/usr/lib/firmware/${object}"
+  done
+  case "${scenario}" in
+    ordinary)
+      printf '%s\0' 'ordinary.file=drivers/test/ordinary' 'ordinary.license=Dual BSD/GPL' \
+        'ordinary.author=Example <example@example.invalid>' \
+        $'ordinary.description=first line\nsecond line: value=a=b' \
+        'ordinary.alias=usb:v0ABCDp*d*dc*dsc*dp*ic*isc*ip*in*' \
+        'ordinary.parm=debug:Enable debug output (0=off)' 'ordinary.parmtype=debug:bool' \
+        'ordinary.softdep=' 'ordinary.import_ns=VFS_internal' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    separate)
+      printf '%s\0' 'beta.license=GPL' 'alpha.file=drivers/test/alpha' \
+        'beta.file=drivers/test/beta' 'alpha.license=GPL v2' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    normalized)
+      printf '%s\0' 'other_driver:some_driver.file=drivers/test/other,driver drivers/test/some-driver' \
+        'other_driver:some_driver.license=GPL' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    contradictory)
+      printf '%s\0' 'same.file=drivers/net/same' 'same.license=GPL' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    invalid-group)
+      printf '%s\0' 'alpha::beta.file=drivers/test/alpha drivers/test/beta' \
+        'alpha::beta.license=GPL' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    *)
+      printf '%s\0' 'alpha:beta.file=drivers/test/alpha drivers/test/beta' \
+        'alpha:beta.license=GPL' >"${MODS}/modules.builtin.modinfo"
+      ;;
+  esac
+  # Exact modules.builtin transformation from the pinned Makefile.vmlinux.
+  tr '\0' '\n' <"${MODS}/modules.builtin.modinfo" |
+    sed -n 's/^[[:alnum:]:_]*\.file=//p' | tr ' ' '\n' | uniq |
+    sed -e 's:^:kernel/:' -e 's/$/.ko/' >"${MODS}/modules.builtin"
+  case "${scenario}" in
+    contradictory) printf 'kernel/drivers/gpu/same.ko\n' >"${MODS}/modules.builtin" ;;
+    missing-path) printf 'kernel/drivers/test/alpha.ko\n' >"${MODS}/modules.builtin" ;;
+    extra-path) printf 'kernel/drivers/test/gamma.ko\n' >>"${MODS}/modules.builtin" ;;
+    mismatched-group)
+      printf '%s\0' 'alpha:gamma.file=drivers/test/alpha drivers/test/beta' \
+        'alpha:gamma.license=GPL' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    group-license-only)
+      # Preserve supported name-only metadata when no .file relation is supplied.
+      printf 'alpha:beta.license=GPL\0' >"${MODS}/modules.builtin.modinfo"
+      ;;
+    group-consumer)
+      printf 'alpha:beta.firmware=/nvidia/gm20b/acr/bl.bin\0' >>"${MODS}/modules.builtin.modinfo"
+      ;;
+  esac
+  find "${ROOT}/usr/lib/firmware" -type f -exec sha256sum {} + | sort >"${WORK}/producer-before"
+  OUT="$(FIRMWARE_SWEEP_PREFIXES='qcom nvidia microchip vendorx/server' FIRMWARE_SWEEP_FILES=custom.bin \
+    run_prune "${ROOT}" "${WORK}/refs-empty")"
+  case "${scenario}" in
+    contradictory|missing-path|extra-path|mismatched-group|invalid-group)
+      find "${ROOT}/usr/lib/firmware" -type f -exec sha256sum {} + | sort >"${WORK}/producer-after"
+      if cmp -s "${WORK}/producer-before" "${WORK}/producer-after"; then
+        ok "${scenario}: inconsistent producer inventory retains every firmware byte"
+      else
+        bad "${scenario}: inconsistent producer inventory changed firmware"
+      fi
+      [[ "${OUT}" == *unprovable* ]] && ok "${scenario}: explains the refusal" || bad "${scenario}: refusal diagnostic absent"
+      ;;
+    *)
+      for object in qcom nvidia microchip vendorx/server custom.bin; do
+        EXPECT=no
+        [[ "${scenario}" != group-consumer || "${object}" != nvidia ]] || EXPECT=yes
+        check "${EXPECT}" "$(present "${ROOT}" "${object}")" "${scenario}: candidate '${object}' follows its references"
+      done
+      for object in vendorx/server2/sibling intel/ibt-0040.sfi; do
+        check yes "$(present "${ROOT}" "${object}")" "${scenario}: noncandidate sibling '${object}' survives"
+      done
+      if [[ "${scenario}" == group-consumer ]]; then
+        [[ "${OUT}" == *"alpha:beta (built-in)"*"nvidia/gm20b/acr/bl.bin"* ]] \
+          && ok "grouped firmware reference names its owning modules" || bad "grouped firmware reference lost its identity"
+      fi
+      ;;
+  esac
+done
+
 # ---------------------------------------------------------------------------
 # 4. The real modinfo, so the flag and the invocation cannot rot silently.
 # ---------------------------------------------------------------------------

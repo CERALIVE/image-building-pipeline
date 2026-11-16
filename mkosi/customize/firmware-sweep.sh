@@ -28,10 +28,10 @@ firmware_sweep_module_refs() (
   mapfile -d '' -t builtin_lists <"${work}/builtin-lists"
   mapfile -d '' -t builtin_modinfo <"${work}/builtin-modinfo"
 
-  local refs="" record="" line="" ref out ko head name key value builtin sibling path
+  local refs="" record="" line="" ref out ko head name key value builtin sibling path member mapped
   local -i records=0
-  local -A seen=() expected=()
-  local -a paths=()
+  local -A seen=() expected=() file_names=() listed=()
+  local -a paths=() names=()
   for ko in "${mods[@]}"; do
     # One unreadable module would omit a possible consumer, so it voids the proof.
     out="$(modinfo -F firmware "${ko}" 2>/dev/null)" || return 1
@@ -49,11 +49,12 @@ firmware_sweep_module_refs() (
     while IFS= read -r -d '' record; do
       [[ -n "${record}" && "${record}" == *=* ]] || return 1
       head="${record%%=*}"
-      [[ "${head}" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+$ ]] || return 1
+      [[ "${head}" =~ ^[A-Za-z0-9_]+(:[A-Za-z0-9_]+)*\.[A-Za-z0-9_]+$ ]] || return 1
       name="${head%%.*}"
       key="${head#*.}"
       value="${record#*=}"
-      seen["${builtin}|${name}"]=1
+      IFS=: read -r -a names <<<"${name}"
+      for member in "${names[@]}"; do seen["${builtin}|${member}"]=1; done
       records+=1
       case "${key}" in
         firmware)
@@ -62,10 +63,19 @@ firmware_sweep_module_refs() (
           refs+="${value}"$'\t'"${name} (built-in)"$'\n'
           ;;
         file)
+          # KBUILD_MODNAME joins normalized owners with ':', KBUILD_MODFILE
+          # joins their raw paths with spaces, in the same order.
+          [[ "${value}" != *$'\n'* ]] || return 1
           read -r -a paths <<<"${value}"
+          mapped=""
           for path in "${paths[@]}"; do
-            expected["${builtin}|kernel/${path}.ko"]=1
+            member="${path##*/}"
+            member="${member//[-,]/_}"
+            mapped+="${mapped:+:}${member}"
+            file_names["${builtin}|${member}"]=1
+            expected["${builtin}|kernel/${path}.ko"]="${builtin%.modinfo}"
           done
+          [[ "${mapped}" == "${name}" ]] || return 1
           ;;
       esac
     done <"${builtin}"
@@ -79,16 +89,21 @@ firmware_sweep_module_refs() (
     sibling="${builtin}.modinfo"
     while IFS= read -r line || [[ -n "${line}" ]]; do
       [[ -n "${line}" ]] || continue
+      listed["${sibling}|${line}"]=1
       path="${line#kernel/}"
       path="${path%.ko}"
       name="${path##*/}"
-      name="${name//-/_}"
-      if [[ -n "${seen["${sibling}|${name}"]:-}" \
-            || -n "${expected["${sibling}|${line}"]:-}" ]]; then
+      name="${name//[-,]/_}"
+      if [[ -n "${expected["${sibling}|${line}"]:-}" ]]; then
         continue
       fi
-      return 1
+      # Name-only records cannot override a supplied full-path relation.
+      [[ -n "${seen["${sibling}|${name}"]:-}" \
+         && -z "${file_names["${sibling}|${name}"]:-}" ]] || return 1
     done <"${builtin}"
+  done
+  for path in "${!expected[@]}"; do
+    [[ ! -e "${expected["${path}"]}" || -n "${listed["${path}"]:-}" ]] || return 1
   done
   # Empty is provable only from an explicit fact: installed modules, an explicit
   # modules.builtin list, or non-empty built-in metadata records. An orphan
