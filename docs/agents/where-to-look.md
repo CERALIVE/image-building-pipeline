@@ -59,6 +59,7 @@
 | Cross-repo kiosk architecture | [CeraUI on-device display](https://github.com/CERALIVE/CeraUI/blob/main/docs/ON_DEVICE_DISPLAY.md) — DC-1..DC-4, Phase-3 deferral register |
 | **Build host support matrix** | [`docs/host-support.md`](../host-support.md) — which hosts work, what they need |
 | **Image size notes / levers** | [`docs/size-notes.md`](../size-notes.md) — locale strip, firmware audit, size-gate |
+| **Final-rootfs driver firmware closure** | [`docs/firmware-closure.md`](../firmware-closure.md) — all dpkg lists, shared driver collector, exceptions and artifact boundary |
 | **Build-log warning/error signatures + the lint that governs them** | [`docs/build-log-census.md`](../build-log-census.md) + `ci/check-build-log.sh` / `ci/check-build-log-census.py` — see the KEY FACT below |
 | **Kernel freeze / update contract (`apt-mark hold` + apt pin; RAUC-only boot stack)** | [`docs/kernel-freeze-contract.md`](../kernel-freeze-contract.md) + `mkosi/customize/postinst-lib.sh::freeze_boot_packages` — see the KEY FACT below |
 | **Trixie/mainline OTA validation (RAUC compatibility + completed rollback drill)** | [`docs/ota-bookworm-trixie-transition.md`](../ota-bookworm-trixie-transition.md) + `tests/rauc-transition-contract.test.sh` — plain bundle, exact compatible/signing chain, deployed U-Boot remains outside the bundle |

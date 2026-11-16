@@ -1,0 +1,1 @@
+# Exact firmware path<TAB>reason. No patterns; every exception needs a reason.

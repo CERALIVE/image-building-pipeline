@@ -17,6 +17,7 @@
 #   [6/9]  tar-emit      normalized <timestamp>.rootfs.tar   stages/tar-emit.sh
 #   [6b/9] boot-verify   /boot is complete and loadable      stages/boot-verify.sh
 #   [6c/9] size-gate     rootfs is within its size budget    stages/size-gate.sh
+#   [6c-firmware/9] firmware-closure final driver firmware  stages/firmware-closure-gate.sh
 #   [6d/9] packages-lock exact installed .deb provenance    stages/packages-lock.sh
 #   [7/9]  parity        parity vs the v2 package manifests  stages/parity.sh
 #   [8/9]  assemble      Stage-4 .raw + signed .raucb        stages/assemble.sh
@@ -176,6 +177,8 @@ source "${STAGE_DIR}/tar-emit.sh"
 source "${STAGE_DIR}/boot-verify.sh"
 # shellcheck source=stages/size-gate.sh
 source "${STAGE_DIR}/size-gate.sh"
+# shellcheck source=stages/firmware-closure-gate.sh
+source "${STAGE_DIR}/firmware-closure-gate.sh"
 # shellcheck source=stages/packages-lock.sh
 source "${STAGE_DIR}/packages-lock.sh"
 # shellcheck source=stages/parity.sh
@@ -311,6 +314,7 @@ main() {
   stage_tar_emit
   stage_boot_verify
   stage_size_gate
+  stage_firmware_closure_gate
   stage_packages_lock
   stage_parity
   stage_assemble

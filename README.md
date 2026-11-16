@@ -35,6 +35,7 @@ matching bench report and immutable publication authorization.
 | curl | ≥ 7.71.0 **on the build host**, including container mode | hosted Ubuntu 22.04 provides 7.81.0; see [host curl prerequisite](docs/host-support.md#build-host-curl-prerequisite) |
 | Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
 | ccache | recommended for unpublished local kernel-from-source builds | `which ccache` → `/usr/bin/ccache` present on this host |
+| Firmware gate | host Python >= 3.11, GNU tar and kmod (`modinfo`) | [Final-rootfs closure](docs/firmware-closure.md) runs after the size gate |
 
 This table is the quick-reference; the full, step-by-step, executed walkthrough
 — including the container-vs-native host matrix, the full board × kernel-track
@@ -98,7 +99,9 @@ the `.deb`, `resolved.config`, `built-modules.txt`, `kernel-artifact.json` and
 `SHA256SUMS` under `mkosi/build/kernel-only/rk3588/` only after all boot and
 pinned-firmware checks pass. Firmware uses exactly the image's Bluetooth/UHID
 closure and its two reviewed hardware gaps; other modules' firmware is not
-gated, just as in shipped images. `DRY_RUN=1` prints only resolution and kernel work;
+gated in this kernel-only lane. Full image builds additionally enforce
+[final-rootfs firmware closure](docs/firmware-closure.md) after the size gate.
+`DRY_RUN=1` prints only resolution and kernel work;
 `--release` rejects debug variants. This does not publish or qualify hardware.
 See [kernel build details](docs/kernel-build-from-source.md#kernel-only-build-lane-exists).
 
