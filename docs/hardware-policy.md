@@ -1,4 +1,4 @@
-# Hardware-class policy [EXISTS: data and resolver]
+# Hardware-class policy [EXISTS: resolver and firmware sweep]
 
 `manifests/hardware/module-classes.yaml` is the schema-1 registry. Each class
 declares a description, whether it is attachable, module path globs relative to
@@ -37,9 +37,18 @@ retention checks.
 
 RK3588 excludes the four registered classes. x86 declares no exclusions and
 resolves empty sweep/module/Kconfig lists, retaining integrated GPU firmware.
-This establishes policy data only: the existing sweep and kernel fragment are
-unchanged, and no new firmware is removed by this change. x86 image and hardware
-qualification remain separate.
+The platform calls `firmware_sweep <root>` after installing firmware packages.
+It removes a candidate only when installed modules and built-in driver metadata
+have no matching reference, and logs the driver that blocks a deletion.
+The proof is all-or-nothing: any unreadable module, incomplete tree walk or
+unusable built-in metadata keeps every candidate, and an orphan empty metadata
+file is not an inventory.
+Nested prefixes are independent candidates; preserved roots are rejected before
+any deletion, and Bluetooth closure checks remain mandatory. Missing `modinfo`
+declines the sweep; an empty family prefix list removes nothing.
+The kernel fragment is unchanged. x86 image and hardware qualification remain
+separate; future x86 firmware installation belongs in this platform layer with
+the sweep called afterwards.
 
 Validate production manifests with `python3 ci/validate-manifests.py`, or a
 self-contained fixture manifest tree with

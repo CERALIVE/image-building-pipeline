@@ -274,15 +274,18 @@ be converted by OTA.
 └── CONTRIBUTING.md        # Contribution rules
 ```
 
-## Hardware policy [EXISTS: manifest data]
+## Hardware policy [EXISTS: proof-gated firmware sweep]
 
 [`manifests/hardware/module-classes.yaml`](manifests/hardware/module-classes.yaml)
 defines hardware classes and preserved firmware roots. Families declare excluded
 classes and sweep candidates; boards can add excluded classes back. The resolver
 emits deduplicated firmware prefixes, module globs and Kconfig symbols, and forwards
-the firmware parameters into mkosi. This data does not yet change image content
-or kernel configuration. Bluetooth roots remain protected; x86 declares no
-exclusions and resolves an empty sweep list.
+the firmware parameters into mkosi. The platform layer sweeps those firmware
+prefixes after installing firmware packages, retaining any prefix requested by
+an installed module or built-in driver and keeping everything when that inventory
+cannot be read completely or its metadata is malformed. Preserved and Bluetooth roots remain
+protected. Kernel configuration is unchanged; x86 declares no exclusions and
+resolves an empty sweep list. See the [prune contract](docs/bluetooth-firmware-closure.md#what-the-prune-may-and-may-not-delete).
 
 See [the policy contract](docs/hardware-policy.md) for field ownership, validation
 and the emitted parameters.

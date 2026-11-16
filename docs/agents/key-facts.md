@@ -2508,12 +2508,37 @@ cases; the vendor cases were removed with the retired track).
 **Firmware is pruned only where an installed-module sweep proves no consumer**
 [EXISTS]
 
-`prune_irrelevant_rk3588_firmware` used to delete six directories by NAME. It now
-reads every installed module with `modinfo -F firmware`, builds the real consumer
-set, and KEEPS — naming the exact blocking reference — any candidate a module can
-request. The candidate list is an input to that check, not the decision, which is
-what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
-`r8a779x_usb3_rom.mem` safe.
+`mkosi/customize/firmware-sweep.sh::firmware_sweep <root>` reads the resolver's
+`FIRMWARE_SWEEP_PREFIXES`, `FIRMWARE_SWEEP_FILES` and `FIRMWARE_PRESERVED_ROOTS`.
+Its `firmware_sweep_module_refs` reads `modinfo -F firmware` on every installed
+module and the NUL-separated `firmware=` entries in `modules.builtin.modinfo`.
+That is a second reader on purpose: the device stager's copy is a hashed kernel
+build input, so changing it under the released package version fails the
+immutable candidate-identity gate; the next kernel revision bump owns the move.
+The scan is all-or-nothing: both `find` walks must complete, every discovered
+module must answer `modinfo`, and every built-in metadata file must be read.
+`modules.builtin.modinfo` is parsed as the kernel emits it — NUL-terminated
+`<module>.<key>=<value>` records from the vmlinux `.modinfo` section, ending in
+one NUL. Truncated or malformed records, and a driver listed in
+`modules.builtin` without a matching record, void the proof; non-firmware
+records such as `license` are normal. Any failure leaves the consumer set
+unprovable, prints the warning and removes NOTHING. An explicit empty
+`modules.builtin` is a valid empty inventory; an orphan empty metadata file is
+absence of proof.
+A kept candidate names its driver and reference;
+nested candidates such as `intel/ipu` are checked independently of their parent.
+Preserved candidates fail before any deletion. Bluetooth candidate and retained
+object assertions still surround the sweep.
+
+The call remains after the platform firmware-package install. The function has
+no architecture gate: an empty prefix list logs `no sweep candidates for this
+family` before inspecting the root and leaves all files intact. **x86 bring-up
+must install its firmware in this platform layer and call `firmware_sweep` after
+that install.** Today's non-arm64 pass-through is unchanged; no x86 image is
+qualified by the synthetic i915 consumer test.
+
+The device stager's `firmware-refs` output is unchanged: sorted, deduplicated
+paths from the installed modules of the selected release.
 
 - **`brcm/`, `rtl_bt/`, `rtw88/`, `rtw89/` and `rockchip/` are never candidates** —
   they carry the two boards' own Wi-Fi, Bluetooth and SoC blobs. `mediatek/` and
@@ -2576,10 +2601,10 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
 - **Nothing is removed as a PACKAGE by this firmware prune.** The independent
   Todo-48 AP drill removes `hostapd` from the future image package list, not here.
 
-Guard: `tests/firmware-prune.test.sh` (42 checks — the two added ones assert the
-builder image installs `kmod` and fails its own build without `modinfo`, because
-every synthetic-tree case above passes vacuously on a builder that cannot run the
-sweep).
+Guards: `tests/firmware-prune.test.sh` and
+`tests/full-firmware-bluetooth-closure.test.sh`. The firmware suite also pins builder
+`modinfo` provisioning and rejects a scratch postinst with the sweep moved
+before the firmware install.
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
@@ -3859,6 +3884,9 @@ generate_prune_local_conf()` runs at the top of `stage_mkosi()` (real builds
 only — `DRY_RUN` exits before this stage), reads the manifest via
 `lib/shared/prune-paths-lib.sh`, and writes a GITIGNORED
 `mkosi.images/runtime/mkosi.local.conf` with `[Content]\nRemoveFiles=<csv>`.
+The CSV reader propagates a missing-manifest error, and generation returns
+non-zero before creating either the output or a temporary file. An existing
+empty manifest remains a valid empty policy.
 The file exists ONLY while the owning mkosi invocation runs: before any fetch
 or DRY_RUN, the orchestrator removes a stale copy only if its complete four-line
 generated signature matches; a symlink, malformed file or operator config is
