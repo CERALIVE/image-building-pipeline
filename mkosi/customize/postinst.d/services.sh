@@ -573,10 +573,12 @@ setup_rtmp_gateway() {
 }
 
 # No daemon is started in the build chroot. Reject incompatible systemd images.
+# systemctl is on PATH in the chroot; the systemd binary itself is not
+# (/usr/lib/systemd/systemd), and both print the same "systemd N" first line.
 setup_power_button() {
   local src="${CERALIVE_RUNTIME_SRC:?}/power-button"
   local version
-  version="$(systemd --version | head -n 1 | awk '{print $2}')"
+  version="$(systemctl --version | head -n 1 | awk '{print $2}')"
   [[ "$version" =~ ^[0-9]+$ && "$version" -ge 251 ]] || die "power button requires systemd >=251"
   install -D -m 0644 "$src/button.py" /usr/local/lib/ceralive-button/button.py
   install -D -m 0644 "$src/ceralive-button.service" /etc/systemd/system/ceralive-button.service

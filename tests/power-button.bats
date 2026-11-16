@@ -39,7 +39,8 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
     source "$1/mkosi/customize/postinst-lib.sh"
     CERALIVE_RUNTIME_SRC="$1/mkosi/runtime"
     target="$2"
-    systemd() { echo "systemd ${VERSION}"; }
+    systemd() { echo "unexpected bare systemd call" >&2; return 127; }
+    systemctl() { [ "$1" = --version ] && echo "systemd ${VERSION} (${VERSION}.1-1)"; }
     install() {
       local args=("$@") last=$(($# - 1))
       args[$last]="$target${args[$last]}"
@@ -54,6 +55,7 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
   ' bash "$ROOT" "$BATS_TEST_TMPDIR"
   [ "$status" -ne 0 ]
   [[ "$output" == *"power button requires systemd >=251"* ]]
+  [[ "$output" != *"unexpected bare systemd call"* ]]
 }
 
 @test "power button: queued evdev timestamps cannot bypass request or double window" {
