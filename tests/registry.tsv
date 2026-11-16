@@ -133,6 +133,7 @@ tests/app-build-logs-dropped.test.sh	shell	unit	default-shell	final rootfs carri
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel
 tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only where an installed-module sweep proves no consumer
+tests/firmware-closure-gate.test.sh	shell	unit	default-shell	final rootfs CLI and source-stage firmware closure, complete inventories, exceptions and rootfs-contained symlinks
 tests/full-firmware-bluetooth-closure.test.sh	shell	unit	default-shell	Bluetooth static/runtime closure, closed hardware gaps and prune mutation proof
 tests/slot-reserve.test.sh	shell	unit	default-shell	populated ext4 bavail and inode floors, exact boundary and reserved-block mutations
 tests/mpp-dev-runtime-contract.test.sh	shell	unit	default-shell	the librockchip-mpp-dev REMOVE verdict stays removed

@@ -16,8 +16,7 @@ firmware_sweep_module_refs() (
   local work
   work="$(mktemp -d)" || return 1
   trap 'rm -rf -- "${work}"' EXIT
-  find "${moddir}" -type f \
-    \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) \
+  find "${moddir}" -type f -name '*.ko*' \
     -print0 >"${work}/modules" || return 1
   find "${moddir}" -type f -name modules.builtin -print0 >"${work}/builtin-lists" || return 1
   find "${moddir}" -type f -name modules.builtin.modinfo -print0 \

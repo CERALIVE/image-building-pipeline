@@ -661,6 +661,7 @@ Each `[N/9]` stage BODY lives in one module under `lib/stages/`:
 | `[6/9]` | `tar-emit.sh` | `emit_artifact` |
 | `[6b/9]` | `boot-verify.sh` | — |
 | `[6c/9]` | `size-gate.sh` | `compare_size_against_baseline` |
+| `[6c-firmware/9]` | `firmware-closure-gate.sh` | shared sweep collector via `lib/check-firmware-closure.sh`; [contract](../firmware-closure.md) |
 | `[7/9]` | `parity.sh` | — |
 | `[8/9]` | `assemble.sh` | both bootloader-adapter branches |
 

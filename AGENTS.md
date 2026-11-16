@@ -73,6 +73,7 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
 | Selected audio card re-enumeration [PARTIAL: host tests only] | [Audio contract](docs/agents/key-facts.md); `tests/audio-card-reprobe.test.sh` |
 | Hardware-class registry, family exclusions, board add-backs and resolver output [EXISTS: policy data only] | [Hardware policy](docs/hardware-policy.md) |
+| Final-rootfs firmware closure after size gate [EXISTS: artifact gate] | [Closure contract](docs/firmware-closure.md); `tests/firmware-closure-gate.test.sh` |
 | Unsafe build/runtime patterns | [ANTI-PATTERNS](docs/agents/anti-patterns.md) |
 | Known issues, deferred work and hardware acceptance limits | [KNOWN ISSUES / DEFERRED](docs/agents/known-issues-deferred.md) |
 
