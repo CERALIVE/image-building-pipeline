@@ -206,16 +206,19 @@ printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${RM_CALLS}"' \
 	>"${RUN_DIR}/bin/rm"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" >>"${MKOSI_CHROOT_CALLS}"' \
 	>"${RUN_DIR}/bin/mkosi-chroot"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"${RUN_DIR}/bin/modinfo"
 chmod 755 "${RUN_DIR}/bin/"*
 
 # The firmware prune is now GATED on a modinfo sweep of the installed modules
-# rather than deleting a fixed list of directory names, so the fixture has to
-# carry a firmware tree for it to have anything to decide about. Both classes are
-# present: candidate families, and preserved ones that must survive.
+# rather than deleting a fixed list of directory names, and its candidates come
+# from the resolved family policy. The fixture carries a module tree, an empty
+# modinfo answer and the rk3588 policy so the sweep has something to decide.
 for _fw in qcom intel ath10k ath11k ath12k updates microchip nvidia tegra renesas brcm rtw89 rockchip; do
 	install -d -m 0755 "${RUN_DIR}/buildroot/usr/lib/firmware/${_fw}"
 done
 : >"${RUN_DIR}/buildroot/usr/lib/firmware/r8a779x_usb3_rom.mem"
+install -d -m 0755 "${RUN_DIR}/buildroot/usr/lib/modules/7.1.7-demo/kernel/drivers/net"
+: >"${RUN_DIR}/buildroot/usr/lib/modules/7.1.7-demo/kernel/drivers/net/fake.ko"
 
 MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 	MKOSI_CHROOT_CALLS="${RUN_DIR}/mkosi-chroot.calls" \
@@ -225,6 +228,9 @@ MKOSI_INSTALL_CALLS="${RUN_DIR}/mkosi-install.calls" \
 	CHROOT_SRCDIR=/fixture/mkosi \
 	ARCH=arm64 \
 	INSTALL_BOOT_BSP=1 \
+	FIRMWARE_SWEEP_PREFIXES='qcom intel ath10k ath11k ath12k updates microchip nvidia tegra renesas' \
+	FIRMWARE_SWEEP_FILES=r8a779x_usb3_rom.mem \
+	FIRMWARE_PRESERVED_ROOTS='brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi' \
 	HW_ACCEL_GSTREAMER_PLUGINS='gstreamer-bsp' \
 	GSTREAMER_RUNTIME_PACKAGES='gstreamer-runtime' \
 	KERNEL_PACKAGES='linux-image-demo' \

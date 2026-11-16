@@ -47,6 +47,23 @@ firmware_sweep_module_refs() {
   printf '%s' "${refs}" | awk 'NF' | sort -u
 }
 
+firmware_sweep_blocker() {
+  local name="$1" refs="$2" ref module
+  for ref in "${BT_FW_OBJECTS[@]}"; do
+    if [[ "${ref}" == "${name}" || "${ref}" == "${name}/"* ]]; then
+      printf 'Bluetooth closure: %s' "${ref}"
+      return 0
+    fi
+  done
+  while IFS=$'\t' read -r ref module; do
+    [[ -n "${ref}" ]] || continue
+    if [[ "${ref}" == "${name}" || "${ref}" == "${name}/"* ]]; then
+      printf '%s: %s' "${module}" "${ref}"
+      return 0
+    fi
+  done <<<"${refs}"
+}
+
 firmware_sweep() {
   local root="${1:?firmware root is required}"
   local fw="${root}/usr/lib/firmware"
@@ -85,26 +102,25 @@ firmware_sweep() {
   fi
 
   local -a pruned=() kept=()
-  local ref module blocked
-  for name in "${candidates[@]}" "${candidate_files[@]}"; do
+  local name blocked
+  for name in "${candidates[@]}"; do
     [[ -e "${fw}/${name}" ]] || continue
-    blocked=""
-    for ref in "${BT_FW_OBJECTS[@]}"; do
-      if [[ "${ref}" == "${name}" || "${ref}" == "${name}/"* ]]; then
-        blocked="Bluetooth closure: ${ref}"; break
-      fi
-    done
-    while IFS=$'\t' read -r ref module; do
-      [[ -n "${ref}" ]] || continue
-      if [[ "${ref}" == "${name}" || "${ref}" == "${name}/"* ]]; then
-        blocked="${module}: ${ref}"; break
-      fi
-    done <<<"${refs}"
+    blocked="$(firmware_sweep_blocker "${name}" "${refs}")"
     if [[ -n "${blocked}" ]]; then
       kept+=("${name} (referenced by an installed module: ${blocked})")
       continue
     fi
     rm -rf "${fw:?}/${name}"
+    pruned+=("${name}")
+  done
+  for name in "${candidate_files[@]}"; do
+    [[ -e "${fw}/${name}" ]] || continue
+    blocked="$(firmware_sweep_blocker "${name}" "${refs}")"
+    if [[ -n "${blocked}" ]]; then
+      kept+=("${name} (referenced by an installed module: ${blocked})")
+      continue
+    fi
+    rm -f "${fw:?}/${name}"
     pruned+=("${name}")
   done
   log "firmware prune: removed ${#pruned[@]} family/families with zero installed consumers${pruned[0]+: ${pruned[*]}}"
