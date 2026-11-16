@@ -283,14 +283,21 @@ PY
   [ "$status" -eq 0 ]
 
   # The prune is no longer a literal list of absolute paths — it is a candidate
-  # list gated on a `modinfo -F firmware` sweep of the installed modules, so the
-  # firmware ROOT and the candidate NAME are asserted separately.
+  # list gated on a `modinfo -F firmware` sweep of the installed modules. The
+  # sweep is sourced from the policy-driven customisation layer, so the firmware
+  # ROOT, the wiring and the policy inputs are asserted where they now live.
   run grep -F 'usr/lib/firmware' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
-  run grep -E '^\s+qcom intel ath10k' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  run grep -F 'source "${SRCDIR:-mkosi}/customize/firmware-sweep.sh"' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
-  run grep -F 'modinfo' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  run grep -E '^  firmware_sweep "\$\{BUILDROOT\}"$' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
+  run grep -F 'FIRMWARE_SWEEP_PREFIXES' "$PIPELINE_DIR/mkosi/customize/firmware-sweep.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'modinfo' "$PIPELINE_DIR/mkosi/customize/firmware-sweep.sh"
+  [ "$status" -eq 0 ]
+  run grep -E '^[[:space:]]+qcom intel ath10k' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  [ "$status" -ne 0 ]
 
   run grep -F '/usr/lib/firmware/intel' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -ne 0 ]
