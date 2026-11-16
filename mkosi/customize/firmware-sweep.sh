@@ -5,47 +5,72 @@
 # stay frozen under the released kernel version. The build sweep needs module
 # identities and built-in driver metadata, so it reads those sources itself.
 # shortcut: two readers, absorb this into the stager at the next kernel bump.
-firmware_sweep_module_refs() {
+firmware_sweep_module_refs() (
   local root="$1"
   local moddir="${root}/usr/lib/modules"
   [[ -d "${moddir}" ]] || moddir="${root}/lib/modules"
   [[ -d "${moddir}" ]] || return 1
 
-  local -a mods=() builtins=()
-  mapfile -d '' -t mods < <(find "${moddir}" -type f \
-    \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) -print0)
-  mapfile -d '' -t builtins < <(find "${moddir}" -type f -name modules.builtin.modinfo -print0)
-  # No installed driver metadata is not proof that no driver needs firmware.
-  (( ${#mods[@]} + ${#builtins[@]} > 0 )) || return 1
+  # Complete traversal is a precondition: a partially read tree must never be
+  # mistaken for a complete driver inventory.
+  local work
+  work="$(mktemp -d)" || return 1
+  trap 'rm -rf -- "${work}"' EXIT
+  find "${moddir}" -type f \
+    \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) \
+    -print0 >"${work}/modules" || return 1
+  find "${moddir}" -type f -name modules.builtin -print0 >"${work}/builtin-lists" || return 1
+  find "${moddir}" -type f -name modules.builtin.modinfo -print0 \
+    >"${work}/builtin-modinfo" || return 1
 
-  local refs="" ref out ko entry builtin
-  local -i parsed=0
+  local -a mods=() builtin_lists=() builtin_modinfo=()
+  mapfile -d '' -t mods <"${work}/modules"
+  mapfile -d '' -t builtin_lists <"${work}/builtin-lists"
+  mapfile -d '' -t builtin_modinfo <"${work}/builtin-modinfo"
+
+  local refs="" ref out ko entry builtin data
   for ko in "${mods[@]}"; do
-    if out="$(modinfo -F firmware "${ko}" 2>/dev/null)"; then
-      parsed+=1
-      while IFS= read -r ref; do
-        [[ -n "${ref}" ]] || continue
-        ref="${ref#"${ref%%[!/]*}"}"
-        refs+="${ref}"$'\t'"${ko#"${moddir}/"}"$'\n'
-      done <<<"${out}"
-    fi
+    # One unreadable module would omit a possible consumer, so it voids the proof.
+    out="$(modinfo -F firmware "${ko}" 2>/dev/null)" || return 1
+    while IFS= read -r ref; do
+      [[ -n "${ref}" ]] || continue
+      ref="${ref#"${ref%%[!/]*}"}"
+      refs+="${ref}"$'\t'"${ko#"${moddir}/"}"$'\n'
+    done <<<"${out}"
   done
-  for builtin in "${builtins[@]}"; do
-    [[ -r "${builtin}" ]] || return 1
-    while IFS= read -r entry || [[ -n "${entry}" ]]; do
+  for builtin in "${builtin_modinfo[@]}"; do
+    data="$(tr '\0' '\n' <"${builtin}")" || return 1
+    while IFS= read -r entry; do
       [[ "${entry}" == *.firmware=* ]] || continue
       ref="${entry#*.firmware=}"
       ref="${ref#"${ref%%[!/]*}"}"
       [[ -n "${ref}" ]] || continue
       refs+="${ref}"$'\t'"${entry%%.firmware=*} (built-in)"$'\n'
-    done < <(tr '\0' '\n' <"${builtin}")
-    parsed+=1
+    done <<<"${data}"
   done
-  # A run in which no metadata parsed yields an EMPTY consumer set and would
-  # authorise deleting every candidate family, so it returns non-zero instead.
-  (( parsed > 0 )) || return 1
+  # A built-in inventory that lists drivers needs usable metadata beside it.
+  for builtin in "${builtin_lists[@]}"; do
+    data="$(cat -- "${builtin}")" || return 1
+    case "${data}" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    [[ -f "${builtin}.modinfo" && -r "${builtin}.modinfo" && -s "${builtin}.modinfo" ]] \
+      || return 1
+    data="$(tr '\0' '\n' <"${builtin}.modinfo")" || return 1
+    while IFS= read -r entry; do
+      [[ "${entry}" == *.firmware=* ]] || continue
+      ref="${entry#*.firmware=}"
+      ref="${ref#"${ref%%[!/]*}"}"
+      [[ -n "${ref}" ]] || continue
+      refs+="${ref}"$'\t'"${entry%%.firmware=*} (built-in)"$'\n'
+    done <<<"${data}"
+  done
+  # Empty is provable only when the kernel states its inventory; a tree with no
+  # .ko and no built-in facts has nothing to prove the consumer set against.
+  (( ${#mods[@]} + ${#builtin_lists[@]} + ${#builtin_modinfo[@]} > 0 )) || return 1
   printf '%s' "${refs}" | awk 'NF' | sort -u
-}
+)
 
 firmware_sweep_blocker() {
   local name="$1" refs="$2" ref module
@@ -97,7 +122,7 @@ firmware_sweep() {
 
   local refs
   if ! refs="$(firmware_sweep_module_refs "${root}")"; then
-    log "WARNING: no installed module could be read by modinfo — the consumer set is unprovable, so NOTHING is pruned"
+    log "WARNING: the installed and built-in driver inventory is incomplete or unreadable — the consumer set is unprovable, so NOTHING is pruned"
     return 0
   fi
 

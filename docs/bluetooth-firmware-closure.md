@@ -346,6 +346,9 @@ come from the resolved hardware policy. Nested prefixes are checked using
 `<candidate>/`, so removing `intel/ipu` cannot remove the kept `intel/ibt-*`
 siblings. The reference collector includes installed modules and built-in
 `modules.builtin.modinfo` entries; each kept candidate logs its driver and path.
+The scan is all-or-nothing: an unreadable module, a failed tree walk, or a
+built-in inventory without usable metadata makes the consumer set unprovable and
+keeps every candidate. An empty module tree never authorises deletion on its own.
 A preserved candidate is fatal before any deletion. An empty family prefix
 list is an explicit no-op, including when no firmware directory exists.
 

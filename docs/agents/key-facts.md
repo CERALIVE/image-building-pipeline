@@ -2515,6 +2515,12 @@ module and the NUL-separated `firmware=` entries in `modules.builtin.modinfo`.
 That is a second reader on purpose: the device stager's copy is a hashed kernel
 build input, so changing it under the released package version fails the
 immutable candidate-identity gate; the next kernel revision bump owns the move.
+The scan is all-or-nothing: both `find` walks must complete, every discovered
+module must answer `modinfo`, and every built-in metadata file must be read.
+A `modules.builtin` list that names drivers requires a non-empty
+`modules.builtin.modinfo` beside it. Any failure leaves the consumer set
+unprovable, prints the warning and removes NOTHING; an empty module tree is
+provable only when the kernel states an inventory, never by absence alone.
 A kept candidate names its driver and reference;
 nested candidates such as `intel/ipu` are checked independently of their parent.
 Preserved candidates fail before any deletion. Bluetooth candidate and retained

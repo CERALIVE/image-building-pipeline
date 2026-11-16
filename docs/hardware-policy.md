@@ -40,6 +40,8 @@ resolves empty sweep/module/Kconfig lists, retaining integrated GPU firmware.
 The platform calls `firmware_sweep <root>` after installing firmware packages.
 It removes a candidate only when installed modules and built-in driver metadata
 have no matching reference, and logs the driver that blocks a deletion.
+The proof is all-or-nothing: any unreadable module, incomplete tree walk or
+built-in inventory without usable metadata keeps every candidate.
 Nested prefixes are independent candidates; preserved roots are rejected before
 any deletion, and Bluetooth closure checks remain mandatory. Missing `modinfo`
 declines the sweep; an empty family prefix list removes nothing.

@@ -230,11 +230,10 @@ case "${OUT}" in
 esac
 
 # ---------------------------------------------------------------------------
-# 3b. An UNPARSEABLE module must not abort the build, and a run in which NOTHING
-#     parsed must not authorise deleting everything. Batching these through
-#     xargs made one bad .ko kill the whole postinstall under `set -e`; the
-#     naive fix (swallow every failure) is worse, because an empty consumer set
-#     reads as "no module needs any of this".
+# 3b. A COMPLETE, fully readable inventory is the precondition. A run in which
+#     ANY discovered module cannot be read has an unknown consumer set: pruning
+#     then would be a guess. The same holds for built-in inventory without
+#     usable metadata and for discovery that could not traverse the whole tree.
 # ---------------------------------------------------------------------------
 ROOT="${WORK}/r5b"
 seed_root "${ROOT}"
@@ -256,8 +255,57 @@ STUBEOF
 chmod +x "${STUB}/modinfo"
 OUT="$(PATH="${STUB}:${PATH}" BUILDROOT="${ROOT}" \
   bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep '${ROOT}'" 2>&1)"
-check "yes" "$(present "${ROOT}" nvidia)" "one unparseable module does not abort the sweep, and the readable ones still block"
-check "no" "$(present "${ROOT}" qcom)" "the sweep still prunes what nothing references"
+check "yes" "$(present "${ROOT}" nvidia)" "an unreadable module keeps its referenced firmware"
+check "yes" "$(present "${ROOT}" qcom)" "one unreadable module makes the consumer set unprovable, so NO candidate is pruned"
+case "${OUT}" in
+  *"unprovable"*) ok "the incomplete scan says why it declined" ;;
+  *) bad "the incomplete scan must explain itself; got: ${OUT}" ;;
+esac
+
+ROOT="${WORK}/builtin-missing"
+seed_root "${ROOT}"
+printf 'blob\n' >"${ROOT}/usr/lib/firmware/microchip/blob.bin"
+printf 'kernel/drivers/net/switch.ko\n' >"${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/modules.builtin"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" microchip)" "a built-in inventory that lists a driver without metadata authorises nothing"
+check yes "$(present "${ROOT}" qcom)" "the unprovable built-in inventory keeps unrelated candidates too"
+[[ "${OUT}" == *unprovable* ]] && ok "the missing built-in metadata explains itself" || bad "missing built-in metadata diagnostic absent"
+
+ROOT="${WORK}/builtin-empty-failed"
+seed_root "${ROOT}"
+: >"${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/modules.builtin.modinfo"
+STUB="${WORK}/bin-builtin-empty"
+mkdir -p "${STUB}"
+printf '#!/usr/bin/env bash\nexit 1\n' >"${STUB}/modinfo"
+chmod +x "${STUB}/modinfo"
+OUT="$(PATH="${STUB}:${PATH}" BUILDROOT="${ROOT}" \
+  bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep '${ROOT}'" 2>&1)"
+check yes "$(present "${ROOT}" nvidia)" "an empty built-in metadata file cannot mask failed module reads"
+[[ "${OUT}" == *unprovable* ]] && ok "the empty built-in metadata explains itself" || bad "empty built-in metadata diagnostic absent"
+
+ROOT="${WORK}/empty-modules"
+seed_root "${ROOT}"
+rm -f "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/net/fake.ko"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" qcom)" "an empty module tree without inventory facts is not proof of no consumer"
+[[ "${OUT}" == *unprovable* ]] && ok "the empty module tree explains itself" || bad "empty module tree diagnostic absent"
+
+ROOT="${WORK}/unreadable-tree"
+seed_root "${ROOT}"
+mkdir -p "${ROOT}/usr/lib/firmware/nvidia/tegra234" "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/unreadable"
+printf 'blob\n' >"${ROOT}/usr/lib/firmware/nvidia/tegra234/xusb.bin"
+printf 'nvidia/tegra234/xusb.bin\n' \
+  >"${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/unreadable/nouveau.ko"
+chmod 000 "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/unreadable"
+if (( EUID == 0 )); then
+  ok "SKIP unreadable-tree: root traverses mode-000 directories"
+else
+  OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+  check yes "$(present "${ROOT}" nvidia)" "an unreadable subtree keeps firmware even when a sibling module is readable"
+  check yes "$(present "${ROOT}" qcom)" "partial discovery authorises no deletion at all"
+  [[ "${OUT}" == *unprovable* ]] && ok "partial discovery explains itself" || bad "partial discovery diagnostic absent"
+fi
+chmod 700 "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/unreadable"
 
 ROOT="${WORK}/r5c"
 seed_root "${ROOT}"
@@ -304,6 +352,7 @@ if command -v modinfo >/dev/null 2>&1; then
   if [[ -n "${REAL_KO}" ]]; then
     ROOT="${WORK}/r6"
     seed_root "${ROOT}"
+    rm -f "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/net/fake.ko"
     cp "${REAL_KO}" "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/net/real.ko"
     EXPECT="$(modinfo -F firmware "${REAL_KO}" | sed 's#^/*##' | awk 'NF' | sort -u)"
     GOT="$(BUILDROOT="${ROOT}" bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep_module_refs '${ROOT}' | cut -f1")"
