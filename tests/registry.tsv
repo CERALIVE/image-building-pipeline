@@ -179,6 +179,7 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 # --- driven by a default row, never standalone ---------------------------
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/lib/x86-slot-image-identity.sh	helper	support	invoked-by-suite	real native/container x86 factory p2 identity against OTA, driven by slot-image-identity.test.sh
 tests/lib/kernel-stage-fixture.sh	helper	support	invoked-by-suite	directory-backed slots and real kernel archive for kernel staging
 tests/kernel-stage-contract-fixtures.sh	tool	support	invoked-by-suite	real producer serialization for self-contained consumer fixture copies
 tests/fixtures/kernel-stage-contract/staged-state.json	fixture	support	not-executed	byte-identical real producer staged record for the adopted consumer contract
