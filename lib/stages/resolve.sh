@@ -162,10 +162,9 @@ stage_resolve() {
     log_info "kernel from source: variant='${KERNEL_VARIANT:-${variant}}' builds ${KERNEL_PACKAGES}; remote fetch suppressed for: ${KERNEL_SOURCE_SUPPRESSED_PACKAGES}"
   fi
 
-  # DTB/U-Boot are required only when installing the boot BSP (rk3588 carries
-  # both; x86 legitimately has neither — ACPI + UEFI). Gating on INSTALL_BOOT_BSP
-  # fixes task-32 gap G2 without changing the arm64 boot build (still =1 there).
-  if [[ "${INSTALL_BOOT_BSP}" == "1" ]]; then
+  # EFI/GRUB uses ACPI and platform firmware, with no DTB or U-Boot package.
+  if [[ "${INSTALL_BOOT_BSP}" == "1" && "${RAUC_BOOTLOADER_ADAPTER}" != "efi" \
+        && "${RAUC_BOOTLOADER_ADAPTER}" != "grub" ]]; then
     # A kernel_source variant legitimately resolves DTB_PACKAGES empty: the
     # built linux-image deb carries the in-tree DTBs itself, and the
     # dtb_deb_dir -> dtb_boot_dir mapping (asserted non-empty above, and
