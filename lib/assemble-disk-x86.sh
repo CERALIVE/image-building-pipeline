@@ -55,6 +55,9 @@ source "${HERE}/common.sh"
 # shellcheck source=lib/verify-disk.sh
 source "${HERE}/verify-disk.sh"
 
+# shellcheck source=lib/disk/slot-image.sh
+source "${HERE}/disk/slot-image.sh"
+
 # ---------------------------------------------------------------------------
 # Locations + contract constants. The x86 SLOT sizes come from the FROZEN repart
 # defs (reused verbatim); the ESP def is x86-specific (platform/x86/10-esp.conf).
@@ -108,15 +111,6 @@ stage_repart_dir_x86() {
 }
 
 # ---------------------------------------------------------------------------
-# det_uuid <seed> — STABLE RFC-4122-shaped UUID derived from <seed> (reproducible
-# rootfs_a). Same scheme as assemble-disk.sh.
-# ---------------------------------------------------------------------------
-det_uuid() {
-  local h; h="$(printf '%s' "$1" | sha256sum | cut -c1-32)"
-  printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
-}
-
-# ---------------------------------------------------------------------------
 # populate_rootfs_a <img> <rootfs_tree> — write the mkosi rootfs tree into the
 # rootfs_a slot (partition 2). systemd-repart --offline FORMATS the ext4 slot but
 # never populates it; without this the flashed board loads GRUB + kernel then PANICS
@@ -136,20 +130,15 @@ populate_rootfs_a() {
   [[ -n "${start_sector}" && -n "${size_sectors}" ]] \
     || die "could not read rootfs_a (p2) geometry from ${img}"
   local size_bytes=$(( size_sectors * SECTOR ))
+  [[ "${size_bytes}" -eq $((4096 * 1024 * 1024)) ]] \
+    || die "rootfs_a geometry ${size_bytes} does not match the frozen 4096 MiB slot"
 
   log_info "populating rootfs_a (p2) from ${rootfs_tree} via mkfs.ext4 -d (offline)"
   local rootfs_img; rootfs_img="$(mktemp)"
-  truncate -s "${size_bytes}" "${rootfs_img}"
-  local fs_uuid; fs_uuid="$(det_uuid "${COMPATIBLE_STRING:-ceralive}-rootfs_a")"
-  if tar -C "${rootfs_tree}" -cf /dev/null . 2>/dev/null; then
-    require_cmd mkfs.ext4
-    mkfs.ext4 -q -L rootfs_a -U "${fs_uuid}" -E hash_seed="${fs_uuid}" \
-      -d "${rootfs_tree}" "${rootfs_img}" \
-      || die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
-  else
-    log_info "rootfs tree is root-owned — running mkfs.ext4 -d inside the builder container (rootless host cannot traverse 0700 system dirs)"
-    _populate_rootfs_a_in_container "${rootfs_tree}" "${rootfs_img}" "${fs_uuid}"
-  fi
+  SLOT_IMAGE_LABEL=rootfs_a make_slot_image "${rootfs_tree}" "${rootfs_img}" || {
+    rm -f "${rootfs_img}"
+    die "mkfs.ext4 -d failed populating rootfs_a from ${rootfs_tree}"
+  }
   # conv=sparse keeps the all-zero tail of the 4 GiB slot as a hole in the output
   # .raw (the slot is mostly empty; flashing/compression restore the zeros) so the
   # image does not balloon to its full nominal size on the build host.
@@ -157,36 +146,6 @@ populate_rootfs_a() {
     conv=notrunc,sparse status=none
   rm -f "${rootfs_img}"
   log_success "rootfs_a populated (${size_bytes} byte slot <- partition 2)"
-}
-
-# _populate_rootfs_a_in_container <rootfs_tree> <out_img> <fs_uuid> — run mkfs.ext4
-# -d as root in the builder container for a root-owned mkosi tree (0700 system dirs).
-# Mirrors assemble-disk.sh's container fallback. e2fsprogs installed on demand.
-_populate_rootfs_a_in_container() {
-  local tree="$1" out_img="$2" fs_uuid="${3:-}"
-  local runtime=""
-  if command -v docker >/dev/null 2>&1; then runtime="docker"
-  elif command -v podman >/dev/null 2>&1; then runtime="podman"
-  else die "rootfs tree is root-owned and neither docker nor podman is available to populate it rootlessly — run the build as root or install a container runtime"; fi
-
-  local image="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
-  local img_dir img_base; img_dir="$(dirname "${out_img}")"; img_base="$(basename "${out_img}")"
-  "${runtime}" run --rm \
-    -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
-    -e "FS_UUID=${fs_uuid}" \
-    -v "${tree}:/rootfs-tree:ro" \
-    -v "${img_dir}:/out" \
-    "${image}" \
-    bash -euo pipefail -c '
-      export DEBIAN_FRONTEND=noninteractive
-      if ! command -v mkfs.ext4 >/dev/null 2>&1; then
-        apt-get update -qq
-        apt-get install -y --no-install-recommends \
-          -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null
-      fi
-      mkfs.ext4 -q -L rootfs_a -U "${FS_UUID}" -E hash_seed="${FS_UUID}" \
-        -d /rootfs-tree "/out/'"${img_base}"'"
-    ' || die "containerized mkfs.ext4 -d failed populating rootfs_a from ${tree}"
 }
 
 # ---------------------------------------------------------------------------
