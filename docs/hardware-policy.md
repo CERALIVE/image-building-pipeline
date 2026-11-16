@@ -1,4 +1,4 @@
-# Hardware-class policy [EXISTS: resolver and firmware sweep]
+# Hardware-class policy [EXISTS: resolver, firmware sweep and kernel exclusions]
 
 `manifests/hardware/module-classes.yaml` is the schema-1 registry. Each class
 declares a description, whether it is attachable, module path globs relative to
@@ -46,9 +46,17 @@ file is not an inventory.
 Nested prefixes are independent candidates; preserved roots are rejected before
 any deletion, and Bluetooth closure checks remain mandatory. Missing `modinfo`
 declines the sweep; an empty family prefix list removes nothing.
-The kernel fragment is unchanged. x86 image and hardware qualification remain
-separate; future x86 firmware installation belongs in this platform layer with
-the sweep called afterwards.
+
+The RK3588 `7.2.0-ceralive9` source revision disables every excluded Kconfig
+symbol in the kernel fragment and adds each to the forbidden-symbol gate.
+`tests/kernel-config-fragment.bats` checks this alignment and rejects each
+excluded symbol when enabled as either a built-in or a module. Firmware removal
+still requires proof that nothing shipped requests it. Bluetooth support and
+`mrvl/prestera` retention are unchanged. Kernel publication remains a separate
+owner step; image firmware absence must be verified after that release.
+
+x86 image and hardware qualification remain separate; future x86 firmware
+installation belongs in this platform layer with the sweep called afterwards.
 
 Validate production manifests with `python3 ci/validate-manifests.py`, or a
 self-contained fixture manifest tree with

@@ -108,7 +108,7 @@ against immutable release metadata and restore its config/module inventory
 without compiling. `--release` image builds and production candidates refuse
 `kernel_not_on_apt`; local builds may compile only an unpublished version above
 all released kernels.
-The production source pin is `7.2.0-ceralive8`, adding nftables reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through kernel-patches PR #28. Revision 4 was drilled and published to stable APT;
+The production source pin is `7.2.0-ceralive9`, disabling the RK3588 family's excluded discrete GPU, Intel integrated GPU, datacenter NIC and Intel IPU drivers. It retains nftables reject for NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through kernel-patches PR #28. Revision 4 was drilled and published to stable APT;
 the tag, candidate, Release and APT publication remain separate owner steps.
 See [identity and version gates](docs/kernel-build-from-source.md#released-kernel-reuse-exists).
 The non-fingerprinted `lib/kernel/released.sh` entrypoint owns release admission
@@ -1305,8 +1305,8 @@ confirmation, and retires overlays on verified mirror or full OS install.
 Host crash-boundary tests cover these helpers; images that carry the stager and pin a
 CeraUI payload at or above the default minimum `2026.10.1` advertise `kernel-apt-stage`.
 Images that carry it (`2026.10.102`, then `2026.11.1`) are published to the beta channel only; no OS image is on stable. Kernels are published to the stable APT channel only: the kernel-only path was bench-drilled on both boards with `7.2.0-ceralive3` (2026-11-02, which reached only the beta APT) and `7.2.0-ceralive4` (2026-11-03), and `7.2.0-ceralive4` is on the stable APT.
-The source pin `7.2.0-ceralive8` adds nftables reject for NetworkManager shared mode;
-it also pins the Rock 5B+ sink-first Type-C default. Its drill and publication remain pending.
+The source pin `7.2.0-ceralive9` excludes desktop GPU, datacenter NIC and Intel IPU drivers,
+retaining nftables reject and the Rock 5B+ sink-first Type-C default. Its drill and publication remain pending.
 
 **Hardware scope [PARTIAL], 2026-10-19/20:** Rock 5B+ and Orange Pi 5+ drills
 exercised OS staging, stream-triggered abort/restage, fallback after three failed
