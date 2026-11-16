@@ -5,6 +5,32 @@ rauc_cert_sha256() {
   openssl x509 -in "$1" -outform DER | sha256sum | cut -d' ' -f1
 }
 
+rauc_public_root_resolve() {
+  local keyring="$1" approved="$2"
+  [[ "${approved}" =~ ^[0-9a-f]{64}$ && -s "${keyring}" ]] || {
+    printf 'measurement requires an explicit approved public device root and DER SHA-256\n' >&2
+    return 1
+  }
+  awk '
+    /^-----BEGIN CERTIFICATE-----$/ { if (inside || started++) exit 1; inside=1; next }
+    /^-----END CERTIFICATE-----$/ { if (!inside) exit 1; inside=0; ended++; next }
+    /^[[:space:]]*$/ { next }
+    { if (!inside || $0 !~ /^[A-Za-z0-9+\/=]+$/) exit 1 }
+    END { if (inside || started != 1 || ended != 1) exit 1 }
+  ' "${keyring}" || {
+    printf 'measurement device root must contain exactly one public certificate\n' >&2
+    return 1
+  }
+  [[ "$(rauc_cert_sha256 "${keyring}")" == "${approved}" ]] || {
+    printf 'measurement public device root identity mismatch\n' >&2
+    return 1
+  }
+  openssl verify -check_ss_sig -CAfile "${keyring}" "${keyring}" >/dev/null || return 1
+  RAUC_KEYRING_FILE="${keyring}"
+  RAUC_ROOT_SHA256="${approved}"
+  export RAUC_KEYRING_FILE RAUC_ROOT_SHA256
+}
+
 rauc_pki_resolve() {
   local mode="$1" requested_pki="${2:-}" requested_keyring="${3:-}"
   local here v2 pki keyring cert_pub key_pub eku

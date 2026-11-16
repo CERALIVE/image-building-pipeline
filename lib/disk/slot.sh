@@ -48,6 +48,16 @@ populate_rootfs_slot() {
     || die "mkfs.ext4 -d failed populating ${slot_label} from ${rootfs_tree}"
   dd if="${rootfs_img}" of="${img}" bs="${SECTOR}" seek="${start_sector}" \
     conv=notrunc status=none
+  if [[ "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement ]]; then
+    : "${CERALIVE_RETAIN_SLOT_DIR:?measurement slot retention directory required}"
+    [[ "${slot_label}" == rootfs_a || "${slot_label}" == rootfs_b ]] \
+      || die "measurement requires frozen production slot labels"
+    ln -- "${rootfs_img}" "${CERALIVE_RETAIN_SLOT_DIR}/${slot_label}.ext4"
+    (
+      cd "${CERALIVE_RETAIN_SLOT_DIR}" || exit 1
+      sha256sum "${slot_label}.ext4" >"${slot_label}.ext4.sha256"
+    )
+  fi
   discard_scratch "${rootfs_img}"
   log_success "${slot_label} populated (${size_bytes} byte slot ← partition ${part_num})"
 }

@@ -540,10 +540,16 @@ setup_rtmp_gateway() {
   local tarball="${tmpdir}/mediamtx.tar.gz"
 
   # Fetch the pinned tarball (or use a local one for offline verification).
-  if [[ -n "${MEDIAMTX_LOCAL_TARBALL:-}" ]]; then
-    [[ -f "${MEDIAMTX_LOCAL_TARBALL}" ]] \
-      || { rm -rf "${tmpdir}"; die "MEDIAMTX_LOCAL_TARBALL not a file: ${MEDIAMTX_LOCAL_TARBALL}"; }
-    cp "${MEDIAMTX_LOCAL_TARBALL}" "${tarball}"
+  local local_tarball="${MEDIAMTX_LOCAL_TARBALL:-}"
+  if [[ -n "${CERALIVE_SEALED_MEDIAMTX_SHA256:-}" ]]; then
+    [[ "${CERALIVE_SEALED_MEDIAMTX_SHA256}" == "${expected}" ]] \
+      || { rm -rf "${tmpdir}"; die "sealed MediaMTX object differs from the public recipe pin"; }
+    local_tarball="${CERALIVE_RUNTIME_SRC}/../.image-inputs/${CERALIVE_SEALED_MEDIAMTX_SHA256}"
+  fi
+  if [[ -n "${local_tarball}" ]]; then
+    [[ -f "${local_tarball}" ]] \
+      || { rm -rf "${tmpdir}"; die "MEDIAMTX_LOCAL_TARBALL not a file: ${local_tarball}"; }
+    cp "${local_tarball}" "${tarball}"
   else
     command -v curl >/dev/null 2>&1 || { rm -rf "${tmpdir}"; die "curl not found — cannot fetch MediaMTX"; }
     local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"

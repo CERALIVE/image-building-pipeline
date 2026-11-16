@@ -83,6 +83,8 @@ source "${HERE}/fetch/pool.sh"
 source "${HERE}/fetch/apt-lib.sh"
 # shellcheck source=fetch/index.sh
 source "${HERE}/fetch/index.sh"
+# shellcheck source=fetch/sealed.sh
+source "${HERE}/fetch/sealed.sh"
 # shellcheck source=fetch/verify.sh
 source "${HERE}/fetch/verify.sh"
 # shellcheck source=fetch/bsp.sh
@@ -225,6 +227,10 @@ main() {
       *) usage; die "unknown argument: $1" ;;
     esac
   done
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    [[ -z "${APT_CLIENT_CRT_B64:-}${APT_CLIENT_KEY_B64:-}${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]] \
+      || die "sealed inputs refuse direct credential and local override inputs"
+  fi
 
   # Auto-enable dry-run offline: without the apt.ceralive.tv GPG keyring there is
   # no credential to do a GPG-verified first-party fetch, so plan only.
@@ -253,6 +259,16 @@ main() {
   fetch_rk3588_userspace "${family}" "${debs}"
   fetch_first_party "${debs}"
   fetch_lock_sidecar
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" && -z "${DRY_RUN}" ]]; then
+    python3 - "${DEST}/sealed-delivery.json" "${CERALIVE_SEALED_INPUT_SHA256:?}" "${CERALIVE_SEALED_INPUTS}/inventory.json" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "schema": 1, "delivery": "sealed-offline", "input_sha256": sys.argv[2],
+    "prefetch_completed_at": json.loads(pathlib.Path(sys.argv[3]).read_text())["fetched_at"],
+    "authentication": "original-signed-repository-metadata",
+}) + "\n")
+PY
+  fi
 
   log_success "staging complete -> ${debs} (mkosi runtime/assembly layer consumes this)"
 }

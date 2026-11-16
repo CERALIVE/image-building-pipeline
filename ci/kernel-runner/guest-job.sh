@@ -9,6 +9,10 @@ finish() {
 }
 trap finish EXIT
 modprobe qemu_fw_cfg
+if [[ -e "${fw}/image/raw" ]]; then
+  python3 /usr/local/lib/ceralive-kernel-runner/image_guest.py && code=0
+  exit "${code}"
+fi
 install -d -m 0700 -o ubuntu -g ubuntu /run/ceralive-runner
 export ARMBIAN_APT_KEYRING=/run/ceralive-runner/armbian.gpg
 bash /usr/local/lib/ceralive-kernel-runner/keyring.sh "${ARMBIAN_APT_KEYRING}"
