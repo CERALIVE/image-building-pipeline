@@ -299,7 +299,7 @@ edge_env() {
 
   local install_line firmware_line
   install_line="$(grep -n '^    bash "\${BUILDROOT}/usr/lib/ceralive/ceralive-kernel-boot-staging"' "$POSTINST" | cut -d: -f1)"
-  firmware_line="$(grep -n '^  prune_irrelevant_rk3588_firmware$' "$POSTINST" | cut -d: -f1)"
+  firmware_line="$(grep -n '^  firmware_sweep "\${BUILDROOT}"$' "$POSTINST" | cut -d: -f1)"
   [ -n "$install_line" ]
   [ -n "$firmware_line" ]
   [ "$install_line" -lt "$firmware_line" ]

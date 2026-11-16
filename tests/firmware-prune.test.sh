@@ -24,8 +24,8 @@
 # dual-board module/firmware inventory exists yet to judge them, and this suite
 # refuses to let "probably unused" become a deletion.
 #
-# Hardware-free and root-free: the real shipped function is lifted out of
-# mkosi/mkosi.images/platform/mkosi.postinst and driven against synthetic roots
+# Hardware-free and root-free: the real shipped sweep is sourced and
+# driven against synthetic roots
 # with a stubbed `modinfo`, plus one leg against the REAL `modinfo` so the flag
 # and invocation cannot silently rot.
 
@@ -34,6 +34,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST="${PIPELINE_DIR}/mkosi/mkosi.images/platform/mkosi.postinst"
+SWEEP="${PIPELINE_DIR}/mkosi/customize/firmware-sweep.sh"
+eval "$(bash "${PIPELINE_DIR}/lib/resolve.sh" rock-5b-plus)"
+export FIRMWARE_SWEEP_PREFIXES FIRMWARE_SWEEP_FILES FIRMWARE_PRESERVED_ROOTS
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -49,14 +52,11 @@ check() { if [[ "$1" == "$2" ]]; then ok "$3"; else bad "$3 (want '$1', got '$2'
 FNS="${WORK}/fw-fns.sh"
 {
   echo 'log() { printf "[platform] %s\n" "$*" >&2; }'
-  sed -n '/^installed_module_firmware_refs()/,/^}/p' "${PIPELINE_DIR}/mkosi/runtime/ceralive-kernel-boot-staging.sh"
-  sed -n '/^prune_irrelevant_rk3588_firmware()/,/^}/p' "${POSTINST}"
+  printf 'source "%s"\n' "${PIPELINE_DIR}/mkosi/runtime/ceralive-kernel-boot-staging.sh" "${SWEEP}"
 } >"${FNS}"
 
-grep -q '^installed_module_firmware_refs()' "${FNS}" \
-  || { echo "FATAL: could not lift installed_module_firmware_refs from ${POSTINST}"; exit 1; }
-grep -q '^prune_irrelevant_rk3588_firmware()' "${FNS}" \
-  || { echo "FATAL: could not lift prune_irrelevant_rk3588_firmware from ${POSTINST}"; exit 1; }
+bash -c 'source "$1"; declare -F installed_module_firmware_refs firmware_sweep' _ "${FNS}" >/dev/null \
+  || { echo "FATAL: shipped firmware functions absent"; exit 1; }
 bash -n "${FNS}"
 
 # ---------------------------------------------------------------------------
@@ -86,8 +86,7 @@ make_modinfo_stub() {
   mkdir -p "${dir}"
   cat >"${dir}/modinfo" <<EOF
 #!/usr/bin/env bash
-# Every invocation answers the same recorded reference set; the shipped function
-# batches module paths through xargs, so the stub must not depend on its args.
+# Every invocation answers the same recorded reference set.
 cat "${refs}"
 EOF
   chmod +x "${dir}/modinfo"
@@ -98,7 +97,7 @@ run_prune() {
   local stub="${WORK}/bin.$$"
   make_modinfo_stub "${stub}" "${refs}"
   PATH="${stub}:${PATH}" BUILDROOT="${root}" \
-    bash -c "set -euo pipefail; source '${FNS}'; prune_irrelevant_rk3588_firmware" 2>&1
+    bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep '${root}'" 2>&1
 }
 
 present() { [[ -e "$1/usr/lib/firmware/$2" ]] && echo yes || echo no; }
@@ -135,7 +134,7 @@ OUT="$(run_prune "${ROOT}" "${WORK}/refs-nvidia")"
 
 check "yes" "$(present "${ROOT}" nvidia)" "a REFERENCED candidate family is refused, not pruned"
 case "${OUT}" in
-  *"KEPT nvidia (referenced by an installed module: nvidia/tegra234/xusb.bin)"*)
+  *"KEPT nvidia (referenced by an installed module: 7.1.7-ceralive-rk3588/kernel/drivers/net/fake.ko: nvidia/tegra234/xusb.bin)"*)
     ok "the refusal names the exact module reference that blocked it" ;;
   *) bad "the refusal must name the blocking reference; got: ${OUT}" ;;
 esac
@@ -146,6 +145,69 @@ seed_root "${ROOT}"
 printf 'r8a779x_usb3_rom.mem\n' >"${WORK}/refs-r8a"
 OUT="$(run_prune "${ROOT}" "${WORK}/refs-r8a")"
 check "yes" "$(present "${ROOT}" r8a779x_usb3_rom.mem)" "a referenced single FILE is refused too"
+
+# Policy inputs must reach the real sweep, including nested prefixes.
+ROOT="${WORK}/policy"
+seed_root "${ROOT}"
+for fam in amdgpu radeon i915 xe mellanox netronome intel/ipu vendorx/server; do
+  mkdir -p "${ROOT}/usr/lib/firmware/${fam}"
+  touch "${ROOT}/usr/lib/firmware/${fam}/blob.bin"
+done
+touch "${ROOT}/usr/lib/firmware/intel/ibt-0040.sfi" "${ROOT}/usr/lib/firmware/vendorx/radio.bin"
+printf 'intel/ibt-0040.sfi\nvendorx/radio.bin\nnvidia/gm20b/acr/bl.bin\n' >"${WORK}/refs-policy"
+OUT="$(FIRMWARE_SWEEP_PREFIXES='intel intel/ipu vendorx/server amdgpu radeon i915 xe mellanox netronome nvidia' \
+  run_prune "${ROOT}" "${WORK}/refs-policy")"
+for fam in intel/ipu vendorx/server amdgpu radeon i915 xe mellanox netronome; do
+  check no "$(present "${ROOT}" "${fam}")" "policy removes unreferenced prefix '${fam}'"
+done
+for fam in intel/ibt-0040.sfi vendorx/radio.bin nvidia; do
+  check yes "$(present "${ROOT}" "${fam}")" "policy keeps referenced sibling '${fam}'"
+done
+[[ "${OUT}" == *fake.ko*"nvidia/gm20b/acr/bl.bin"* ]] \
+  && ok "kept policy candidate names its referencing module and path" \
+  || bad "kept policy candidate lost its module identity: ${OUT}"
+
+ROOT="${WORK}/builtin"
+seed_root "${ROOT}"
+printf 'switch.firmware=microchip/mscc_vsc8584_revb_int8051_fb48.bin\0switch.alias=fixture\0' \
+  >"${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/modules.builtin.modinfo"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" microchip)" "built-in firmware reference blocks deletion"
+[[ "${OUT}" == *switch*"microchip/mscc_vsc8584_revb_int8051_fb48.bin"* ]] \
+  && ok "kept built-in candidate names its referencing driver" \
+  || bad "built-in blocker not named: ${OUT}"
+
+ROOT="${WORK}/x86"
+seed_root "${ROOT}"
+mkdir -p "${ROOT}/usr/lib/firmware/i915"
+touch "${ROOT}/usr/lib/firmware/i915/skl_dmc_ver1_27.bin"
+mv "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/net/fake.ko" \
+  "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/net/i915.ko"
+printf 'i915/skl_dmc_ver1_27.bin\n' >"${WORK}/refs-i915"
+OUT="$(FIRMWARE_SWEEP_PREFIXES=i915 run_prune "${ROOT}" "${WORK}/refs-i915")"
+check yes "$(present "${ROOT}" i915)" "x86-shaped i915 consumer keeps integrated-GPU firmware"
+[[ "${OUT}" == *i915.ko*"i915/skl_dmc_ver1_27.bin"* ]] \
+  && ok "x86 refusal names i915 module and firmware" || bad "x86 refusal missing: ${OUT}"
+seed_root "${ROOT}"
+OUT="$(FIRMWARE_SWEEP_PREFIXES='' run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" qcom)" "empty policy removes nothing"
+check yes "$(present "${ROOT}" r8a779x_usb3_rom.mem)" "empty prefix policy also leaves file candidates intact"
+[[ "${OUT}" == *"no sweep candidates for this family"* ]] \
+  && ok "empty policy logs the family no-op" || bad "empty policy diagnostic missing: ${OUT}"
+OUT="$(FIRMWARE_SWEEP_PREFIXES='' run_prune "${WORK}/absent-root" "${WORK}/refs-empty")"
+[[ "${OUT}" == *"no sweep candidates for this family"* ]] \
+  && ok "empty policy is checked before firmware directory existence" || bad "empty policy checked too late"
+
+for preserved in brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi; do
+  ROOT="${WORK}/preserved-${preserved}"
+  seed_root "${ROOT}"
+  if OUT="$(FIRMWARE_SWEEP_PREFIXES="qcom ${preserved}" run_prune "${ROOT}" "${WORK}/refs-empty")"; then
+    bad "preserved candidate '${preserved}' accepted"
+  else
+    ok "preserved candidate '${preserved}' is fatal"
+  fi
+  check yes "$(present "${ROOT}" qcom)" "preserved candidate '${preserved}' refuses before any deletion"
+done
 
 # A leading slash is how some modules spell the reference; it must still match.
 ROOT="${WORK}/r4"
@@ -160,7 +222,7 @@ check "yes" "$(present "${ROOT}" microchip)" "an absolute-path reference still b
 ROOT="${WORK}/r5"
 seed_root "${ROOT}"
 OUT="$(PATH=/nonexistent BUILDROOT="${ROOT}" \
-  "${BASH}" -c "set -euo pipefail; source '${FNS}'; prune_irrelevant_rk3588_firmware" 2>&1 || true)"
+  "${BASH}" -c "set -euo pipefail; source '${FNS}'; firmware_sweep '${ROOT}'" 2>&1 || true)"
 check "yes" "$(present "${ROOT}" qcom)" "with no modinfo available NOTHING is pruned"
 case "${OUT}" in
   *"cannot prove"*) ok "the no-modinfo path says why it declined" ;;
@@ -193,7 +255,7 @@ exit "${status}"
 STUBEOF
 chmod +x "${STUB}/modinfo"
 OUT="$(PATH="${STUB}:${PATH}" BUILDROOT="${ROOT}" \
-  bash -c "set -euo pipefail; source '${FNS}'; prune_irrelevant_rk3588_firmware" 2>&1)"
+  bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep '${ROOT}'" 2>&1)"
 check "yes" "$(present "${ROOT}" nvidia)" "one unparseable module does not abort the sweep, and the readable ones still block"
 check "no" "$(present "${ROOT}" qcom)" "the sweep still prunes what nothing references"
 
@@ -204,12 +266,27 @@ mkdir -p "${STUB}"
 printf '#!/usr/bin/env bash\nexit 1\n' >"${STUB}/modinfo"
 chmod +x "${STUB}/modinfo"
 OUT="$(PATH="${STUB}:${PATH}" BUILDROOT="${ROOT}" \
-  bash -c "set -euo pipefail; source '${FNS}'; prune_irrelevant_rk3588_firmware" 2>&1)"
+  bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep '${ROOT}'" 2>&1)"
 check "yes" "$(present "${ROOT}" qcom)" "a modinfo that reads NOTHING must not authorise deleting everything"
 case "${OUT}" in
   *"unprovable"*) ok "the unprovable-consumer-set path says why it declined" ;;
   *) bad "the unprovable path must explain itself; got: ${OUT}" ;;
 esac
+
+# No installed driver metadata is not proof of zero firmware consumers.
+ROOT="${WORK}/no-modules"
+seed_root "${ROOT}"
+rm -rf "${ROOT}/usr/lib/modules"
+OUT="$(run_prune "${ROOT}" "${WORK}/refs-empty")"
+check yes "$(present "${ROOT}" qcom)" "missing module metadata declines the sweep"
+[[ "${OUT}" == *unprovable* ]] && ok "missing metadata explains the refusal" || bad "missing metadata diagnostic absent"
+
+ROOT="${WORK}/policy-file"
+seed_root "${ROOT}"
+touch "${ROOT}/usr/lib/firmware/custom.bin"
+OUT="$(FIRMWARE_SWEEP_FILES=custom.bin run_prune "${ROOT}" "${WORK}/refs-empty")"
+check no "$(present "${ROOT}" custom.bin)" "file candidates come from family policy"
+check yes "$(present "${ROOT}" r8a779x_usb3_rom.mem)" "a file outside the family policy survives"
 
 # ---------------------------------------------------------------------------
 # 4. The real modinfo, so the flag and the invocation cannot rot silently.
@@ -245,10 +322,10 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Static contract. These are the properties a synthetic-tree run cannot see.
 # ---------------------------------------------------------------------------
-CAND_BLOCK="$(sed -n '/^prune_irrelevant_rk3588_firmware()/,/^}/p' "${POSTINST}")"
+CAND_BLOCK="$(<"${SWEEP}")"
 
 for fam in brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi; do
-  if grep -qE "^\s+${fam}\b|[( ]${fam} " <<<"$(sed -n '/local -a candidates=(/,/)/p' <<<"${CAND_BLOCK}")"; then
+  if [[ " ${FIRMWARE_SWEEP_PREFIXES} " == *" ${fam} "* ]]; then
     bad "preserved family '${fam}' must never appear in the prune candidate list"
   else
     ok "preserved family '${fam}' is absent from the candidate list"
@@ -267,10 +344,41 @@ else
   ok "the firmware prune removes FILES only, never packages"
 fi
 
-if grep -q 'prune_irrelevant_rk3588_firmware$' "${POSTINST}"; then
+if grep -q '^  firmware_sweep "\${BUILDROOT}"$' "${POSTINST}"; then
   ok "the prune is wired into the boot-BSP branch"
 else
   bad "the prune is defined but never called"
+fi
+
+# Every platform firmware-install transaction must precede the sweep. Drive the
+# same contract against a scratch ordering mutation to prove it can fail.
+check_firmware_order() {
+  python3 - "$1" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+lines = text.splitlines()
+installs = [i for i, line in enumerate(lines)
+            if line.strip().startswith("mkosi-install ")
+            and any(token in line for token in ("boot_bsp[@]", "FIRMWARE_PACKAGES", "_f[@]"))]
+sweeps = [i for i, line in enumerate(lines)
+          if line.strip() == 'firmware_sweep "${BUILDROOT}"']
+assert installs and sweeps, "firmware install or sweep is not wired"
+for install in installs:
+    assert any(sweep > install for sweep in sweeps), "firmware_sweep precedes firmware install"
+PY
+}
+if check_firmware_order "${POSTINST}"; then ok "every firmware install precedes its sweep"; else bad "firmware install ordering broken"; fi
+awk '
+  /^  mkosi-install .*boot_bsp/ { print "  firmware_sweep \"${BUILDROOT}\"" }
+  /^  firmware_sweep / { next }
+  { print }
+' "${POSTINST}" >"${WORK}/postinst-before-install"
+if check_firmware_order "${WORK}/postinst-before-install" >"${WORK}/ordering-error" 2>&1; then
+  bad "firmware ordering mutation accepted"
+else
+  ok "firmware ordering contract rejects sweep-before-install mutation"
 fi
 
 # ---------------------------------------------------------------------------
