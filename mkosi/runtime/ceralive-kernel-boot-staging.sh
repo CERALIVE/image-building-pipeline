@@ -158,49 +158,30 @@ installed_module_firmware_refs() {
   local moddir="${root}/usr/lib/modules"
   [[ -d "${moddir}" ]] || moddir="${root}/lib/modules"
   if [[ -n "${2:-}" ]]; then moddir+="/$2"; fi
-  [[ -d "${moddir}" ]] || return 1
+  [[ -d "${moddir}" ]] || return 0
 
   local -a mods=()
   mapfile -d '' -t mods < <(find "${moddir}" -type f \
     \( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.zst' -o -name '*.ko.gz' \) -print0)
+  (( ${#mods[@]} > 0 )) || return 0
+
   # One module at a time, tolerating an individual failure but NOT a total one.
   # Batching through xargs made a single unparseable .ko abort the whole
   # postinstall under `set -e`; swallowing every failure instead would be worse,
   # because a modinfo that cannot read anything yields an EMPTY consumer set and
   # would authorise deleting every candidate family. So a run in which no module
   # parsed at all returns non-zero and the caller declines to prune.
-  # Default output remains path-only for device callers. The build sweep also
-  # requests module identities so every kept candidate explains its consumer.
-  local refs="" out ko ref entry builtin
+  local refs="" out ko
   local -i parsed=0
   for ko in "${mods[@]}"; do
     if out="$(modinfo -F firmware "${ko}" 2>/dev/null)"; then
       parsed+=1
-      while IFS= read -r ref; do
-        [[ -n "${ref}" ]] || continue
-        ref="${ref#"${ref%%[!/]*}"}"
-        refs+="${ref}"$'\t'"${ko#"${moddir}/"}"$'\n'
-      done <<<"${out}"
+      refs+="${out}"$'\n'
     fi
   done
-  while IFS= read -r -d '' builtin; do
-    [[ -r "${builtin}" ]] || return 1
-    while IFS= read -r entry || [[ -n "${entry}" ]]; do
-      [[ "${entry}" == *.firmware=* ]] || continue
-      ref="${entry#*.firmware=}"
-      ref="${ref#"${ref%%[!/]*}"}"
-      [[ -n "${ref}" ]] || continue
-      refs+="${ref}"$'\t'"${entry%%.firmware=*} (built-in)"$'\n'
-    done < <(tr '\0' '\n' <"${builtin}")
-    parsed+=1
-  done < <(find "${moddir}" -type f -name modules.builtin.modinfo -print0)
   (( parsed > 0 )) || return 1
 
-  if [[ "${3:-}" == --with-modules ]]; then
-    printf '%s' "${refs}" | awk 'NF' | sort -u
-  else
-    printf '%s' "${refs}" | cut -f1 | awk 'NF' | sort -u
-  fi
+  printf '%s' "${refs}" | sed 's#^/*##' | awk 'NF' | sort -u
 }
 
 kernel_boot_staging_main() {

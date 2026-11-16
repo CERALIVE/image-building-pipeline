@@ -52,10 +52,10 @@ check() { if [[ "$1" == "$2" ]]; then ok "$3"; else bad "$3 (want '$1', got '$2'
 FNS="${WORK}/fw-fns.sh"
 {
   echo 'log() { printf "[platform] %s\n" "$*" >&2; }'
-  printf 'source "%s"\n' "${PIPELINE_DIR}/mkosi/runtime/ceralive-kernel-boot-staging.sh" "${SWEEP}"
+  printf 'source "%s"\n' "${SWEEP}"
 } >"${FNS}"
 
-bash -c 'source "$1"; declare -F installed_module_firmware_refs firmware_sweep' _ "${FNS}" >/dev/null \
+bash -c 'source "$1"; declare -F firmware_sweep firmware_sweep_module_refs' _ "${FNS}" >/dev/null \
   || { echo "FATAL: shipped firmware functions absent"; exit 1; }
 bash -n "${FNS}"
 
@@ -306,7 +306,7 @@ if command -v modinfo >/dev/null 2>&1; then
     seed_root "${ROOT}"
     cp "${REAL_KO}" "${ROOT}/usr/lib/modules/7.1.7-ceralive-rk3588/kernel/drivers/net/real.ko"
     EXPECT="$(modinfo -F firmware "${REAL_KO}" | sed 's#^/*##' | awk 'NF' | sort -u)"
-    GOT="$(BUILDROOT="${ROOT}" bash -c "set -euo pipefail; source '${FNS}'; installed_module_firmware_refs '${ROOT}'")"
+    GOT="$(BUILDROOT="${ROOT}" bash -c "set -euo pipefail; source '${FNS}'; firmware_sweep_module_refs '${ROOT}' | cut -f1")"
     if [[ -n "${EXPECT}" ]] && grep -qxF -- "$(head -1 <<<"${EXPECT}")" <<<"${GOT}"; then
       ok "the real modinfo sweep reads a real module's firmware references"
     else

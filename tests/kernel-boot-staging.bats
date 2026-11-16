@@ -229,23 +229,6 @@ assert d["dtb_name"] == sys.argv[2]
   done
 }
 
-@test "kernel staging CLI: firmware refs include built-in drivers only from the candidate release" {
-  mkdir -p "${WORK}/bin" "${ROOT}/usr/lib/modules/${REL}" "${ROOT}/usr/lib/modules/old"
-  printf 'candidate\n' >"${ROOT}/usr/lib/modules/${REL}/wifi.ko"
-  printf 'switch.firmware=/microchip/builtin.bin\0switch.alias=fixture\0' \
-    >"${ROOT}/usr/lib/modules/${REL}/modules.builtin.modinfo"
-  printf 'old.firmware=old/stale.bin\0' >"${ROOT}/usr/lib/modules/old/modules.builtin.modinfo"
-  printf '#!/usr/bin/env bash\nprintf "/rtw89/%%s.bin\\n" "$(<"$3")"\n' >"${WORK}/bin/modinfo"
-  chmod +x "${WORK}/bin/modinfo"
-  run env PATH="${WORK}/bin:${PATH}" bash "${STAGING}" firmware-refs "${ROOT}" --kernel-release "${REL}"
-  [ "${status}" -eq 0 ]
-  [ "${output}" = $'microchip/builtin.bin\nrtw89/candidate.bin' ]
-  rm "${ROOT}/usr/lib/modules/${REL}/wifi.ko"
-  run env PATH="${WORK}/bin:${PATH}" bash "${STAGING}" firmware-refs "${ROOT}" --kernel-release "${REL}"
-  [ "${status}" -eq 0 ]
-  [ "${output}" = microchip/builtin.bin ]
-}
-
 @test "boot verifier: root mode follows root-absolute directory and Image links like tar" {
   stage
   mv "${ROOT}/boot/dtb" "${ROOT}/boot/dtb-${REL}"

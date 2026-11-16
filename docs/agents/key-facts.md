@@ -2510,9 +2510,12 @@ cases; the vendor cases were removed with the retired track).
 
 `mkosi/customize/firmware-sweep.sh::firmware_sweep <root>` reads the resolver's
 `FIRMWARE_SWEEP_PREFIXES`, `FIRMWARE_SWEEP_FILES` and `FIRMWARE_PRESERVED_ROOTS`.
-It uses `installed_module_firmware_refs` for both `modinfo -F firmware` on
-installed modules and NUL-separated `firmware=` entries in
-`modules.builtin.modinfo`. A kept candidate names its driver and reference;
+Its `firmware_sweep_module_refs` reads `modinfo -F firmware` on every installed
+module and the NUL-separated `firmware=` entries in `modules.builtin.modinfo`.
+That is a second reader on purpose: the device stager's copy is a hashed kernel
+build input, so changing it under the released package version fails the
+immutable candidate-identity gate; the next kernel revision bump owns the move.
+A kept candidate names its driver and reference;
 nested candidates such as `intel/ipu` are checked independently of their parent.
 Preserved candidates fail before any deletion. Bluetooth candidate and retained
 object assertions still surround the sweep.
@@ -2524,9 +2527,8 @@ must install its firmware in this platform layer and call `firmware_sweep` after
 that install.** Today's non-arm64 pass-through is unchanged; no x86 image is
 qualified by the synthetic i915 consumer test.
 
-The device stager's `firmware-refs` output remains sorted, deduplicated paths,
-now including the selected release's built-in references. The sweep requests
-tab-separated module identities through its optional `--with-modules` mode.
+The device stager's `firmware-refs` output is unchanged: sorted, deduplicated
+paths from the installed modules of the selected release.
 
 - **`brcm/`, `rtl_bt/`, `rtw88/`, `rtw89/` and `rockchip/` are never candidates** —
   they carry the two boards' own Wi-Fi, Bluetooth and SoC blobs. `mediatek/` and
@@ -2589,8 +2591,8 @@ tab-separated module identities through its optional `--with-modules` mode.
 - **Nothing is removed as a PACKAGE by this firmware prune.** The independent
   Todo-48 AP drill removes `hostapd` from the future image package list, not here.
 
-Guards: `tests/firmware-prune.test.sh`, `tests/full-firmware-bluetooth-closure.test.sh`
-and `tests/kernel-boot-staging.bats`. The firmware suite also pins builder
+Guards: `tests/firmware-prune.test.sh` and
+`tests/full-firmware-bluetooth-closure.test.sh`. The firmware suite also pins builder
 `modinfo` provisioning and rejects a scratch postinst with the sweep moved
 before the firmware install.
 
