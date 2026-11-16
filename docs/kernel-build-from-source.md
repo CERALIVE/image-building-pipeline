@@ -486,8 +486,9 @@ and `/usr/lib/ceralive/kernel-firmware-rules.{sh,txt}` as the scratch gate.
 It calls the image's `bluetooth_firmware_prepare` implementation: the same
 Bluetooth/UHID module selection, recursive dependency traversal, manifest parser,
 static references, runtime roots and exactly two reviewed hardware gaps.
-Other modules' firmware is **not gated**, just as in shipped images. Neither
-input tree is changed. Exit 0 means satisfied, exit 1 prints
+Other modules' firmware is **not gated by this kernel-only check**. Full image
+builds additionally enforce [final-rootfs firmware closure](firmware-closure.md)
+after the size gate. Neither input tree is changed. Exit 0 means satisfied, exit 1 prints
 `missing: <relative-path-or-glob>` for an unmet reference, and exit 2
 means invalid usage, identity or unprovable module metadata. The device caller
 checks the target slot's existing firmware, never upgrades it.
