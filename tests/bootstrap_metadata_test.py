@@ -45,6 +45,8 @@ def bootstrap_fixture(case: str = "valid") -> Iterator[Path]:
         origin = "Other" if case == "other-origin" else "Debian"
         release = f"Origin: {origin}\n" if case != "missing-origin" else ""
         release += "Suite: stable\nComponents: main\nArchitectures: arm64\n"
+        if case == "codename":
+            release += "Codename: trixie\n"
         if case != "missing-date":
             release += f"Date: {format_datetime(date)}\n"
         if case not in ("missing-until", "other-origin", "missing-origin"):
@@ -61,6 +63,8 @@ def bootstrap_fixture(case: str = "valid") -> Iterator[Path]:
         record = {"origin": ORIGIN, "suite": "stable", "component": "main", "arch": "arm64",
                   "index_path": "main/binary-arm64/Packages.gz", "keyring": keyring,
                   "fingerprints": [FINGERPRINT], "inrelease": inrelease, "index": index}
+        if case == "codename":
+            record["codename"] = "trixie"
         approved = {key: value for key, value in record.items() if key not in ("inrelease", "index")}
         approved["max_age_seconds"] = 86400
         repositories = {"debian-bootstrap": record}
@@ -87,6 +91,21 @@ def bootstrap_fixture(case: str = "valid") -> Iterator[Path]:
                                     "HOME": str(work), "TMPDIR": str(work), "PYTHONDONTWRITEBYTECODE": "1",
                                     "CERALIVE_BUILD_PURPOSE": "full"}):
             yield work
+
+
+def test_codename_is_verified_against_signed_metadata_and_independent_policy() -> None:
+    module = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
+    with bootstrap_fixture("codename") as directory:
+        module["mirror_validities"](directory)
+        approved = json.loads((directory / "trust.json").read_text())
+        approved["repositories"]["debian-bootstrap"]["codename"] = "bookworm"
+        (directory / "trust.json").write_text(json.dumps(approved))
+        try:
+            module["mirror_validities"](directory)
+        except module["SealedError"] as error:
+            assert "independently approved trust policy" in str(error)
+        else:
+            raise AssertionError("capsule codename overrode independent policy")
 
 
 def test_bootstrap_rejects_expired_missing_or_unauthenticated_metadata_before_serving() -> None:

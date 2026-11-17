@@ -20,7 +20,7 @@ sealed_repository() {
   local name="$1" state="$2" params expected
   mkdir -p "${state}"
   local sealed_inrelease sealed_index sealed_keyring sealed_origin sealed_suite
-  local sealed_component sealed_arch sealed_index_path sealed_max_age
+  local sealed_component sealed_arch sealed_index_path sealed_max_age sealed_codename
   local -a sealed_fingerprints=()
   params="$(python3 "${SEALED_INPUT_TOOL}" repository "${name}")" || return 1
   eval "${params}"
@@ -36,13 +36,14 @@ sealed_repository() {
     "${sealed_fingerprints[@]}" || die "sealed ${name} signature rejected"
   python3 "${SEALED_INPUT_TOOL}" valid-release "${state}/Release" "${sealed_max_age}" "${name}" \
     || die "sealed ${name} metadata validity rejected"
-  auth_release_has_identity "${state}/Release" "${sealed_suite}" "${sealed_component}" "${ARCH}" \
+  auth_release_has_identity "${state}/Release" "${sealed_suite}" "${sealed_component}" "${ARCH}" "${sealed_codename}" \
     || die "sealed ${name} signed repository identity mismatch"
   expected="$(index_release_digest "${state}/Release" "${sealed_index_path}")" \
     || die "sealed ${name} index absent from signed metadata"
   index_verify_digest "${sealed_index}" "${expected}" "sealed ${name} index" \
     || die "sealed ${name} index digest mismatch"
-  index_decompress_gz "${sealed_index}" "${state}/Packages" || return 1
+  python3 "${SEALED_INPUT_TOOL}" decompress-index "${sealed_index}" "${state}/Packages" "${sealed_index_path}" \
+    || return 1
   _SEALED_INDEX="${state}/Packages"
 }
 

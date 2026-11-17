@@ -21,6 +21,7 @@ class ArchivePolicy:
     arch: str
     index_path: str
     max_age_seconds: int
+    codename: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +57,8 @@ def load_policy(path: Path) -> PublicPolicy:
     for name, repo in row["repositories"].items():
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", name):
             raise StreamError("invalid archive policy name")
-        if set(repo) != set(ArchivePolicy.__dataclass_fields__):
+        required_fields = set(ArchivePolicy.__dataclass_fields__) - {"codename"}
+        if not required_fields.issubset(repo) or set(repo) - required_fields - {"codename"}:
             raise StreamError("invalid archive policy fields")
         fingerprints = repo["fingerprints"]
         if (type(fingerprints) is not list or not fingerprints or len(fingerprints) != len(set(fingerprints))
@@ -66,6 +68,8 @@ def load_policy(path: Path) -> PublicPolicy:
                 or repo["arch"] != "arm64"
                 or any(not re.fullmatch(r"[a-zA-Z0-9_./+-]{1,120}", repo[key])
                        for key in ("suite", "component", "index_path"))
+                or (repo.get("codename", "") != ""
+                    and not re.fullmatch(r"[a-zA-Z0-9_+-]{1,120}", repo["codename"]))
                 or any(part in ("", ".", "..") for part in repo["index_path"].split("/"))):
             raise StreamError("invalid archive validity or identity policy")
         repositories[name] = ArchivePolicy(**(repo | {
@@ -74,7 +78,8 @@ def load_policy(path: Path) -> PublicPolicy:
     if (not {"firstparty", "bsp", "debian-source"}.issubset(repositories)
             or repositories["firstparty"].origin != "https://apt.ceralive.tv"
             or repositories["debian-source"].origin != "https://deb.debian.org/debian"
-            or repositories["firstparty"].suite not in ("stable", "beta")):
+            or repositories["firstparty"].suite not in ("stable", "beta")
+            or repositories["firstparty"].codename):
         raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
     metadata = row["kernel_metadata"]
     if set(metadata) != {"kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"}:

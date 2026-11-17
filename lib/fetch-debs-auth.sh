@@ -62,9 +62,11 @@ auth_lookup_package() {
 }
 
 auth_release_has_identity() {
-  local release="$1" suite="$2" component="$3" arch="$4"
-  awk -v want_suite="${suite}" -v want_component="${component}" -v want_arch="${arch}" '
+  local release="$1" suite="$2" component="$3" arch="$4" codename="${5:-}"
+  awk -v want_suite="${suite}" -v want_component="${component}" -v want_arch="${arch}" \
+      -v want_codename="${codename}" '
     $1=="Suite:" { suite_count++; suite=$2 }
+    $1=="Codename:" { codename_count++; codename=$2; codename_fields=NF }
     $1=="Architectures:" {
       architectures_count++
       for (i=2; i<=NF; i++) if ($i==want_arch) has_arch=1
@@ -75,7 +77,9 @@ auth_release_has_identity() {
     }
     END {
       exit !(suite_count==1 && architectures_count==1 && components_count==1 &&
-             suite==want_suite && has_arch && has_component)
+             suite==want_suite && has_arch && has_component &&
+             (want_codename=="" ||
+              (codename_count==1 && codename_fields==2 && codename==want_codename)))
     }
   ' "${release}"
 }
