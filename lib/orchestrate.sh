@@ -261,7 +261,7 @@ main() {
     [[ "${CERALIVE_BUILD_PURPOSE:-full}" == full ]] || die "select measurement explicitly with --rootfs-measurement"
   fi
   if (( kernel_only == 0 )); then
-    if (( rootfs_measurement == 0 )); then
+    if (( rootfs_measurement == 0 )) && [[ "${DRY_RUN:-0}" != "1" ]]; then
       rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
     fi
     export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
