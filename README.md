@@ -136,7 +136,8 @@ not create a signed candidate or refresh the size baselines.
 Its host preparation command, `python3 ci/prepare-image-capsule.py`, fetches an
 explicit reviewed package closure with origin-scoped client certificate paths
 and preserves the original signed metadata. It supports separately pinned signed
-Suite/Codename identities and bounded gzip/xz binary-index decoding. See the
+Suite/Codename identities and bounded gzip/xz binary-index decoding, including
+complete validation of every concatenated xz stream and its padding. See the
 profile's preparation contract before authorizing any authenticated prefetch.
 
 **The container build is canonical.** Native builds (`--native` /

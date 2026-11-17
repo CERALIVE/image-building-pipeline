@@ -209,6 +209,9 @@ decoder in the producer and sealed package importer. Gzip uses Python's
 standard `gzip` module and xz uses standard `lzma`; each decoded index is at
 most 256 MiB, including concatenated streams. Truncated, corrupt, oversized
 or unsupported formats fail closed and leave no partial decoded index.
+Every xz stream must reach its verified end, including later concatenated
+streams; only correctly aligned null-byte stream padding may follow a stream.
+Trailing non-stream bytes are rejected instead of accepting a valid prefix.
 There is no format probing, alternative URL fetch, recompression or re-signing.
 Original signed `InRelease` (or a signed `Release` accepted by the existing
 verifier) and compressed indexes are preserved byte for byte. Detached

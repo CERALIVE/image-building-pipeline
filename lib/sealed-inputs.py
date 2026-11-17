@@ -108,18 +108,46 @@ def decompress_index(source: Path, destination: Path, index_path: str) -> None:
     match Path(index_path).suffix:
         case ".gz":
             decoded = gzip.open(source, "rb")
+            decoder = None
         case ".xz":
-            decoded = lzma.open(source, "rb", format=lzma.FORMAT_XZ)
+            decoded = source.open("rb")
+            decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
         case _:
             raise SealedError("unsupported compressed package index")
     try:
         with decoded as stream, destination.open("wb") as output:
             remaining = INDEX_LIMIT
-            while chunk := stream.read(min(1024 * 1024, remaining + 1)):
+            pending = b""
+            while True:
+                length = min(1024 * 1024, remaining + 1)
+                if decoder is None:
+                    chunk = stream.read(length)
+                    if not chunk:
+                        break
+                else:
+                    if decoder.needs_input:
+                        pending = pending or stream.read(1024 * 1024)
+                        if not pending:
+                            raise EOFError("truncated xz package index")
+                    chunk = decoder.decompress(pending, max_length=length)
+                    pending = b""
                 if len(chunk) > remaining:
                     raise SealedError("decompressed package index exceeds the 256 MiB bound")
                 output.write(chunk)
                 remaining -= len(chunk)
+                if decoder is not None and decoder.eof:
+                    pending = decoder.unused_data or stream.read(1024 * 1024)
+                    padding = 0
+                    while pending.startswith(b"\0"):
+                        unpadded = pending.lstrip(b"\0")
+                        padding += len(pending) - len(unpadded)
+                        pending = unpadded or stream.read(1024 * 1024)
+                    if padding % 4:
+                        raise SealedError("misaligned xz stream padding")
+                    if not pending:
+                        break
+                    # LZMAFile can hide later stream errors; each decoder must reach EOF.
+                    decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
     except (OSError, EOFError, lzma.LZMAError, zlib.error, SealedError) as exc:
         destination.unlink(missing_ok=True)
         raise SealedError("invalid or oversized compressed package index") from exc
