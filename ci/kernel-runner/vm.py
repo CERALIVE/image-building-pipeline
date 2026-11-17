@@ -18,6 +18,9 @@ import tempfile
 import threading
 
 import yaml
+from image_resources import AdmissionError
+from image_stream import StreamError
+from image_lifecycle import job_disk
 
 HERE = Path(__file__).resolve().parent
 IMAGE_URL = "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img"
@@ -42,7 +45,7 @@ def die_with_parent(parent: int) -> None:
 
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
          seed: Path | None = None, source_bundle: Path | None = None,
-         disk_fd: int | None = None) -> None:
+         disk_fd: int | None = None, image_job=None, image_base: bool = False) -> None:
     """Pass the one-job credential in an anonymous RAM fd, not argv or a file."""
     fd = os.memfd_create("ceralive-job", 0)
     try:
@@ -50,13 +53,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         os.lseek(fd, 0, os.SEEK_SET)
         args = [
             "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
-            "-smp", "16", "-m", "16384", "-display", "none", "-monitor", "none",
-            "-serial", "stdio", "-no-reboot",
+            "-smp", "4" if image_job or image_base else "16",
+            "-m", "20480" if image_job or image_base else "16384", "-display", "none", "-monitor", "none",
+            "-serial", f"file:/proc/self/fd/{image_job.console_write}" if image_job else "stdio",
+            "-no-reboot",
             "-drive", f"file={disk},format=qcow2,if=none,id=system",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
-            "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
             "-fw_cfg", f"name=opt/ceralive/{kind},file=/proc/self/fd/{fd}",
         ]
+        if image_job:
+            from image_vm import image_arguments
+            args += image_arguments(image_job)
+        else:
+            args += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0"]
         if seed:
             args += ["-drive", f"file={seed},format=raw,media=cdrom,readonly=on"]
         if source_bundle:
@@ -65,10 +74,13 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         # The gh credential stays in the host's gh process; QEMU gets no host env secrets.
         env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
+        if image_job:
+            descriptors += (image_job.capsule_fd, image_job.console_write)
         process = subprocess.Popen(args, pass_fds=descriptors, env=env,
                                    preexec_fn=partial(die_with_parent, os.getpid()),
                                    stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE if image_job else subprocess.STDOUT)
         lines: list[bytes] = []
 
         def console() -> None:
@@ -78,10 +90,15 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                     sys.stdout.buffer.write(line)
                     sys.stdout.buffer.flush()
 
-        reader = threading.Thread(target=console)
-        reader.start()
+        reader = None
+        if not image_job:
+            reader = threading.Thread(target=console)
+            reader.start()
         try:
-            process.wait(timeout=seconds)
+            if image_job:
+                image_job.capture(process, seconds)
+            else:
+                process.wait(timeout=seconds)
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -90,7 +107,14 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-            reader.join()
+            if reader:
+                reader.join()
+            if image_job:
+                image_job.state.update(qemu_reaped=True, qemu_exit=process.returncode)
+        if image_job:
+            if process.returncode:
+                raise RuntimeError(f"image guest exited ({process.returncode})")
+            return
         # Never relay runner logs: an untrusted job could print the JIT credential.
         expected = b"CERALIVE_BASE_READY" if seed else b"CERALIVE_JOB_DONE=0"
         output = b"".join(lines)
@@ -103,13 +127,17 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("build-base", "run", "check"))
+    parser.add_argument("operation", choices=("build-base", "run", "check", "image"))
     parser.add_argument("--base", required=True, type=Path)
     parser.add_argument("--group-id", type=int)
     parser.add_argument("--check-script", type=Path)
     parser.add_argument("--source-bundle", type=Path,
                         help="check only: read-only public-source tar capsule, never a directory share")
     parser.add_argument("--timeout", type=int, default=21600)
+    parser.add_argument("--profile", choices=("kernel", "image"), default="kernel",
+                        help="build-base provisioning identity; kernel defaults remain unchanged")
+    from image_vm import add_arguments
+    add_arguments(parser)
     args = parser.parse_args()
     parent = os.getppid()
     parent_proc = Path("/proc") / str(parent)
@@ -124,10 +152,20 @@ def main() -> int:
     base = args.base.resolve()
     if "," in str(base):
         parser.error("commas are not supported in VM disk paths")
+    if args.operation == "image":
+        from image_vm import run_image
+        return run_image(args, parser)
     if args.operation == "build-base":
         if base.exists():
             parser.error("base already exists; select a new base path")
         base.parent.mkdir(parents=True, exist_ok=True)
+        if args.profile == "image":
+            from image_resources import cgroup_admission, disk_headroom, require_host_lock
+            require_host_lock()
+            cgroup_admission()
+            disk_headroom(((base.parent, 257 * 1024**3),))
+            from image_resources import CAPS
+            CAPS.qemu_limit()
         with tempfile.TemporaryDirectory(prefix="base-", dir=base.parent) as directory:
             work = Path(directory)
             image = work / "ubuntu.img"
@@ -141,7 +179,8 @@ def main() -> int:
             disk = work / "base.qcow2"
             subprocess.run(["qemu-img", "convert", "-O", "qcow2", str(image), str(disk)],
                            check=True, preexec_fn=child_setup, timeout=300)
-            subprocess.run(["qemu-img", "resize", str(disk), "240G"], check=True,
+            subprocess.run(["qemu-img", "resize", str(disk),
+                            "128G" if args.profile == "image" else "240G"], check=True,
                            preexec_fn=child_setup, timeout=180)
             files = []
             for source, destination in (
@@ -154,6 +193,11 @@ def main() -> int:
             ):
                 files.append({"path": destination, "permissions": "0755", "encoding": "b64",
                               "content": base64.b64encode((HERE / source).read_bytes()).decode()})
+            if args.profile == "image":
+                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py"):
+                    files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
+                                  "permissions": "0755", "encoding": "b64",
+                                  "content": base64.b64encode((HERE / source).read_bytes()).decode()})
             files.append({
                 "path": "/etc/systemd/system/ceralive-runner.service", "permissions": "0644",
                 "content": "[Unit]\nAfter=network-online.target cloud-final.service docker.service\n"
@@ -166,17 +210,20 @@ def main() -> int:
             })
             config = {
                 "ssh_pwauth": False, "disable_root": True, "write_files": files,
-                "runcmd": [["bash", "/root/provision.sh", RUNNER_VERSION, RUNNER_SHA]],
+                "runcmd": [["bash", "/root/provision.sh", RUNNER_VERSION, RUNNER_SHA, args.profile]],
                 "power_state": {"mode": "poweroff", "delay": "now", "timeout": 30},
             }
             (work / "user-data").write_text("#cloud-config\n" + yaml.safe_dump(config))
-            (work / "meta-data").write_text("instance-id: kernel-base\nlocal-hostname: kernel-runner\n")
+            (work / "meta-data").write_text(
+                f"instance-id: {args.profile}-base\nlocal-hostname: {args.profile}-runner\n")
             seed = work / "seed.iso"
             subprocess.run(["xorriso", "-as", "mkisofs", "-quiet", "-volid", "cidata",
                             "-joliet", "-rock", "-o", str(seed),
                             str(work / "user-data"), str(work / "meta-data")], check=True,
                            preexec_fn=child_setup, timeout=180)
-            boot(disk, b"", "base", args.timeout, seed)
+            boot(disk, b"", "base", args.timeout, seed, image_base=args.profile == "image")
+            if args.profile == "image" and disk.stat().st_blocks * 512 > 32 * 1024**3:
+                raise RuntimeError("image base exceeds the 32 GiB allocated-byte budget")
             disk.chmod(0o444)
             # link is create-only, including against a concurrent base builder.
             os.link(disk, base)
@@ -194,12 +241,7 @@ def main() -> int:
     if args.operation == "run" and (not args.group_id or args.group_id in (1, 5)):
         parser.error("run requires the dedicated kernel-release group ID, never a default")
     # An unlinked disk has no pathname to leak, even when Python cannot run finally.
-    with tempfile.TemporaryFile(prefix="job-", dir=base.parent) as overlay_file:
-        disk_fd = overlay_file.fileno()
-        overlay = Path(f"/proc/self/fd/{disk_fd}")
-        subprocess.run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
-                        "-b", str(base), str(overlay)], check=True,
-                       pass_fds=(disk_fd,), preexec_fn=child_setup, timeout=180)
+    with job_disk(base) as (overlay, disk_fd):
         if args.operation == "run":
             response = subprocess.run([
                 "gh", "api", "--method", "POST",
@@ -223,6 +265,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, interrupted)
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
+            StreamError, subprocess.SubprocessError) as exc:
         print(f"kernel runner: {exc}", file=sys.stderr)
         sys.exit(1)

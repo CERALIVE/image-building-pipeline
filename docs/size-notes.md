@@ -226,6 +226,17 @@ fatal. The absolute gate remains blocking. This refresh changes neither policy.
 
 ### Updating the baseline
 
+The [isolated rootfs measurement purpose](image-measurement.md) can produce
+ceralive8 evidence without a private RAUC signer: production mode, the exact
+approved public device root, original authenticated package inputs and every
+current content gate remain required. It retains both real populated 4096 MiB
+slot images after boot-payload injection, their clean headers, hashes and
+available-byte/inode reserve receipts. Tar length remains the size quantity;
+slot reserve is measured from the actual filesystems. A successful transport
+or guest completion marker alone is insufficient: the independent offline
+verifier must accept each board. No ceiling or baseline changes accompany the
+tooling implementation, and no board size result is claimed before execution.
+
 When intentional changes cause growth (e.g., adding a new package, enabling a feature):
 
 1. **Measure the same quantity** as the caller: `du --apparent-size -sb` of the

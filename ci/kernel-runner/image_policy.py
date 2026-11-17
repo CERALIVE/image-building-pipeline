@@ -1,0 +1,100 @@
+"""The host's independently approved public identities, never guest-selected trust."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import re
+
+from image_capsule import object_id, original_url
+from image_stream import StreamError, unique_object
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivePolicy:
+    origin: str
+    keyring: str
+    fingerprints: tuple[str, ...]
+    suite: str
+    component: str
+    arch: str
+    index_path: str
+    max_age_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class BuilderPolicy:
+    object: str
+    tag: str
+    image_id: str
+    arch: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicPolicy:
+    schema: int
+    root_der_sha256: str
+    repositories: dict[str, ArchivePolicy]
+    kernel_metadata: dict[str, str]
+    builder_images: tuple[BuilderPolicy, ...]
+    addon_public_object: str = ""
+    paseto_public_object: str = ""
+    os_version: str = ""
+
+
+def load_policy(path: Path) -> PublicPolicy:
+    if not path.is_file() or path.stat().st_size > 1024 * 1024:
+        raise StreamError("missing or oversized public trust policy")
+    row = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
+    optional = {"addon_public_object", "paseto_public_object", "os_version"}
+    if (not required.issubset(row) or set(row) - required - optional
+            or type(row["schema"]) is not int or row["schema"] != 1):
+        raise StreamError("invalid public trust policy fields")
+    repositories = {}
+    for name, repo in row["repositories"].items():
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", name):
+            raise StreamError("invalid archive policy name")
+        if set(repo) != set(ArchivePolicy.__dataclass_fields__):
+            raise StreamError("invalid archive policy fields")
+        fingerprints = repo["fingerprints"]
+        if (type(fingerprints) is not list or not fingerprints or len(fingerprints) != len(set(fingerprints))
+                or any(not re.fullmatch(r"[A-F0-9]{40}", item) for item in fingerprints)
+                or type(repo["max_age_seconds"]) is not int
+                or not 0 < repo["max_age_seconds"] <= 2592000
+                or repo["arch"] != "arm64"
+                or any(not re.fullmatch(r"[a-zA-Z0-9_./+-]{1,120}", repo[key])
+                       for key in ("suite", "component", "index_path"))
+                or any(part in ("", ".", "..") for part in repo["index_path"].split("/"))):
+            raise StreamError("invalid archive validity or identity policy")
+        repositories[name] = ArchivePolicy(**(repo | {
+            "origin": original_url(repo["origin"]), "keyring": object_id(repo["keyring"]),
+            "fingerprints": tuple(fingerprints)}))
+    if (not {"firstparty", "bsp", "debian-source"}.issubset(repositories)
+            or repositories["firstparty"].origin != "https://apt.ceralive.tv"
+            or repositories["debian-source"].origin != "https://deb.debian.org/debian"
+            or repositories["firstparty"].suite not in ("stable", "beta")):
+        raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
+    metadata = row["kernel_metadata"]
+    if set(metadata) != {"kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"}:
+        raise StreamError("policy requires the exact four released kernel metadata objects")
+    for digest in metadata.values():
+        object_id(digest)
+    builders = []
+    for builder in row["builder_images"]:
+        if (set(builder) != set(BuilderPolicy.__dataclass_fields__)
+                or not re.fullmatch(r"[a-zA-Z0-9_./:@+-]{1,200}", builder["tag"])
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", builder["image_id"])
+                or builder["arch"] not in ("arm64", "amd64")):
+            raise StreamError("invalid approved builder identity")
+        builders.append(BuilderPolicy(**(builder | {"object": object_id(builder["object"])})))
+    if not builders or len({builder.tag for builder in builders}) != len(builders):
+        raise StreamError("missing or ambiguous approved builder closure")
+    for key in ("addon_public_object", "paseto_public_object"):
+        if row.get(key):
+            object_id(row[key])
+    if row.get("os_version") and not re.fullmatch(r"[0-9]{4}\.[0-9]+\.[0-9]+", row["os_version"]):
+        raise StreamError("invalid image version identity")
+    return PublicPolicy(1, object_id(row["root_der_sha256"]), repositories, metadata,
+                        tuple(builders), **{key: row.get(key, "") for key in optional})

@@ -68,6 +68,8 @@ Usage:
   build <board> --variant N  build a single board with family variant N
   build <family|board> --kernel-only [--release]
                             build and gate one family kernel, without an image
+  build <board> --rootfs-measurement
+                            measure sealed production content without a signer
   build --all                build every board manifest
   build --only b1,b2         build the named subset (comma-separated)
 
@@ -186,7 +188,7 @@ main() {
   local only_csv=""
   local board=""
   local variant=""
-  local kernel_only=0 release=0
+  local kernel_only=0 release=0 rootfs_measurement=0
   local -a passthrough=()
 
   # `--only=x` / `--variant=x` are folded into their two-token form up front, so
@@ -217,6 +219,7 @@ main() {
         ;;
       --kernel-only) kernel_only=1; shift ;;
       --release) release=1; shift ;;
+      --rootfs-measurement) rootfs_measurement=1; shift ;;
       --)
         shift
         passthrough+=("$@")
@@ -256,6 +259,11 @@ PY
     passthrough+=(--kernel-only)
   fi
   (( release == 0 )) || passthrough+=(--release)
+  if (( rootfs_measurement )); then
+    [[ "${mode}" == single && -n "${board}" && "${kernel_only}" == 0 && "${release}" == 0 ]] \
+      || args_usage_die usage "--rootfs-measurement requires one board and a separate purpose"
+    passthrough+=(--rootfs-measurement)
+  fi
 
   # Resolve the requested selection into SELECTED_BOARDS.
   local -a SELECTED_BOARDS=()

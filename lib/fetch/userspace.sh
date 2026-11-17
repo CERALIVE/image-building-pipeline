@@ -134,7 +134,9 @@ _fetch_rk3588_userspace_one() {
   tmp="$(mktemp "${_RK3588_USERSPACE_DEBS}/.tmp-userspace-XXXXXX")"
   # -C -/retry_transient: see lib/fetch/bsp.sh for the reproduced slow-link
   # failure this fixes and why the two env overrides are needed alongside it.
-  if ! FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    input_fetch "${url}" "${tmp}" || { rm -f "${tmp}"; return 1; }
+  elif ! FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
       "RK3588 userspace curl fetch ${pkg}" \
       curl -fsSL --retry 3 --retry-all-errors -C - "${CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
     rm -f "${tmp}"

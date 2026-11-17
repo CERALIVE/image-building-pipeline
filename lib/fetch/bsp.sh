@@ -58,6 +58,14 @@ bsp_fetch_kernel() {
     || die "kernel APT record identity mismatch"
   local final tmp
   final="${debs}/$(basename "${filename}")"
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    _SEALED_INDEX="${index}"
+    _SEALED_BASE="${_FIRST_PARTY_BASE_URL}"
+    _SEALED_DEBS="${debs}"
+    sealed_stage_deb "${package}=${selected}" || return 1
+    _KERNEL_APT_INDEX="${index}"
+    return
+  fi
   tmp="$(mktemp "${debs}/.tmp-kernel-XXXXXX")" || return 1
   local -a curl_auth=()
   if [[ -n "${APT_CLIENT_CRT_B64:-}" ]]; then
@@ -474,7 +482,20 @@ fetch_bsp() {
       || die "Armbian keyring primary fingerprints do not exactly match pinned set: ${ARMBIAN_APT_KEY_FINGERPRINTS[*]}"
   fi
 
-  if command -v apt-get >/dev/null 2>&1; then
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" && -z "${DRY_RUN}" ]]; then
+    sealed_repository bsp "${debs}/.sealed-bsp" || return 1
+    _BSP_APT_INDEX="${_SEALED_INDEX}"
+    bsp_assert_index_specs "${_SEALED_INDEX}" "${ARCH}" "${bsp_specs[@]}" \
+      || die "sealed BSP exact package specs rejected"
+    bsp_assert_firmware_content "${_SEALED_INDEX}" "${bsp_specs[@]}" \
+      || die "sealed BSP firmware content pin rejected"
+    _SEALED_BASE="${ARMBIAN_APT_URL}"
+    _SEALED_DEBS="${debs}"
+    local spec
+    for spec in "${bsp_specs[@]}"; do
+      sealed_stage_deb "${spec}" --arch-all-ok || return 1
+    done
+  elif command -v apt-get >/dev/null 2>&1; then
     _fetch_bsp_native "${debs}" "${bsp_specs[@]}"
   else
     _fetch_bsp_curl "${debs}" "${bsp_specs[@]}"

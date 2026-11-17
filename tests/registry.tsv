@@ -38,6 +38,13 @@ tests/pin_currency_test.py	tool	unit	invoked-by-suite	Driven by first-party-pin-
 tests/generate-dev-rauc-pki.sh	tool	support	default-fixture	materializes the ignored NON-PRODUCTION RAUC signing fixture every RAUC contract below needs
 
 # --- bats suites (run order) ---------------------------------------------
+tests/image-route.bats	bats	unit	default-bats	offline image profile, bounded transport, sealed authentication and measurement-purpose contracts
+tests/image_route_test.py	tool	unit	invoked-by-suite	artifact framing and capsule contracts driven by image-route.bats
+tests/image_profile_test.py	tool	unit	invoked-by-suite	Python-child launcher and resource admission contracts driven by image-route.bats
+tests/sealed_inputs_test.py	tool	unit	invoked-by-suite	synthetic signed-index import boundaries driven by image-route.bats
+tests/rootfs_measurement_test.py	tool	unit	invoked-by-suite	shipping-content purpose and raw-assembly split driven by image-route.bats
+tests/parity_noexec_test.py	tool	unit	invoked-by-suite	noexec X_OK syscall-denial parity regression driven by image-route.bats
+tests/bootstrap_metadata_test.py	tool	unit	invoked-by-suite	original bootstrap metadata authentication and validity driven by image-route.bats
 tests/manifest-schema.bats	bats	unit	default-bats	manifest/board/family schema validation
 tests/package-contract.bats	bats	unit	default-bats	package sets, staging classification, debug delta, kernel freeze
 tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators

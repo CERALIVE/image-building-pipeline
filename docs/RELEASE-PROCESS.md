@@ -432,6 +432,16 @@ artifact layout.
 
 ### Production builder admission
 
+The owner-started [offline rootfs measurement route](image-measurement.md) is a
+local engineering exception: its native Docker daemon lives entirely inside
+a disposable no-network guest. The unchanged resource gate reads that guest's
+real memory and checkout/Docker-root filesystems. It never targets a workstation
+Docker socket or substitutes host meminfo. Its explicit production measurement
+purpose preserves approved public device trust and all content/reserve gates
+while omitting bundle signing and compression. It produces unsigned measurement
+evidence, never a completed production candidate. Hosted release admission and
+the normal signer-required build remain unchanged.
+
 The dedicated `ceralive-image-builder` runner must use the host's native Linux
 Docker daemon. The candidate job sets `DOCKER_CONTEXT=default`, and
 [`check-builder-resources.sh`](../ci/check-builder-resources.sh) runs before

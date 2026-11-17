@@ -16,6 +16,11 @@
 # ---------------------------------------------------------------------------
 stage_assemble() {
   local raw_artifact=""
+  if [[ "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement ]]; then
+    CERALIVE_RETAIN_SLOT_DIR="${out_dir}/measurement-slots"
+    mkdir -m 0700 "${CERALIVE_RETAIN_SLOT_DIR}"
+    export CERALIVE_RETAIN_SLOT_DIR
+  fi
   # -------------------------------------------------------------------------
   # 9. Stage-4 disk assembly. Lay the rootfs onto the FROZEN A/B GPT geometry and
   #    (RK3588) write the U-Boot blob into the 16 MB raw gap, emitting a flashable
@@ -55,18 +60,22 @@ stage_assemble() {
         || die "Stage-4 disk assembly failed for board '${board}'"
       log_success "flashable image: ${raw_artifact} ($(du -h "${raw_artifact}" | cut -f1))"
 
-      # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
-      # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
-      # the .raw, emitted ALONGSIDE it as a verity/adaptive full-slot image.
-      local bundle_artifact="${out_dir}/${ts}.raucb"
-      log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
-      CERALIVE_BOOT_PAYLOAD_DIR="${boot_payload_dir}" \
-      BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
-        MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
-        RAUC_DEB_DIR="${rauc_build_dir_host}" \
-        "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
-        || die "Stage-4 RAUC bundle build failed for board '${board}'"
-      log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
+      if [[ "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement ]]; then
+        cp -- "${boot_payload_dir}/boot.scr" "${boot_payload_dir}/boot.scr.sha256" "${CERALIVE_RETAIN_SLOT_DIR}/"
+      else
+        # Stage-4 FINAL artifact: a signed RAUC OTA bundle (.raucb + .sha256),
+        # stamped with the same board-specific COMPATIBLE_STRING and timestamp as
+        # the .raw, emitted ALONGSIDE it as a verity/adaptive full-slot image.
+        local bundle_artifact="${out_dir}/${ts}.raucb"
+        log_info "[8/9] Stage-4 RAUC bundle → ${bundle_artifact} (signed, compatible=${COMPATIBLE_STRING:-unset}, pki=${CERALIVE_RAUC_PKI_DIR})"
+        CERALIVE_BOOT_PAYLOAD_DIR="${boot_payload_dir}" \
+        BUNDLE_VERSION="${build_version}" BUNDLE_OUT_DIR="${out_dir}" BUNDLE_TS="${ts}" \
+          MKOSI_BUILDER_IMAGE="${MKOSI_BUILDER_IMAGE}" MKOSI_NATIVE="${MKOSI_NATIVE:-0}" \
+          RAUC_DEB_DIR="${rauc_build_dir_host}" \
+          "${BUILD_BUNDLE_SH}" "${BOARD_ID}" "${rootfs_tree}" \
+          || die "Stage-4 RAUC bundle build failed for board '${board}'"
+        log_success "signed bundle: ${bundle_artifact} ($(du -h "${bundle_artifact}" | cut -f1)), sha256 in ${bundle_artifact}.sha256"
+      fi
     else
       log_warn "[8/9] INSTALL_BOOT_BSP=0 — config+package parity build; Stage-4 disk assembly (flashable .raw) deferred to the full device build"
     fi
@@ -116,7 +125,7 @@ stage_assemble() {
 
   [[ -z "${boot_payload_dir:-}" ]] || rm -rf "${boot_payload_dir}"
 
-  if [[ -n "${raw_artifact}" ]]; then
+  if [[ -n "${raw_artifact}" && "${CERALIVE_BUILD_PURPOSE:-full}" != rootfs-measurement ]]; then
     log_info "[8/9] sealing local flash image → ${raw_artifact}.xz"
     "${SEAL_RAW_CANDIDATE_SH}" \
       --raw "${raw_artifact}" \

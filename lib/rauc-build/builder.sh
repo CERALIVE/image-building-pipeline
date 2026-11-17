@@ -64,6 +64,7 @@ ensure_rauc_builder_image() {
     log_info "rauc builder image ${tag} present"
     return 0
   fi
+  [[ -z "${CERALIVE_SEALED_INPUTS:-}" ]] || die "sealed input capsule lacks the pinned RAUC builder image"
   log_info "building rauc builder image ${tag} (platform=${platform}) FROM ${base_image}"
   local -a proxy_args=()
   mapfile -t proxy_args < <(container_build_proxy_args)
