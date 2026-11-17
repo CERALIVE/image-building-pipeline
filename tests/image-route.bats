@@ -1,5 +1,43 @@
 #!/usr/bin/env bats
 
+@test "single-board x86 dry-run succeeds without PKI in either build mode" {
+  for mode in production development; do
+    run env -i PATH="${PATH}" HOME="${BATS_TEST_TMPDIR}" TMPDIR="${BATS_TEST_TMPDIR}" \
+      CERALIVE_BUILD_MODE="${mode}" CERALIVE_APT_PROXY=off CERALIVE_BUILD_LOCK_TIMEOUT=0 \
+      DRY_RUN=1 "${BATS_TEST_DIRNAME}/../build" x86-minipc
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DRY-RUN complete: board='x86-minipc' (x86-64)"* ]]
+  done
+}
+
+@test "single-board x86 dry-run never accesses configured PKI paths" {
+  local pki="${BATS_TEST_TMPDIR}/unused-pki" trace="${BATS_TEST_TMPDIR}/pki.trace"
+  mkdir "${pki}"
+  for mode in production development; do
+    run env -i PATH="${PATH}" HOME="${BATS_TEST_TMPDIR}" TMPDIR="${BATS_TEST_TMPDIR}" \
+      CERALIVE_BUILD_MODE="${mode}" CERALIVE_APT_PROXY=off CERALIVE_BUILD_LOCK_TIMEOUT=0 \
+      CERALIVE_RAUC_PKI_DIR="${pki}" RAUC_KEYRING_FILE="${pki}/device-root.pem" \
+      DRY_RUN=1 MKOSI_NATIVE=1 strace -f -qq -e trace=%file -o "${trace}" \
+      "${BATS_TEST_DIRNAME}/../build" x86-minipc
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DRY-RUN complete: board='x86-minipc' (x86-64)"* ]]
+    run grep -F -- "${pki}" "${trace}"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "single-board x86 non-dry-run still fails closed without PKI" {
+  run env -i PATH="${PATH}" HOME="${BATS_TEST_TMPDIR}" TMPDIR="${BATS_TEST_TMPDIR}" \
+    CERALIVE_BUILD_MODE=production DRY_RUN=0 \
+    "${BATS_TEST_DIRNAME}/../build" x86-minipc
+  printf '%s\n' "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"production RAUC PKI requires explicit CERALIVE_RAUC_PKI_DIR and RAUC_KEYRING_FILE"* ]]
+  [[ "$output" != *"[1/9]"* ]]
+}
+
 @test "image artifact stream contracts need no privileged tools" {
   run python3 "${BATS_TEST_DIRNAME}/image_route_test.py"
   printf '%s\n' "$output"

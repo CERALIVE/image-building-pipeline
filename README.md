@@ -339,6 +339,12 @@ A single resolved board execs the orchestrator directly. A multi-board selection
 `lib/build-all.sh`. An unknown board in `--only` fails loudly: it names the
 offender and lists the available boards.
 
+Single-board `DRY_RUN=1` plans, including `x86-minipc`, do not resolve or access
+RAUC signing material or require PKI configuration in either build mode.
+Normal full builds retain the existing signer preflight and fail closed without
+valid PKI. The separate `--rootfs-measurement` purpose still refuses dry-runs and
+requires its approved public device root.
+
 A source-kernel dry run exits after emitting the fetch and kernel plans; it does
 not send the intentionally empty staging tree through package or BSP validation.
 A real source-kernel build retains `resolved.config` (the exact post-
