@@ -223,7 +223,10 @@ Ambient curl configuration, proxies and credential environment are excluded.
 Transfers have no terminal or stdin for key-password prompts; a key requiring
 interactive unlocking fails closed.
 Each transfer is one GET with no redirect following or retry. Non-200 status,
-TLS failure, mismatched bytes or timeout reject the attempt. The default
+TLS failure, mismatched bytes or timeout reject the attempt. A failed
+transfer names the object SHA-256, its reviewed URL, the HTTP status (000 when
+no response arrived) and curl's exit code; credential paths are never printed.
+The default
 per-object deadline is 120 seconds (`--object-timeout` permits 1–600); connect
 time is at most 10 seconds. Curl's size bound is backed by a process file-size
 limit, including responses without Content-Length. Decompressed package

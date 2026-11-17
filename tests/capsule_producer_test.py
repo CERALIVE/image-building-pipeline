@@ -160,6 +160,8 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                     release_response.wait(5)
                     return
                 data = remote.get(url)
+                if case == "missing-object" and host == "apt.ceralive.tv" and url.endswith(".deb"):
+                    data = None
                 if data is None:
                     self.send_error(404)
                     return
@@ -316,6 +318,24 @@ def test_redirects_unknown_tls_and_bounded_transfers_never_publish() -> None:
             assert not (work / "capsule.tar").exists(), case
             assert all(not url.endswith("/redirected") for url, _authenticated in requests), case
             assert not list(work.glob(".prefetch-*")), case
+
+
+def test_missing_remote_object_is_named_and_leaves_no_capsule_or_partial_files() -> None:
+    with fixture("missing-object") as (work, reviewed, args, env, requests, _remote):
+        private = work / "private"
+        private.mkdir(mode=0o700)
+        args[args.index("--output") + 1] = str(private / "capsule.tar")
+        missing = next(row for row in reviewed["objects"] if row["kind"] == "deb"
+                       and row["urls"][0].startswith("https://apt.ceralive.tv/"))
+        result = run(args, env)
+        assert result.returncode != 0
+        assert (f"exact HTTPS GET failed for object {missing['sha256']} at {missing['urls'][0]} (HTTP 404"
+                in result.stderr), result.stderr
+        assert (missing["urls"][0], True) in requests
+        assert str(work / "client.pem") not in result.stderr
+        assert str(work / "client.key") not in result.stderr
+        # No capsule, partial download, staged archive or temporary directory survives.
+        assert list(private.iterdir()) == []
 
 
 def test_unapproved_objects_and_client_origins_are_rejected_before_requests() -> None:

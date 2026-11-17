@@ -58,7 +58,9 @@ def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
                             timeout=seconds + 5, start_new_session=True,
                             preexec_fn=lambda: child_limit(length))
     if result.returncode or result.stdout != b"200":
-        raise StreamError("exact HTTPS GET failed (TLS, status, size or deadline)")
+        # Name only reviewed public identity; curl stderr can carry credential paths.
+        raise StreamError(f"exact HTTPS GET failed for object {target.name} at {url} "
+                          f"(HTTP {result.stdout.decode(errors='replace')}, curl exit {result.returncode})")
 
 
 def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
