@@ -45,6 +45,8 @@ tests/sealed_inputs_test.py	tool	unit	invoked-by-suite	synthetic signed-index im
 tests/rootfs_measurement_test.py	tool	unit	invoked-by-suite	shipping-content purpose and raw-assembly split driven by image-route.bats
 tests/parity_noexec_test.py	tool	unit	invoked-by-suite	noexec X_OK syscall-denial parity regression driven by image-route.bats
 tests/bootstrap_metadata_test.py	tool	unit	invoked-by-suite	original bootstrap metadata authentication and validity driven by image-route.bats
+tests/capsule-producer.bats	bats	unit	default-bats	host package prefetch with throwaway TLS credentials and original archive signatures
+tests/capsule_producer_test.py	tool	unit	invoked-by-suite	local HTTPS capsule producer boundaries driven by capsule-producer.bats
 tests/manifest-schema.bats	bats	unit	default-bats	manifest/board/family schema validation
 tests/package-contract.bats	bats	unit	default-bats	package sets, staging classification, debug delta, kernel freeze
 tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators
