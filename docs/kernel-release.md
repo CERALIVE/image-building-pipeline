@@ -327,6 +327,14 @@ sequencing is in [`ota-activation.md`](ota-activation.md) and
 
 ## 7. Tests
 
+The separate unregistered `vm.py image` profile is documented in
+[offline image measurement](image-measurement.md). It uses a dedicated 128 GiB
+base, four vCPUs, 20 GiB RAM and no NIC. Its capsule/artifact protocol and
+signer-free purpose do not change this kernel lane's `run`/`check` defaults,
+public-source-only `--source-bundle`, JIT registration or release admission.
+Real image-profile VM execution remains unqualified until its owner-approved
+probe/cancellation check and measurement run.
+
 PR CI runs offline tests for this lane, through `tests/registry.tsv` and
 `./run-tests`. `tests/kernel-release-command.test.sh` drives the real command
 with stubbed build and transport boundaries, and `tests/kernel-bench-report.test.sh`

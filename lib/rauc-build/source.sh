@@ -18,6 +18,8 @@
 #                                  fetch/bsp.sh's Armbian transport does.
 #
 # shellcheck shell=bash
+# shellcheck source=lib/fetch/sealed.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/fetch/sealed.sh"
 
 # Bounded so a hung fetch cannot wedge a build host indefinitely. Self-contained
 # (not sourced from fetch/retry.sh) so this module has no dependency on the
@@ -36,7 +38,7 @@ rauc_fetch_upstream_tarball() {
     || die "rauc upstream pin has a malformed SHA-256: ${expected}"
   tmp="$(mktemp "${dest}.XXXXXX")"
   log_info "rauc-build: fetching upstream source ${url}"
-  if ! curl -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" "${url}"; then
+  if ! input_fetch "${url}" "${tmp}" -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}"; then
     rm -f "${tmp}"
     die "rauc-build: failed to download upstream tarball: ${url}"
   fi
@@ -128,13 +130,17 @@ rauc_fetch_debian_packaging() {
   local mirror="https://deb.debian.org/debian"
   local inrelease="${work}/InRelease" verified_release="${work}/Release"
   log_info "rauc-build: fetching ${mirror}/dists/${suite}/InRelease"
-  curl -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" -o "${inrelease}" \
-    "${mirror}/dists/${suite}/InRelease" \
+  input_fetch "${mirror}/dists/${suite}/InRelease" "${inrelease}" \
+    -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" \
     || die "rauc-build: failed to download ${suite} InRelease"
 
   auth_verify_release_to_file "${keyring}" "${inrelease}" "${verified_release}" \
       "${fingerprints[@]}" \
     || die "rauc-build: gpgv verification of ${suite} InRelease failed"
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    python3 "${SEALED_INPUT_TOOL}" valid-release "${verified_release}" 604800 \
+      || die "rauc-build: sealed Debian source metadata validity rejected"
+  fi
   log_success "rauc-build: ${suite} InRelease signature verified"
 
   local sources_path="${component}/source/Sources.xz" sources_digest
@@ -142,8 +148,8 @@ rauc_fetch_debian_packaging() {
     || die "rauc-build: verified ${suite} Release names no SHA256 for ${sources_path}"
 
   local sources_xz="${work}/Sources.xz" sources_plain="${work}/Sources"
-  curl -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" -o "${sources_xz}" \
-    "${mirror}/dists/${suite}/${sources_path}" \
+  input_fetch "${mirror}/dists/${suite}/${sources_path}" "${sources_xz}" \
+    -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" \
     || die "rauc-build: failed to download ${suite} ${sources_path}"
   index_verify_digest "${sources_xz}" "${sources_digest}" "${suite} ${sources_path}" \
     || die "rauc-build: ${suite} Sources index checksum mismatch — refusing an unverifiable index"
@@ -160,8 +166,8 @@ rauc_fetch_debian_packaging() {
     || die "rauc-build: verified Sources index carries a malformed SHA-256 for ${filename}"
 
   local tmp="${work}/${filename}"
-  curl -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" -o "${tmp}" \
-    "${mirror}/pool/main/r/rauc/${filename}" \
+  input_fetch "${mirror}/pool/main/r/rauc/${filename}" "${tmp}" \
+    -fsSL --retry 3 --retry-all-errors "${RAUC_CURL_TIMEOUT_OPTS[@]}" \
     || die "rauc-build: failed to download ${filename}"
   local actual; actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${digest}" ]] \

@@ -126,6 +126,14 @@ path, and builds a `.raucb` A/B OTA package. Both paths use `xz -T0 -6` and veri
 the decompressed bytes against the raw SHA-256. The `.raucb` is already
 squashfs-compressed and is not recompressed.
 
+The separate [offline rootfs measurement profile](docs/image-measurement.md)
+is [PARTIAL: real VM/build qualification pending]. It imports sealed inputs
+into a no-network disposable guest and uses `--rootfs-measurement` in
+production mode with the approved public device root. All content and real
+slot-reserve gates remain; signing and compression are omitted. Returned
+artifacts stay private and require an independent verifier. This route does
+not create a signed candidate or refresh the size baselines.
+
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
 trixie+ host. See [`docs/host-support.md`](docs/host-support.md) for the

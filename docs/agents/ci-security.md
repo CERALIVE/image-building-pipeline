@@ -18,6 +18,15 @@ test cannot read or enforce GitHub settings.
 
 ## Image builder admission
 
+The unregistered local [offline image measurement profile](../image-measurement.md)
+is a separate, owner-started path. It has no NIC, host shares, socket forwarding,
+runner registration or live credential proxy. It imports original signed
+metadata and prepared bytes, preserves logical APT provenance and records
+offline delivery separately. The packaged fleet `client-cf` credential remains
+intact and returned artifacts remain private; no host-key-exclusion claim is
+made. Its signer-free measurement purpose does not authorize a release,
+publication, credential operation or privileged workstation test.
+
 The organization group `image-builder` must have visibility **Selected
 repositories**, only `CERALIVE/image-building-pipeline`, **Allow public
 repositories** enabled, and workflow access **Selected workflows**, exactly:

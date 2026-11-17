@@ -22,6 +22,11 @@ slot_reserve_assert_ext4() {
     printf 'slot=%s field=bavail free=unreadable required=536870912 cannot read ext4 metadata\n' "${slot}" >&2
     return 1
   }
+  if [[ "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement ]]; then
+    : "${CERALIVE_RETAIN_SLOT_DIR:?measurement slot retention directory required}"
+    [[ "${slot}" == rootfs_a || "${slot}" == rootfs_b ]] || return 1
+    printf '%s\n' "${metadata}" >"${CERALIVE_RETAIN_SLOT_DIR}/${slot}.header"
+  fi
   # Linux v7.2 fs/ext4/super.c: ext4_statfs excludes r_blocks AND s_resv_clusters.
   # Fresh mkfs images have no dirty clusters. Extent reserve is min(blocks/50,4096)
   # on ordinary (non-bigalloc) ext4; reject other/unclean formats rather than guess.
@@ -46,5 +51,11 @@ slot_reserve_assert_ext4() {
   (( extent_reserve <= 4096 )) || extent_reserve=4096
   available_blocks=$(( free - reserved - extent_reserve ))
   (( available_blocks >= 0 )) || available_blocks=0
+  if [[ "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement ]]; then
+    local result rc=0
+    result="$(slot_reserve_assert_values "${slot}" "$((available_blocks * block_size))" "${total_inodes}" "${free_inodes}")" || rc=$?
+    printf '%s\n' "${result}" | tee "${CERALIVE_RETAIN_SLOT_DIR}/${slot}.reserve"
+    return "${rc}"
+  fi
   slot_reserve_assert_values "${slot}" "$((available_blocks * block_size))" "${total_inodes}" "${free_inodes}"
 }

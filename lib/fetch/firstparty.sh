@@ -281,12 +281,32 @@ fetch_first_party() {
     log_info "  ${r} = $(get_pin "${r}")"
   done
 
-  log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    log_info "first-party sealed import: original origin ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (signed metadata; offline delivery)"
+  else
+    log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
+  fi
   log_info "first-party packages: ${FIRST_PARTY_APT_PKGS[*]}"
   local -a download_specs=()
   mapfile -t download_specs < <(first_party_download_specs)
   log_info "first-party apt specs: ${download_specs[*]}"
   local -a staged_specs=("${download_specs[@]}")
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" && -z "${DRY_RUN}" ]]; then
+    sealed_repository firstparty "${debs}/.sealed-firstparty" || return 1
+    _FIRST_PARTY_INDEX="${_SEALED_INDEX}"
+    _SEALED_BASE="${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}"
+    _SEALED_DEBS="${debs}"
+    local spec all_ok
+    for spec in "${download_specs[@]}"; do
+      all_ok=""
+      first_party_arch_all_ok "${spec%%=*}" && all_ok=--arch-all-ok
+      sealed_stage_deb "${spec}" "${all_ok}" || return 1
+    done
+    printf '[]\n' >"${DEST}/first-party-local-override.json"
+    validate_first_party_staged_debs "${debs}" "${staged_specs[@]}"
+    bsp_fetch_kernel "${debs}"
+    return
+  fi
   if [[ -z "${DRY_RUN}" ]]; then
     if [[ -n "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]]; then
       first_party_local_overrides "${debs}" "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR}"
