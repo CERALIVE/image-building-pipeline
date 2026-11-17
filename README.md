@@ -133,6 +133,10 @@ production mode with the approved public device root. All content and real
 slot-reserve gates remain; signing and compression are omitted. Returned
 artifacts stay private and require an independent verifier. This route does
 not create a signed candidate or refresh the size baselines.
+Its host preparation command, `python3 ci/prepare-image-capsule.py`, fetches an
+explicit reviewed package closure with origin-scoped client certificate paths
+and preserves the original signed metadata. See the profile's preparation
+contract before authorizing any authenticated prefetch.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
