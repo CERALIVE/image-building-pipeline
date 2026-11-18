@@ -51,6 +51,7 @@ class Repository:
 class ReleaseValidity:
     date: datetime
     deadline: datetime | None
+    valid_until: datetime | None = None
 
 
 def inventory(directory: Path) -> dict:
@@ -169,19 +170,20 @@ def valid_release(path: Path, max_age: int, require_until: bool = True) -> Relea
     if date.tzinfo is None:
         raise SealedError("signed metadata Date has no timezone")
     debian = dates["Origin"] == ["Debian"]
-    if not dates["Valid-Until"] and (require_until or debian):
+    if not dates["Valid-Until"] and require_until:
         if debian and os.environ.get("CERALIVE_BUILD_PURPOSE") == "rootfs-measurement":
             return ReleaseValidity(date, None)
         raise SealedError("missing or ambiguous signed metadata validity")
     if not 0 <= (now - date).total_seconds() <= max_age:
         raise SealedError("signed metadata expired or future-dated")
     deadline = date + timedelta(seconds=max_age)
+    until = None
     if dates["Valid-Until"]:
         until = parsedate_to_datetime(dates["Valid-Until"][0])
         if until.tzinfo is None or until < now or until < date:
             raise SealedError("signed metadata Valid-Until expired")
         deadline = min(deadline, until)
-    return ReleaseValidity(date, deadline)
+    return ReleaseValidity(date, deadline, until)
 
 
 def mirror_validities(directory: Path) -> tuple[ReleaseValidity, ...]:

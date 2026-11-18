@@ -19,12 +19,12 @@ import sys
 import tarfile
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "ci/kernel-runner"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
-from image_policy import load_policy
+from image_policy import ArchivePolicy, load_policy
 from image_stream import Identity, StreamError, unique_object
 
+ROOT = Path(__file__).resolve().parents[1]
 SEALED = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
 INDEX_LIMIT = SEALED["INDEX_LIMIT"]
 
@@ -72,6 +72,42 @@ def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
     if result.returncode:
         raise StreamError("signed package lookup or control identity rejected")
     return result.stdout.strip()
+
+
+def transport_clients(args: argparse.Namespace, origins: set[str]) -> dict[str, tuple[str, str]]:
+    """Bind in-place client identities to independently approved exact origins."""
+    clients = {}
+    for origin, certificate, key in args.client_identity:
+        if origin not in origins or origin in clients:
+            raise StreamError("client identity requires one exact independently approved origin")
+        if any(not Path(path).is_absolute() for path in (certificate, key)):
+            raise StreamError("client certificate and key must be explicit absolute paths")
+        clients[origin] = (certificate, key)
+    if not 1 <= args.object_timeout <= 600:
+        raise StreamError("object timeout must be between 1 and 600 seconds")
+    return clients
+
+
+def metadata_base(name: str, repo: ArchivePolicy) -> str:
+    """Use the same exact distribution path for discovery and capsule preparation."""
+    base = repo.origin + "/dists/" + (repo.codename or repo.suite)
+    return base + "/binary-" + repo.arch if name == "firstparty" else base
+
+
+def copy_local(source: Path, target: Path, length: int) -> None:
+    """Snapshot only the reviewed number of bytes from a regular local input."""
+    if source.is_symlink() or not source.is_file() or source.stat().st_size != length:
+        raise StreamError("local input is not a regular file of the approved size")
+    with source.open("rb") as stream, target.open("xb") as output:
+        remaining = length
+        while remaining:
+            chunk = stream.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            output.write(chunk)
+            remaining -= len(chunk)
+        if remaining or stream.read(1):
+            raise StreamError("local input changed from its approved size")
 
 
 def prepare(args: argparse.Namespace) -> str:
@@ -141,9 +177,7 @@ def prepare(args: argparse.Namespace) -> str:
         if (set(record) != set(expected) | {"inrelease", "index"}
                 or any(record[key] != value for key, value in expected.items())):
             raise StreamError("repository differs from independently approved policy")
-        base = repo.origin + "/dists/" + (repo.codename or repo.suite)
-        if name == "firstparty":
-            base += "/binary-" + repo.arch
+        base = metadata_base(name, repo)
         bases[name] = base if name == "firstparty" else repo.origin
         for key, suffixes in (("inrelease", ("InRelease", "Release")),
                               ("index", (repo.index_path,))):
@@ -180,15 +214,7 @@ def prepare(args: argparse.Namespace) -> str:
            for digest, item in objects.items()):
         raise StreamError("undeclared network metadata")
 
-    clients = {}
-    for origin, certificate, key in args.client_identity:
-        if origin not in {repo.origin for repo in policy.repositories.values()} or origin in clients:
-            raise StreamError("client identity requires one exact independently approved origin")
-        if any(not Path(path).is_absolute() for path in (certificate, key)):
-            raise StreamError("client certificate and key must be explicit absolute paths")
-        clients[origin] = (certificate, key)
-    if not 1 <= args.object_timeout <= 600:
-        raise StreamError("object timeout must be between 1 and 600 seconds")
+    clients = transport_clients(args, {repo.origin for repo in policy.repositories.values()})
     destination = args.output
     if destination.exists() or destination.is_symlink():
         raise StreamError("capsule output already exists")
@@ -211,18 +237,7 @@ def prepare(args: argparse.Namespace) -> str:
                 source = Path(item["path"])
                 if not source.is_absolute():
                     source = args.inventory.parent / source
-                if source.is_symlink() or not source.is_file() or source.stat().st_size != item["length"]:
-                    raise StreamError("local input is not a regular file of the approved size")
-                with source.open("rb") as stream, target.open("xb") as output:
-                    remaining = item["length"]
-                    while remaining:
-                        chunk = stream.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        output.write(chunk)
-                        remaining -= len(chunk)
-                    if remaining or stream.read(1):
-                        raise StreamError("local input changed from its approved size")
+                copy_local(source, target, item["length"])
             else:
                 fetch(item["urls"][0], target, item["length"], clients.get(allowed[digest]),
                       args.ca_file, args.object_timeout, env)

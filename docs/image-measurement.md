@@ -166,6 +166,115 @@ bootstrap metadata, RAUC upstream/Debian source inputs and the recipe-pinned
 MediaMTX payload. The latter uses the existing checksum-checked local-tarball
 path inside the guest source mount.
 
+### Host metadata discovery [EXISTS: fixture-qualified]
+
+`python3 ci/discover-image-metadata.py` fills the identity gap before capsule
+preparation. It fetches only the original signed Release and compressed binary
+Packages index for each selected archive. It never fetches a `.deb`, solves
+dependencies, signs metadata, or nominates a trust anchor from downloaded bytes.
+An actual authenticated discovery run requires separate owner authorization.
+
+Supply two reviewed JSON files. `--selection` contains exactly a `packages`
+array, with each row containing `repository`, `name`, `version`, and exact
+`arch` (`arm64` or `all`). For example:
+
+```json
+{"packages":[{"repository":"firstparty","name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive8","arch":"arm64"}]}
+```
+
+For the measurement closure, include all 16 exact pins from
+`manifests/first-party-deb-versions.txt`, the released ceralive8 kernel, and the
+board's BSP pins. Resolve and review companion architectures explicitly; there
+is no architecture inference or version selection.
+
+The discovery `--trust-policy` contains exactly `schema: 1` and `repositories`.
+Its repository rows use the **same ArchivePolicy fields and parser** as the
+complete image public policy above: `origin`, `keyring` (public file SHA-256),
+`fingerprints`, `suite`, optional `codename`, `component`, `arch`, `index_path`,
+and `max_age_seconds`. Include exactly the repositories used by the selection.
+Image-root, builder and released-kernel object identities are unnecessary for
+this earlier step. Copy these independently approved repository policies into
+the eventual complete image public policy without changing them.
+
+Pass one `--keyring REPOSITORY PUBLIC_KEYRING_PATH` per repository. The command
+checks each bounded regular public-only export against its approved digest and
+exact primary fingerprint set **before any network request**. Obtaining and
+independently approving those public exports remains an owner prerequisite;
+discovery never searches host PKI directories or downloads keys. Do not pass
+client certificates, private keys or signing material as archive keyrings.
+
+The command reuses the capsule producer's exact GET implementation, origin
+binding, deadlines and distribution paths, and the importer's existing
+signature, Release identity, validity, index and bounded decompression
+validators. Default metadata names are `InRelease` and the policy's exact
+`index_path`. `--release-name REPOSITORY Release` explicitly selects an original
+signed `Release` accepted by the existing verifier. There is no fallback,
+detached `Release.gpg` request, format probing or redirect following. Only
+gzip/xz binary Packages indexes are supported. Signature/primary signer,
+Suite/Codename/component/architecture, Date/age, and any present Valid-Until
+must pass before the index request. First-party/BSP may omit Valid-Until but
+remain bounded by the approved age. Expired present Valid-Until always fails.
+
+The shared checksum reader authenticates both the index SHA256 and Size;
+duplicate checksum entries fail. The shared package lookup requires one
+unambiguous stanza with the exact selected version and architecture,
+Filename/Size/SHA256, and no duplicate fields. Missing versions, wrong
+architectures, unsafe paths, invalid sizes/digests and duplicate stanzas fail.
+No package URL is contacted, including a URL appearing in signed metadata.
+
+```sh
+umask 077
+mkdir -m 700 private-metadata
+python3 ci/discover-image-metadata.py \
+  --selection "${IMAGE_REVIEWED_PACKAGE_SELECTION:?}" \
+  --trust-policy "${IMAGE_APPROVED_ARCHIVE_POLICY:?}" \
+  --keyring firstparty "${IMAGE_PUBLIC_FIRSTPARTY_KEYRING:?}" \
+  --keyring bsp "${IMAGE_PUBLIC_BSP_KEYRING:?}" \
+  --client-identity https://apt.ceralive.tv \
+    "${APT_CLIENT_CERT_PATH:?absolute certificate path}" \
+    "${APT_CLIENT_KEY_PATH:?absolute key path}" \
+  --output private-metadata/discovered
+```
+
+The example assumes the selection contains firstparty and BSP packages. The
+same `--client-identity ORIGIN CERTIFICATE_PATH KEY_PATH`, optional `--ca-file`
+and `--object-timeout` transport rules documented below apply. Client identity
+paths and bytes never enter the output. Output must be new, below an owned
+private directory; failure removes temporary inputs and publishes no result.
+The output directory is mode 0700 and its files are mode 0600:
+
+- `inventory-fragment.json` contains exactly `packages`, `repositories`, and
+  `objects` in the producer's unchanged reviewed-input schema. Package rows
+  contain exactly `repository/name/version/arch/sha256`; their `deb` objects
+  contain the signed size as `length` and the canonical original URL. Repository
+  rows reference original Release/index digests. Public keyring objects have
+  local `path` entries pointing at the retained public exports.
+- `objects/<sha256>` preserves the original signed Release, compressed index,
+  and approved public keyring bytes. There are no package payload objects.
+- `discovery.json` records completion `fetched_at`, original signed Release and
+  index digests, signed `release_date` and `valid_until` (null when absent), and
+  each selected package's original `filename`, `length`, architecture, version,
+  SHA-256, logical origin and signed-index digest.
+
+Requests and rows are sorted by repository/package identity and object digest;
+JSON uses canonical key ordering. Reordering the selection changes neither the
+selected identities nor request order. Actual fetch times, original signed bytes
+and the chosen output path remain recorded facts, not normalized constants.
+Success prints only the fragment's SHA-256. The receipt is provenance rather
+than a new signature.
+
+Review the fragment and original metadata before merging its three sections
+into the complete reviewed inventory: match packages by
+`repository/name/arch`, repositories by name, and objects by SHA-256. Reject
+conflicting existing identities rather than keeping duplicate rows. Preserve
+the retained keyring paths, all unrelated closure objects, and the complete
+inventory's source/board/root fields. Keep `discovery.json` beside the review
+evidence; its extra fields do not belong in the producer's inventory.
+The producer intentionally fetches metadata again from the exact approved URLs
+and requires these reviewed hashes and sizes; upstream changes fail instead of
+silently selecting newer bytes. Discovery does not authorize that payload-fetch
+operation or prove that the submitted dependency closure is complete.
+
 ### Host package capsule preparation [EXISTS: fixture-qualified]
 
 `python3 ci/prepare-image-capsule.py` supplies the host-side producer. Running
