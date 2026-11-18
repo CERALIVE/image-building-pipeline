@@ -11,6 +11,7 @@ ARTIFACT_DIR="${REPO_ROOT}/test-results/flows/apt"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fetch-debs-apt-chain.XXXXXX")"
 FAKE_BIN="${RUN_DIR}/bin"
 FAKE_CURL_BIN="${RUN_DIR}/curl-bin"
+FAKE_CURL_LOG="${RUN_DIR}/curl-argv.log"
 FAKE_APT_LOG="${RUN_DIR}/apt-get.log"
 FAKE_CHMOD_LOG="${RUN_DIR}/chmod.log"
 RESULTS_LOG="${ARTIFACT_DIR}/fetch-debs-apt-chain.log"
@@ -85,6 +86,7 @@ cat >"${FAKE_CURL_BIN}/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+printf '%s\n' "$*" >>"${FAKE_CURL_LOG:-/dev/null}"
 out=""
 url=""
 while [[ $# -gt 0 ]]; do
@@ -93,7 +95,7 @@ while [[ $# -gt 0 ]]; do
 			out="$2"
 			shift 2
 			;;
-		--cert|--key|--retry|--connect-timeout|--max-time)
+		--cert|--key|--retry|--connect-timeout|--max-time|--max-redirs|--proto)
 			shift 2
 			;;
 		-*)
@@ -246,6 +248,7 @@ run_fetch_first_party_curl() {
 		DEST="${FETCH_OUT}" \
 		FAKE_REPO_DIR="${repo}" \
 		FAKE_CHMOD_LOG="${FAKE_CHMOD_LOG}" \
+		FAKE_CURL_LOG="${FAKE_CURL_LOG}" \
 		FETCH_DEBS_FIRST_PARTY_TRANSPORT=curl \
 		CERALIVE_DEBCACHE_DIR="${cache_dir}" \
 		CERALIVE_REMOTE_CACHE=0 \
@@ -334,6 +337,23 @@ if find "${curl_dest}" -maxdepth 1 -name '*.deb' ! -perm 0644 -print -quit | gre
 	exit 1
 fi
 printf 'PASS valid-curl-fallback-stages-first-party-debs\n' | tee -a "${RESULTS_LOG}"
+# The client certificate must never be offered to a redirect target: every
+# credentialed request is no-redirect, HTTPS-only. Count them so a missing
+# credentialed call cannot satisfy the check vacuously.
+credentialed_calls="$(grep -c -e '--cert' "${FAKE_CURL_LOG}" || true)"
+if [[ "${credentialed_calls}" -lt 3 ]]; then
+	printf 'FAIL credentialed-curl-never-follows-redirects: saw %s credentialed calls, expected at least 3\n' "${credentialed_calls}" | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
+if grep -e '--cert' "${FAKE_CURL_LOG}" | grep -Eq -e '(^| )(-[a-zA-Z]*L[a-zA-Z]*|--location)( |$)'; then
+	printf 'FAIL credentialed-curl-never-follows-redirects: a credentialed curl call follows redirects\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
+if grep -e '--cert' "${FAKE_CURL_LOG}" | grep -v -q -e "--proto =https --max-redirs 0"; then
+	printf 'FAIL credentialed-curl-never-follows-redirects: a credentialed call lacks --proto =https --max-redirs 0\n' | tee -a "${RESULTS_LOG}"
+	exit 1
+fi
+printf 'PASS credentialed-curl-never-follows-redirects\n' | tee -a "${RESULTS_LOG}"
 
 native_mode_failure_dest="${RUN_DIR}/native-package-mode-failure/debs"
 mkdir -p "${native_mode_failure_dest}"
