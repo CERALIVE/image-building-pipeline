@@ -264,22 +264,32 @@ complete-input gzip/xz decoder verifies every concatenated stream, including a
 corrupt later xz stream, before any source lookup. No source payload is retained
 or fetched.
 
-```sh
+In interactive Bash, collect the two absolute paths once. Keep these shell
+variables unexported and tracing disabled for both examples:
+
+```bash
+set +x
+set +a
+unset cert_path key_path
+IFS= read -rsp 'Client certificate path: ' cert_path; printf '\n'
+IFS= read -rsp 'Client key path: ' key_path; printf '\n'
+```
+
+```bash
 umask 077
 mkdir -m 700 private-metadata
+builtin printf '%s\0' "$cert_path" "$key_path" |
 python3 ci/discover-image-metadata.py \
   --selection "${IMAGE_REVIEWED_PACKAGE_SELECTION:?}" \
   --trust-policy "${IMAGE_APPROVED_ARCHIVE_POLICY:?}" \
   --keyring firstparty "${IMAGE_PUBLIC_FIRSTPARTY_KEYRING:?}" \
   --keyring bsp "${IMAGE_PUBLIC_BSP_KEYRING:?}" \
   --client-identity https://apt.ceralive.tv \
-    "${APT_CLIENT_CERT_PATH:?absolute certificate path}" \
-    "${APT_CLIENT_KEY_PATH:?absolute key path}" \
   --output private-metadata/discovered
 ```
 
 The example assumes the selection contains firstparty and BSP packages. The
-same `--client-identity ORIGIN CERTIFICATE_PATH KEY_PATH`, optional `--ca-file`
+same `--client-identity ORIGIN`, optional `--ca-file`
 and `--object-timeout` transport rules documented below apply. Client identity
 paths and bytes never enter the output. Output must be new, below an owned
 private directory; failure removes temporary inputs and publishes no result.
@@ -396,36 +406,49 @@ a rootfs, executed from packages or re-signed.
 
 Create a private output directory and invoke one board at a time:
 
-```sh
+```bash
 umask 077
 mkdir -m 700 private-capsules
+builtin printf '%s\0' "$cert_path" "$key_path" |
 python3 ci/prepare-image-capsule.py \
   --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
   --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
   --client-identity https://apt.ceralive.tv \
-    "${APT_CLIENT_CERT_PATH:?absolute certificate path}" \
-    "${APT_CLIENT_KEY_PATH:?absolute key path}" \
   --output private-capsules/rock-5b-plus.tar
 ```
 
-`--client-identity ORIGIN CERTIFICATE_PATH KEY_PATH` may repeat for distinct
-exact approved policy origins. Only paths reach curl's arguments; credentials
-are used in place and are never copied into the capsule. A client identity
+`--client-identity ORIGIN` may repeat for distinct exact approved origins.
+Supply two NUL-terminated absolute paths (certificate, then key) per origin,
+in option order, on a stdin pipe. Close the pipe after the last pair. The old
+path arguments are no longer accepted. The Bash builtin above keeps paths
+out of process arguments and the environment. Unset both variables when done.
+For each credentialed GET, the transport sends quoted `cert` and `key` config
+lines through a fresh pipe to `curl -K -`. Curl opens the files in place.
+Neither command writes a config file or includes the paths in logs, receipts
+or capsule contents. A client identity
 cannot authorize another origin. Normal system CA and hostname validation
 apply; `--ca-file` selects an explicit public CA bundle when required.
 Ambient curl configuration, proxies and credential environment are excluded.
-Transfers have no terminal or stdin for key-password prompts; a key requiring
+Transfers have no terminal or interactive stdin for key-password prompts; a key requiring
 interactive unlocking fails closed.
 By default each transfer is one GET, without redirects or retries. With a
 nonzero BSP policy allowance, the same transport follows 301/302/303/307/308
 manually, one GET per hop, always using `curl --max-redirs 0`, never `curl -L`.
 Each Location is resolved relative to the current URL and validated before
-contact: HTTPS only, no userinfo (including empty userinfo), explicit port,
+contact: HTTPS only, no userinfo (including empty userinfo), non-default port,
 query, fragment, encoded separator or traversal. Its path must still end in
 the logical object's path; a mirror may prepend `/armbian/apt/`, for example.
 Missing or duplicate Location, loops, an excessive hop count and downgrades
 fail closed. No client identity, credentials, cookies or authorization headers
 are forwarded to any hop of an allowed redirected transfer.
+Every BSP GET, including the initial request to `apt.armbian.com` with a zero
+redirect allowance, requires a DNS hostname and port 443. IP literals are
+rejected. The transport resolves the host once, checks every answer for public
+unicast reachability, then pins the first vetted address with `curl --resolve`.
+TLS still verifies the URL hostname. A failed lookup, a mixed public/private
+answer, or any loopback, private, link-local, carrier-grade NAT, unique-local,
+multicast, unspecified or reserved address rejects the hop before connection.
+IPv4-mapped IPv6 answers undergo the same IPv4 checks.
 TLS failure, unexpected status, mismatched bytes or timeout reject the attempt.
 A failed transfer names the object SHA-256 (or discovery's metadata object
 name), its current validated URL, the HTTP status (000 when

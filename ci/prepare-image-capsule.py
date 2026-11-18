@@ -9,16 +9,20 @@ from datetime import datetime, timezone
 from email.parser import BytesParser
 import hashlib
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import resource
 import runpy
+import socket
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from urllib.parse import urljoin, urlsplit
 
@@ -44,10 +48,59 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(), object_pairs_hook=unique_object)
 
 
+def bsp_pin(url: str, target: Path, seconds: float) -> str:
+    """Resolve once under the object deadline. Never give curl an unvetted answer."""
+    rejected = f"BSP hop rejected for object {target.name}"
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if not host:
+        raise StreamError(f"{rejected}: missing DNS host")
+    try:
+        socket.inet_aton(host)  # Includes legacy numeric IPv4 spellings accepted by curl.
+    except OSError:
+        pass
+    else:
+        raise StreamError(f"{rejected}: IP literal")
+    if ":" in host:
+        raise StreamError(f"{rejected}: IP literal")
+    if (not parsed.netloc.isascii() or parsed.netloc.lower() != host or len(host) > 253
+            or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                  for label in host.split(".")) or host.split(".")[-1] == "localhost"):
+        raise StreamError(f"{rejected}: invalid DNS host")
+    answers = []
+
+    def resolve() -> None:
+        try:
+            answers.extend(socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM))
+        except OSError:
+            pass  # An empty answer fails closed below.
+
+    # libc getaddrinfo has no timeout. A stalled resolver must not hold the CLI open.
+    resolver = threading.Thread(target=resolve, daemon=True)
+    resolver.start()
+    resolver.join(min(10, seconds))
+    if resolver.is_alive():
+        raise StreamError(f"{rejected}: DNS timeout")
+    if not answers:
+        raise StreamError(f"{rejected}: no DNS addresses")
+    pins = []
+    for family, _, _, _, address in answers:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            raise StreamError(f"{rejected}: unsupported address family")
+        ip = ipaddress.ip_address(address[0])
+        if isinstance(ip, ipaddress.IPv6Address):
+            ip = ip.ipv4_mapped or ip
+        if (not ip.is_global or ip.is_multicast or ip.is_reserved
+                or isinstance(ip, ipaddress.IPv6Address) and (ip.is_site_local or ip.sixtofour or ip.teredo)):
+            raise StreamError(f"{rejected}: non-public address")
+        pins.append(f"[{ip}]" if ip.version == 6 else str(ip))
+    return f"{host}:443:{pins[0]}"
+
+
 def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
-          ca_file: str | None, seconds: int, env: dict[str, str], max_redirects: int = 0) -> dict:
+          ca_file: str | None, seconds: int, env: dict[str, str], repository: str, max_redirects: int) -> dict:
     """Bounded manual HTTPS GETs; redirects never carry a client identity."""
-    if max_redirects and client:
+    if max_redirects and (client or repository != "bsp"):
         raise StreamError("invalid archive redirect policy for a client identity")
     current = original_url(url)
     logical_path = urlsplit(current).path
@@ -55,22 +108,42 @@ def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
     redirects = []
     deadline = time.monotonic() + seconds
     while True:
-        remaining = deadline - time.monotonic() if max_redirects else seconds
+        remaining = deadline - time.monotonic() if repository == "bsp" else seconds
         if remaining <= 0:
             raise StreamError(f"object timeout for object {target.name} at {current}")
+        connect_time = min(10, remaining)
+        pin = None
+        if repository == "bsp":
+            connect_deadline = deadline - remaining + connect_time
+            pin = bsp_pin(current, target, remaining)
+            now = time.monotonic()
+            remaining = deadline - now
+            connect_time = connect_deadline - now
+            if connect_time <= 0:
+                raise StreamError(f"object timeout for object {target.name} after DNS")
         args = ["curl", "--disable", "--silent", "--fail", "--globoff", "--noproxy", "*",
                 "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0",
-                "--connect-timeout", str(min(10, remaining)), "--max-time", str(remaining),
+                "--connect-timeout", str(connect_time), "--max-time", str(remaining),
                 "--max-filesize", str(length), "--output", str(target),
                 "--write-out", "%{http_code}"]
+        if pin:
+            args += ["--resolve", pin]
+        config = None
         if client:
-            args += ["--cert", client[0], "--key", client[1]]
+            # --cert parses filename[:password] after curl parses the config.
+            cert = client[0].replace("\\", "\\\\").replace(":", "\\:")
+            escapes = str.maketrans({"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r",
+                                     "\t": "\\t", "\v": "\\v"})
+            config = os.fsencode(f'cert = "{cert.translate(escapes)}"\n'
+                                 f'key = "{client[1].translate(escapes)}"\n')
+            args += ["-K", "-"]
         if ca_file:
             args += ["--cacert", ca_file]
         if max_redirects:
             # Raw Location preserves forbidden spellings that curl may normalize away.
             args += ["--dump-header", "-"]
-        result = subprocess.run(args + ["--url", current], env=env, stdin=subprocess.DEVNULL,
+        result = subprocess.run(args + ["--url", current], env=env, input=config,
+                                stdin=None if client else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=remaining + 5, start_new_session=True,
                                 preexec_fn=lambda: child_limit(length))
@@ -96,7 +169,15 @@ def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
         try:
             if any(char.isspace() or ord(char) < 32 for char in location):
                 raise StreamError("invalid sealed origin URL")
-            destination = original_url(urljoin(current, location))
+            joined = urljoin(current, location)
+            hop = urlsplit(joined)
+            if hop.port is not None:
+                if hop.port != 443:
+                    raise StreamError("BSP hop rejected: non-default port")
+                joined = hop._replace(netloc=hop.netloc.rsplit(":", 1)[0]).geturl()
+            destination = original_url(joined)
+        except ValueError:
+            raise StreamError(f"invalid BSP hop authority for object {target.name}") from None
         except StreamError as exc:
             raise StreamError(f"{exc} for object {target.name} at {current}") from exc
         parsed = urlsplit(destination)
@@ -123,13 +204,21 @@ def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
 
 def transport_clients(args: argparse.Namespace, origins: set[str]) -> dict[str, tuple[str, str]]:
     """Bind in-place client identities to independently approved exact origins."""
+    names = args.client_identity
     clients = {}
-    for origin, certificate, key in args.client_identity:
-        if origin not in origins or origin in clients:
-            raise StreamError("client identity requires one exact independently approved origin")
-        if any(not Path(path).is_absolute() for path in (certificate, key)):
-            raise StreamError("client certificate and key must be explicit absolute paths")
-        clients[origin] = (certificate, key)
+    if set(names) - origins or len(set(names)) != len(names):
+        raise StreamError("client identity requires one exact independently approved origin")
+    if names:
+        if not stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode):
+            raise StreamError("client identity paths require a stdin pipe")
+        limit = 2 * 4096 * len(names)
+        data = sys.stdin.buffer.read(limit + 1)
+        paths = data.split(b"\0")
+        if (len(data) > limit or len(paths) != 2 * len(names) + 1 or paths[-1]
+                or any(not path.startswith(b"/") or len(path) >= 4096 for path in paths[:-1])):
+            raise StreamError("expected NUL-terminated absolute certificate and key paths on stdin")
+        for index, origin in enumerate(names):
+            clients[origin] = os.fsdecode(paths[2 * index]), os.fsdecode(paths[2 * index + 1])
     if not 1 <= args.object_timeout <= 600:
         raise StreamError("object timeout must be between 1 and 600 seconds")
     return clients
@@ -158,7 +247,7 @@ def copy_local(source: Path, target: Path, length: int) -> None:
 
 
 def prepare(args: argparse.Namespace) -> str:
-    policy = load_policy(args.trust_policy, {origin for origin, _cert, _key in args.client_identity})
+    policy = load_policy(args.trust_policy, set(args.client_identity))
     reviewed = read_json(args.inventory)
     if set(reviewed) != {"schema", "source_commit", "epoch", "board", "source_bundle",
                          "device_root", "objects", "repositories", "packages"}:
@@ -237,7 +326,7 @@ def prepare(args: argparse.Namespace) -> str:
                     or objects[digest]["urls"][0] not in
                     {original_url(base + "/" + suffix) for suffix in suffixes}):
                 raise StreamError("metadata URL is outside the exact approved repository objects")
-            allowed[digest] = repo
+            allowed[digest] = name
         if objects[record["inrelease"]]["length"] > 16 * 1024**2:
             raise StreamError("signed Release metadata exceeds the 16 MiB bound")
 
@@ -289,9 +378,10 @@ def prepare(args: argparse.Namespace) -> str:
                     source = args.inventory.parent / source
                 copy_local(source, target, item["length"])
             else:
-                repo = allowed[digest]
+                name = allowed[digest]
+                repo = policy.repositories[name]
                 transfer = fetch(item["urls"][0], target, item["length"], clients.get(repo.origin),
-                                 args.ca_file, args.object_timeout, env, repo.max_redirects)
+                                 args.ca_file, args.object_timeout, env, name, repo.max_redirects)
                 if transfer:
                     transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
@@ -336,7 +426,7 @@ def prepare(args: argparse.Namespace) -> str:
                 raise StreamError("reviewed package differs from original signed index")
             target = data / digest
             transfer = fetch(url, target, item["length"], clients.get(repo.origin),
-                             args.ca_file, args.object_timeout, env, repo.max_redirects)
+                             args.ca_file, args.object_timeout, env, package["repository"], repo.max_redirects)
             if transfer:
                 transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
@@ -383,13 +473,19 @@ def prepare(args: argparse.Namespace) -> str:
         return digest
 
 
+class TransportParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        # Legacy invocations may have supplied credential paths as extra arguments.
+        super().error("invalid arguments (see --help)")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = TransportParser(description=__doc__)
     parser.add_argument("--inventory", required=True, type=Path)
     parser.add_argument("--trust-policy", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--client-identity", nargs=3, action="append", default=[],
-                        metavar=("ORIGIN", "CERTIFICATE_PATH", "KEY_PATH"))
+    parser.add_argument("--client-identity", action="append", default=[], metavar="ORIGIN",
+                        help="read the NUL-terminated certificate and key paths from a stdin pipe")
     parser.add_argument("--ca-file", help="explicit public HTTPS CA bundle; defaults to system trust")
     parser.add_argument("--object-timeout", type=int, default=120)
     args = parser.parse_args()

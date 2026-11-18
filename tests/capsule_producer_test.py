@@ -20,8 +20,10 @@ import sys
 import tarfile
 import tempfile
 import threading
+from functools import partial
 from unittest.mock import patch
 
+from capsule_transport_fixture import IDENTITY, PUBLIC, PUBLIC_V6, fixture_dns
 from sealed_inputs_test import deb
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -239,14 +241,18 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
         thread.start()
         bin_dir = work / "bin"
         bin_dir.mkdir()
-        # Route ALL curl connections to this fixture, including a regressed redirect.
-        # This changes the socket destination, never the TLS hostname or CA checks.
+        (work / IDENTITY).mkdir()
+        for filename in ("client.pem", "client.key"):
+            (work / IDENTITY / filename).symlink_to(work / filename)
+        (work / "dns.json").write_text(json.dumps({"repo.example": [PUBLIC], "apt.armbian.com": [PUBLIC],
+                                                   "mirror-a.example": [PUBLIC_V6], "mirror-b.example": [PUBLIC]}))
         curl = bin_dir / "curl"
-        curl.write_text("#!/usr/bin/env python3\nimport os, sys\n"
+        curl.write_text("#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n"
+                        f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
+                        "from capsule_transport_fixture import local_curl\n"
                         f"fd = os.open({str(work / 'curl-fixture.stderr')!r}, "
                         "os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\nos.dup2(fd, 2)\n"
-                        f"os.execv({shutil.which('curl')!r}, [{shutil.which('curl')!r}, '--disable', "
-                        f"'--connect-to', '::127.0.0.1:{server.server_port}', *sys.argv[1:]])\n")
+                        f"local_curl(Path({str(work)!r}), {shutil.which('curl')!r}, {server.server_port})\n")
         curl.chmod(0o700)
         inventory_path = work / "reviewed.json"
         policy_path = work / "policy.json"
@@ -254,8 +260,7 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
         policy_path.write_text(json.dumps(policy))
         args = ["python3", str(ROOT / "ci/prepare-image-capsule.py"), "--inventory", str(inventory_path),
                 "--trust-policy", str(policy_path), "--output", str(work / "capsule.tar"),
-                "--client-identity", "https://apt.ceralive.tv", str(work / "client.pem"),
-                str(work / "client.key"), "--ca-file", str(work / "ca.pem"),
+                "--client-identity", "https://apt.ceralive.tv", "--ca-file", str(work / "ca.pem"),
                 "--object-timeout", "1" if case in ("timeout", "bsp-timeout") else "10"]
         env = {"PATH": str(bin_dir) + ":" + os.environ["PATH"], "HOME": str(work), "TMPDIR": temporary,
                "PYTHONDONTWRITEBYTECODE": "1"}
@@ -270,7 +275,12 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
 
 
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=45)
+    work = Path(env["TMPDIR"])
+    if args[0] == "python3":
+        args = [args[0], str(ROOT / "tests/capsule_transport_fixture.py"), *args[1:]]
+    paths = "".join(str(work / IDENTITY / name) + "\0" for name in ("client.pem", "client.key"))
+    return subprocess.run(args, env=env, input=paths * args.count("--client-identity"),
+                          capture_output=True, text=True, timeout=45)
 
 
 def approve_redirects(work: Path, reviewed: dict, maximum: int = 3, name: str = "bsp") -> None:
@@ -382,6 +392,45 @@ def test_bsp_redirect_rejections_leave_no_capsule_or_target_request() -> None:
             assert not list(work.glob(".prefetch-*")), case
 
 
+def test_bsp_rejects_non_public_hops_before_connecting() -> None:
+    redirects = {}
+    with fixture("bsp", redirects=redirects) as (work, reviewed, args, env, requests, _remote):
+        approve_redirects(work, reviewed)
+        url = next(url for url in bsp_urls(reviewed) if url.endswith("Packages.gz"))
+        digest = next(row["sha256"] for row in reviewed["objects"] if row["urls"] == [url])
+        dns = json.loads((work / "dns.json").read_text())
+        bad_answers = ("10.0.0.1", "192.168.1.1", "172.16.0.1", "127.0.0.1", "169.254.1.1",
+                       "100.64.1.1", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1",
+                       "224.0.0.1", "ff02::1", "0.0.0.0", "::", "240.0.0.1", "2001:db8::1")
+        cases = [("mirror-a.example", [ip], "non-public address") for ip in bad_answers]
+        cases += [("mirror-a.example", [PUBLIC, "10.0.0.1"], "non-public address"),
+                  ("mirror-a.example", [], "no DNS addresses"),
+                  ("127.0.0.1:8443", [], "non-default port"),
+                  ("mirror-a.example:8443", [PUBLIC], "non-default port"),
+                  ("93.184.216.34", [], "IP literal"), ("127.0.0.1", [], "IP literal"),
+                  ("[::1]", [], "IP literal")]
+        for authority, addresses, reason in cases:
+            dns["mirror-a.example"] = addresses
+            (work / "dns.json").write_text(json.dumps(dns))
+            redirects[url] = (302, mirror_url(url, authority))
+            requests.clear()
+
+            result = run(args, env)
+
+            assert result.returncode != 0 and digest in result.stderr and reason in result.stderr, result.stderr
+            assert requests[-1] == (url, False)
+            assert all(request != redirects[url][1] for request, _ in requests)
+            assert not (work / "capsule.tar").exists()
+        # A zero allowance still guards the initial apt.armbian.com connection.
+        approve_redirects(work, reviewed, 0)
+        dns["apt.armbian.com"] = [PUBLIC, "::1"]
+        (work / "dns.json").write_text(json.dumps(dns))
+        requests.clear()
+        result = run(args, env)
+        assert result.returncode != 0 and digest in result.stderr and "non-public address" in result.stderr, result.stderr
+        assert all(request != url for request, _ in requests)
+
+
 def test_firstparty_redirect_never_presents_client_identity_to_target() -> None:
     for credentialed in (True, False):
         redirects = {}
@@ -392,7 +441,7 @@ def test_firstparty_redirect_never_presents_client_identity_to_target() -> None:
             redirects[url] = (302, target)
             if not credentialed:
                 index = args.index("--client-identity")
-                del args[index:index + 4]
+                del args[index:index + 2]
 
             result = run(args, env)
 
@@ -412,8 +461,7 @@ def test_redirect_policy_rejects_invalid_or_credentialed_allowances_before_reque
         with fixture("bsp") as (work, reviewed, args, env, requests, _remote):
             approve_redirects(work, reviewed, maximum, name)
             if identity:
-                args += ["--client-identity", "https://apt.armbian.com",
-                         str(work / "client.pem"), str(work / "client.key")]
+                args += ["--client-identity", "https://apt.armbian.com"]
 
             result = run(args, env)
 
@@ -533,10 +581,13 @@ def test_redirect_hops_share_one_object_deadline() -> None:
         row = next(row for row in reviewed["objects"] if row["urls"] == [url])
         producer = runpy.run_path(str(ROOT / "ci/prepare-image-capsule.py"))
 
-        with patch("time.monotonic", side_effect=[0, 0, 9, 11]):
+        # The first GET finishes in time, but the deadline expires before the next GET.
+        after_response = iter((9, 11))
+        with patch("socket.getaddrinfo", partial(fixture_dns, work)), \
+                patch("time.monotonic", side_effect=lambda: next(after_response, 11) if requests else 0):
             try:
                 producer["fetch"](url, work / row["sha256"], row["length"], None,
-                                  str(work / "ca.pem"), 10, env, 3)
+                                  str(work / "ca.pem"), 10, env, "bsp", 3)
             except producer["StreamError"] as error:
                 assert "object timeout" in str(error), str(error)
             else:
@@ -685,6 +736,11 @@ def test_cli_seals_original_bytes_and_importer_accepts_authenticated_closure() -
         original = (work / "capsule.tar").read_bytes()
         assert (work / "client.key").read_bytes() not in original
         assert (work / "client.pem").read_bytes() not in original
+        for name in ("client.pem", "client.key"):
+            path = str(work / IDENTITY / name)
+            assert os.fsencode(path) not in original
+            assert json.dumps(path)[1:-1].encode() not in original
+            assert path not in result.stdout + result.stderr + (work / "curl-fixture.stderr").read_text()
         assert run(args, env).returncode != 0
         assert (work / "capsule.tar").read_bytes() == original
 
@@ -734,6 +790,8 @@ def test_missing_remote_object_is_named_and_leaves_no_capsule_or_partial_files()
         assert (missing["urls"][0], True) in requests
         assert str(work / "client.pem") not in result.stderr
         assert str(work / "client.key") not in result.stderr
+        for name in ("client.pem", "client.key"):
+            assert str(work / IDENTITY / name) not in result.stdout + result.stderr
         # No capsule, partial download, staged archive or temporary directory survives.
         assert list(private.iterdir()) == []
 
@@ -777,7 +835,7 @@ def test_unapproved_objects_and_client_origins_are_rejected_before_requests() ->
 def test_mtls_is_required_without_using_any_host_identity() -> None:
     with fixture() as (work, _reviewed, args, env, requests, _remote):
         index = args.index("--client-identity")
-        del args[index:index + 4]
+        del args[index:index + 2]
         result = run(args, env)
         assert result.returncode != 0
         assert requests == [("https://apt.ceralive.tv/dists/stable/binary-arm64/Packages.gz", False)]

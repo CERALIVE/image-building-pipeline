@@ -33,8 +33,7 @@ def discover(args: argparse.Namespace) -> str:
     if (set(approved) != {"schema", "repositories"} or type(approved["schema"]) is not int
             or approved["schema"] != 1):
         raise StreamError("expected independently approved schema-1 archive policy")
-    policies = archive_policies(approved["repositories"],
-                               {origin for origin, _cert, _key in args.client_identity})
+    policies = archive_policies(approved["repositories"], set(args.client_identity))
     if any(Path(repo.index_path).name not in (
             ("Packages.gz", "Packages.xz", "Sources.gz", "Sources.xz") if name == "debian-source"
             else ("Packages.gz", "Packages.xz")) for name, repo in policies.items()):
@@ -132,7 +131,7 @@ def discover(args: argparse.Namespace) -> str:
             release = work / "Release"
             release_transfer = PRODUCER["fetch"](
                 release_url, signed, 16 * 1024**2, clients.get(repo.origin),
-                args.ca_file, args.object_timeout, env, repo.max_redirects)
+                args.ca_file, args.object_timeout, env, name, repo.max_redirects)
             PRODUCER["shell"](
                 'source "$1/lib/fetch-debs-auth.sh"; '
                 'auth_verify_release_to_file "$2" "$3" "$4" "${@:9}"; '
@@ -151,7 +150,7 @@ def discover(args: argparse.Namespace) -> str:
             compressed = work / "compressed"
             index_transfer = PRODUCER["fetch"](
                 index_url, compressed, length, clients.get(repo.origin),
-                args.ca_file, args.object_timeout, env, repo.max_redirects)
+                args.ca_file, args.object_timeout, env, name, repo.max_redirects)
             PRODUCER["shell"](
                 'source "$1/lib/fetch/index.sh"; log_error() { printf "%s\\n" "$*" >&2; }; '
                 'index_verify_digest "$2" "$3" discovery',
@@ -234,14 +233,14 @@ def discover(args: argparse.Namespace) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = PRODUCER["TransportParser"](description=__doc__)
     parser.add_argument("--selection", required=True, type=Path)
     parser.add_argument("--trust-policy", required=True, type=Path)
     parser.add_argument("--keyring", nargs=2, action="append", default=[], metavar=("REPOSITORY", "PUBLIC_KEYRING_PATH"))
     parser.add_argument("--release-name", nargs=2, action="append", default=[], metavar=("REPOSITORY", "NAME"))
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--client-identity", nargs=3, action="append", default=[],
-                        metavar=("ORIGIN", "CERTIFICATE_PATH", "KEY_PATH"))
+    parser.add_argument("--client-identity", action="append", default=[], metavar="ORIGIN",
+                        help="read the NUL-terminated certificate and key paths from a stdin pipe")
     parser.add_argument("--ca-file", help="explicit public HTTPS CA bundle; defaults to system trust")
     parser.add_argument("--object-timeout", type=int, default=120)
     args = parser.parse_args()
