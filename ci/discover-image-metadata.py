@@ -19,6 +19,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, digest_file, object_id, original_url
 from image_policy import archive_policies
+from image_sources import source_files, source_selections
 from image_stream import StreamError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,15 +34,21 @@ def discover(args: argparse.Namespace) -> str:
             or approved["schema"] != 1):
         raise StreamError("expected independently approved schema-1 archive policy")
     policies = archive_policies(approved["repositories"])
-    if any(Path(repo.index_path).name not in ("Packages.gz", "Packages.xz") for repo in policies.values()):
+    if any(Path(repo.index_path).name not in (
+            ("Packages.gz", "Packages.xz", "Sources.gz", "Sources.xz") if name == "debian-source"
+            else ("Packages.gz", "Packages.xz")) for name, repo in policies.items()):
         raise StreamError("discovery requires an exact gzip/xz binary Packages index")
-    if (set(reviewed) != {"packages"} or type(reviewed["packages"]) is not list
-            or not 0 < len(reviewed["packages"]) < 19999):
+    if (not reviewed or set(reviewed) - {"packages", "sources"}
+            or any(type(rows) is not list for rows in reviewed.values())
+            or not 0 < sum(len(rows) for rows in reviewed.values()) < 19999):
         raise StreamError("expected a finite reviewed exact package selection")
+    sources = source_selections(reviewed.get("sources", []), policies)
+    reviewed_packages = reviewed.get("packages", [])
     identities = set()
-    for package in reviewed["packages"]:
+    for package in reviewed_packages:
         if (set(package) != {"repository", "name", "version", "arch"}
                 or package["repository"] not in policies
+                or Path(policies[package["repository"]].index_path).name not in ("Packages.gz", "Packages.xz")
                 or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package["name"])
                 or not re.fullmatch(r"[A-Za-z0-9.+:~_-]+", package["version"])
                 or package["arch"] not in ("arm64", "all")):
@@ -50,7 +57,8 @@ def discover(args: argparse.Namespace) -> str:
         if identity in identities:
             raise StreamError("duplicate reviewed package selection")
         identities.add(identity)
-    if {row["repository"] for row in reviewed["packages"]} != set(policies):
+    if ({row["repository"] for row in reviewed_packages} | {source.repository for source in sources}
+            != set(policies)):
         raise StreamError("each approved discovery repository requires selected packages")
     keyrings = {}
     for name, path in args.keyring:
@@ -84,6 +92,7 @@ def discover(args: argparse.Namespace) -> str:
         receipts = []
         windows = []
         package_receipts = []
+        source_receipts = []
 
         def retain(source: Path, url: str = "") -> str:
             """Retain original metadata bytes using the producer's object shape."""
@@ -160,7 +169,18 @@ def discover(args: argparse.Namespace) -> str:
                              "valid_until": validity.valid_until.isoformat() if validity.valid_until else None})
             decoded = work / "Packages"
             SEALED["decompress_index"](compressed, decoded, repo.index_path)
-            for package in sorted((row for row in reviewed["packages"] if row["repository"] == name),
+            for source in (source for source in sources if source.repository == name):
+                records = PRODUCER["shell"](
+                    'source "$1/lib/rauc-build/source.sh"; rauc_debian_source_lookup "$2" "$3" "$4" identity',
+                    [str(decoded), source.name, source.version], env)
+                for file in source_files(source, records, repo.origin, PRODUCER["copy_local"]):
+                    if file.sha256 in objects:
+                        raise StreamError("ambiguous signed source object")
+                    objects[file.sha256] = {"sha256": file.sha256, "length": file.length,
+                                            "kind": "pinned-source", "urls": [file.url], "path": file.path}
+                    source_receipts.append({"repository": name, "name": source.name, "version": source.version,
+                                            "origin": repo.origin, "index_sha256": index} | asdict(file))
+            for package in sorted((row for row in reviewed_packages if row["repository"] == name),
                                   key=lambda row: (row["name"], row["arch"])):
                 filename, digest, version, arch, size = PRODUCER["shell"](
                     'source "$1/lib/fetch-debs-auth.sh"; auth_lookup_package "$2" "$3" "$4" "$5" identity',
@@ -188,6 +208,8 @@ def discover(args: argparse.Namespace) -> str:
             raise StreamError("discovered inventory fragment exceeds 1 MiB")
         receipt = {"schema": 1, "fetched_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                    "repositories": receipts, "packages": package_receipts}
+        if sources:
+            receipt["sources"] = source_receipts
         destination.mkdir(mode=0o700)
         try:
             data.rename(destination / "objects")

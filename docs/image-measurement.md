@@ -169,18 +169,34 @@ path inside the guest source mount.
 ### Host metadata discovery [EXISTS: fixture-qualified]
 
 `python3 ci/discover-image-metadata.py` fills the identity gap before capsule
-preparation. It fetches only the original signed Release and compressed binary
-Packages index for each selected archive. It never fetches a `.deb`, solves
+preparation. It fetches only the original signed Release and compressed
+Packages or Sources index for each selected archive. It never fetches a payload, solves
 dependencies, signs metadata, or nominates a trust anchor from downloaded bytes.
 An actual authenticated discovery run requires separate owner authorization.
 
-Supply two reviewed JSON files. `--selection` contains exactly a `packages`
-array, with each row containing `repository`, `name`, `version`, and exact
-`arch` (`arm64` or `all`). For example:
+Supply two reviewed JSON files. For binary packages, `--selection` contains a
+`packages` array, with each row containing `repository`, `name`, `version`, and
+exact `arch` (`arm64` or `all`). For example:
 
 ```json
 {"packages":[{"repository":"firstparty","name":"linux-image-7.2.0-ceralive-rk3588","version":"7.2.0-ceralive8","arch":"arm64"}]}
 ```
+
+Source selections use a `sources` array. Each row contains exactly `repository`
+(`debian-source` only), exact source `name` and `version`, and a `files` mapping
+from **every authenticated source filename** to its already staged, absolute
+local path. Either array may be omitted; the combined selection must be nonempty.
+For example, assuming these are the exact files in the authenticated stanza:
+
+```json
+{"sources":[{"repository":"debian-source","name":"rauc","version":"1.15.2-1","files":{"rauc_1.15.2-1.dsc":"/srv/public-sources/rauc_1.15.2-1.dsc","rauc_1.15.2.orig.tar.xz":"/srv/public-sources/rauc-1.15.2.tar.xz","rauc_1.15.2-1.debian.tar.xz":"/srv/public-sources/rauc_1.15.2-1.debian.tar.xz"}}]}
+```
+
+The local basename may differ from the signed filename. The source selection
+must include the `.dsc` and every other file listed in `Checksums-Sha256`, even
+when the build uses only a subset. Discovery neither obtains missing files nor
+infers paths from staged filenames. Supply only staged public files, never
+credentials or private signing material.
 
 For the measurement closure, include all 16 exact pins from
 `manifests/first-party-deb-versions.txt`, the released ceralive8 kernel, and the
@@ -210,10 +226,15 @@ validators. Default metadata names are `InRelease` and the policy's exact
 `index_path`. `--release-name REPOSITORY Release` explicitly selects an original
 signed `Release` accepted by the existing verifier. There is no fallback,
 detached `Release.gpg` request, format probing or redirect following. Only
-gzip/xz binary Packages indexes are supported. Signature/primary signer,
+gzip/xz `Packages` indexes and the approved `debian-source` repository's
+`Sources.gz` or `Sources.xz` index are supported. Signature/primary signer,
 Suite/Codename/component/architecture, Date/age, and any present Valid-Until
 must pass before the index request. First-party/BSP may omit Valid-Until but
 remain bounded by the approved age. Expired present Valid-Until always fails.
+The same measurement-only Debian waiver described above applies when discovery
+runs with `CERALIVE_BUILD_PURPOSE=rootfs-measurement`: an absent Valid-Until
+records Date without checking freshness. It never waives an expired present
+Valid-Until.
 
 The shared checksum reader authenticates both the index SHA256 and Size;
 duplicate checksum entries fail. The shared package lookup requires one
@@ -221,6 +242,18 @@ unambiguous stanza with the exact selected version and architecture,
 Filename/Size/SHA256, and no duplicate fields. Missing versions, wrong
 architectures, unsafe paths, invalid sizes/digests and duplicate stanzas fail.
 No package URL is contacted, including a URL appearing in signed metadata.
+
+Source discovery uses the shared RAUC Sources reader's `identity` output.
+It requires one exact name/version stanza, unique fields and checksum entries,
+matching `Files`/`Checksums-Sha256` file sets and sizes, and safe
+`Directory`/filename paths. The shared URL validator also rejects encoded
+traversal and separators. Each selected local file must be regular, without
+symlinks in its path, and match the authenticated size and SHA-256. The producer's
+bounded local copy supplies a private snapshot for hashing. Missing or extra
+selected files, non-regular paths and any byte mismatch fail closed. The shared
+complete-input gzip/xz decoder verifies every concatenated stream, including a
+corrupt later xz stream, before any source lookup. No source payload is retained
+or fetched.
 
 ```sh
 umask 077
@@ -249,12 +282,23 @@ The output directory is mode 0700 and its files are mode 0600:
   contain the signed size as `length` and the canonical original URL. Repository
   rows reference original Release/index digests. Public keyring objects have
   local `path` entries pointing at the retained public exports.
+  Source files appear only as `pinned-source` objects with exactly
+  `sha256/length/kind/urls/path`; they are not binary `packages` rows. Their
+  `path` is the reviewed staged path and their URL joins the authenticated
+  Directory/filename below the approved Debian origin. This is the existing
+  producer contract (`ci/prepare-image-capsule.py`, local-object validation at
+  lines 142-147 and binary-only package rows at lines 195-212), with archive
+  identity still enforced by `ci/kernel-runner/image_policy.py`.
 - `objects/<sha256>` preserves the original signed Release, compressed index,
   and approved public keyring bytes. There are no package payload objects.
 - `discovery.json` records completion `fetched_at`, original signed Release and
   index digests, signed `release_date` and `valid_until` (null when absent), and
   each selected package's original `filename`, `length`, architecture, version,
   SHA-256, logical origin and signed-index digest.
+  With source selections it also has a `sources` array recording one row per
+  file, including source name/version, signed Directory/filename, staged path,
+  length/SHA-256, original URL, origin and authenticated index digest. Binary-only
+  output has no additional fields.
 
 Requests and rows are sorted by repository/package identity and object digest;
 JSON uses canonical key ordering. Reordering the selection changes neither the
@@ -270,6 +314,13 @@ conflicting existing identities rather than keeping duplicate rows. Preserve
 the retained keyring paths, all unrelated closure objects, and the complete
 inventory's source/board/root fields. Keep `discovery.json` beside the review
 evidence; its extra fields do not belong in the producer's inventory.
+For a staged source already present under the same digest, require matching
+length, kind and local path, then preserve its independently reviewed URLs
+alongside the newly authenticated Debian URL in the single object row. For
+example, the pinned GitHub RAUC tarball and Debian's orig tarball can be the
+same bytes under different names; both original URLs are needed by their
+respective guest consumers. The producer rechecks staged bytes at preparation;
+discovery does not freeze or replace the caller's files.
 The producer intentionally fetches metadata again from the exact approved URLs
 and requires these reviewed hashes and sizes; upstream changes fail instead of
 silently selecting newer bytes. Discovery does not authorize that payload-fetch
