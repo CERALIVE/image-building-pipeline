@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import BinaryIO, Final, Iterable, TypeAlias
+from typing import BinaryIO, Callable, Final, Iterable, TypeAlias
 
 JSONValue: TypeAlias = str | bool | int | float | None | list["JSONValue"] | dict[str, "JSONValue"]
 
@@ -90,11 +90,14 @@ def read_header(source: BinaryIO) -> Member:
         raise StreamError("invalid artifact JSON") from exc
 
 
-def transfer(source: BinaryIO, destination: BinaryIO, member: Member) -> None:
+def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
+             checkpoint: Callable[[], None] | None = None) -> None:
     """Hash while copying exactly the declared length, with bounded memory."""
     digest = hashlib.sha256()
     remaining = member.length
     while remaining:
+        if checkpoint is not None:
+            checkpoint()
         chunk = source.read(min(1024 * 1024, remaining))
         if not chunk:
             raise StreamError("truncated artifact")
@@ -105,7 +108,8 @@ def transfer(source: BinaryIO, destination: BinaryIO, member: Member) -> None:
         raise StreamError("artifact digest mismatch")
 
 
-def decode(source: BinaryIO, directory: Path, expected: Identity) -> tuple[Member, ...]:
+def decode(source: BinaryIO, directory: Path, expected: Identity,
+           checkpoint: Callable[[], None] | None = None) -> tuple[Member, ...]:
     """Decode only fixed IDs into exclusive private files; never extract an archive."""
     if source.read(len(MAGIC)) != MAGIC:
         raise StreamError("invalid stream version")
@@ -148,7 +152,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity) -> tuple[Membe
         seen.add(member.id)
         fd = os.open(directory / member.id, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as output:
-            transfer(source, output, member)
+            transfer(source, output, member, checkpoint)
             output.flush()
             os.fsync(output.fileno())
         members.append(member)

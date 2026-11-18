@@ -17,6 +17,7 @@ from image_lifecycle import ImageJob, receipt, reconcile
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
+from vm_process import Cancellation, run
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-capsule", type=Path)
@@ -42,16 +43,18 @@ def image_arguments(job: ImageJob) -> list[str]:
         "-device", "virtserialport,chardev=artifacts,name=ceralive-artifacts",
     ]
 
-def validate_base(base: Path, expected_sha256: str) -> None:
+def validate_base(base: Path, expected_sha256: str,
+                  cancellation: Cancellation | None = None) -> None:
     """Require the selected immutable base to reference no additional host file."""
     from vm import die_with_parent
+    cancellation = cancellation or Cancellation()
     if (base.is_symlink() or not base.is_file() or base.stat().st_mode & 0o222
-            or digest_file(base) != expected_sha256):
+            or digest_file(base, cancellation.check) != expected_sha256):
         raise AdmissionError("image base must be independently verified and read-only")
-    info = subprocess.run(["qemu-img", "info", "--output=json", str(base)],
-                          check=True, capture_output=True, timeout=30,
-                          env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"},
-                          preexec_fn=partial(die_with_parent, os.getpid()))
+    info = run(["qemu-img", "info", "--output=json", str(base)],
+               cancellation=cancellation, capture_output=True, timeout=30,
+               env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"},
+               preexec_fn=partial(die_with_parent, os.getpid()))
     row = json.loads(info.stdout)
     specific = row.get("format-specific", {}).get("data", {})
     if (row["format"] != "qcow2" or row["virtual-size"] != 128 * GIB
@@ -84,7 +87,7 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
     target.mkdir(mode=0o700)
     envelope = job.directory / "stream.partial"
     with envelope.open("rb") as source:
-        members = decode(source, target, job.identity)
+        members = decode(source, target, job.identity, job.cancellation.check)
     expected = {"verification.json"} if verifier else {
         "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
         "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -127,19 +130,19 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
              "transport_valid": True, "content_verified": verifier})
     envelope.unlink()
 
-def execute(base: Path, directory: Path, request: dict) -> Path:
+def execute(base: Path, directory: Path, request: dict, cancellation: Cancellation) -> Path:
     """One owned overlay, exit receipt and independent host transport validation."""
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
     directory.mkdir(mode=0o700)
     store = directory.parents[1]
-    with ImageJob(directory, identity, request["capsule"]) as job:
+    with ImageJob(directory, identity, request["capsule"], cancellation) as job:
         job.state.update(base_sha256=request["base_sha256"], base=str(base),
                          public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
                          overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
                          stream_budget=CAPS.stream_max if request["payload"]["operation"] == "measure" else 4 * 1024**2)
         try:
-            with job_disk(base, job) as (overlay, disk_fd):
+            with job_disk(base, job, cancellation) as (overlay, disk_fd):
                 remaining = int(request["deadline"] - time.monotonic())
                 if remaining <= 0:
                     raise AdmissionError("image deadline exhausted before guest launch")
@@ -151,6 +154,8 @@ def execute(base: Path, directory: Path, request: dict) -> Path:
                      disk_fd=disk_fd, image_job=job)
         finally:
             job.state["overlay_descriptor_closed"] = True
+        job.outputs.close()
+        cancellation.check()
         disk_headroom(((directory, 16 * GIB),))
         validate_return(job, request["payload"]["operation"] != "measure")
         job.state["stop_reason"] = "guest exited; transport validated"
@@ -158,7 +163,8 @@ def execute(base: Path, directory: Path, request: dict) -> Path:
     return directory / "artifacts"
 
 
-def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
+              cancellation: Cancellation) -> int:
     if not all((args.input_capsule, args.input_sha256, args.base_sha256,
                 args.trust_policy, args.output_dir, args.attempt, args.board,
                 args.source_commit, args.source_epoch is not None)):
@@ -171,11 +177,11 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     cgroup_admission()
     identity = Identity(args.attempt, args.board, args.source_commit, args.source_epoch,
                         args.input_sha256)
-    validate_base(args.base, args.base_sha256)
+    validate_base(args.base, args.base_sha256, cancellation)
     base = args.base.resolve()
     if (args.input_capsule.is_symlink() or not stat.S_ISREG(args.input_capsule.stat().st_mode)
             or args.input_capsule.stat().st_size > INPUT_LIMIT
-            or digest_file(args.input_capsule) != identity.input_sha256):
+            or digest_file(args.input_capsule, cancellation.check) != identity.input_sha256):
         raise AdmissionError("input capsule transport identity mismatch")
     store = args.output_dir.resolve()
     store.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -191,28 +197,29 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     request = {"capsule": args.input_capsule, "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {
                    "schema": 1, "identity": asdict(identity), "operation": args.image_mode, "trust": trust}}
-    artifacts = execute(base, directory / "build", request)
+    artifacts = execute(base, directory / "build", request, cancellation)
     if args.image_mode == "probe":
         result = json.loads((artifacts / "verification.json").read_text())
         if result != {"schema": 1, "identity": asdict(identity), "network_denied": True}:
             raise StreamError("offline probe receipt mismatch")
         return 0
     capsule = directory / "verifier-input.tar"
-    inventory = verification_capsule(args.input_capsule, artifacts, capsule)
+    inventory = verification_capsule(args.input_capsule, artifacts, capsule, cancellation.check)
     verification = Identity(identity.attempt, identity.board, identity.commit, identity.epoch,
-                            digest_file(capsule))
+                            digest_file(capsule, cancellation.check))
     request = {"capsule": capsule, "base_sha256": args.base_sha256,
                "deadline": time.monotonic() + CAPS.verify_seconds,
                "retained_bytes": retained + capsule.stat().st_blocks * 512
                    + sum(file.stat().st_blocks * 512 for file in artifacts.iterdir()),
                "payload": {"schema": 1, "identity": asdict(verification), "operation": "verify",
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
-    verified = execute(base, directory / "verify", request)
+    verified = execute(base, directory / "verify", request, cancellation)
     result = json.loads((verified / "verification.json").read_text())
     if (result["schema"] != 1 or result["verified"] is not True
             or result["build_identity"] != asdict(identity) or result["artifacts"] != inventory
             or {row["slot"] for row in result["slots"]} != {"rootfs_a", "rootfs_b"}):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
+    cancellation.check()
     receipt(directory / "acceptance.json", {"schema": 1, "identity": asdict(identity),
             "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,
             "public_root_der_sha256": trust["root_der_sha256"],

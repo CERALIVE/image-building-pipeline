@@ -33,14 +33,14 @@ An image unit requires all these effective limits before admission:
 | Resource | Limit or floor |
 |---|---|
 | Guest | 4 vCPUs, 20 GiB RAM, 128 GiB system disk |
-| Host cgroup | MemoryMax 24 GiB, MemorySwapMax 0, CPUQuota at most 400%, IOWeight at most 10 |
-| Host scheduling | Affinity to four selected logical CPUs, nice at least 10 |
+| Host cgroup | MemoryMax 24 GiB, MemorySwapMax 0, CPUQuota at most 400%, CPUWeight at most 10 on the workload cgroup, IOWeight at most 10 |
+| Host scheduling | Affinity to four selected logical CPUs, non-realtime CPU scheduling, nice 9–19 (launch at 10) |
 | Host memory | At least 32 GiB actual MemAvailable |
 | QEMU file size | 144 GiB, including qcow2 overhead; core dumps disabled |
 | Input capsule | At most 32 GiB |
 | Raw return | At most 16 GiB per board; at most 32 GiB retained for the pair |
 | Console, diagnostics and receipts | At most 1 GiB per active attempt |
-| Deadline | 21,600 s build, 1,800 s verifier; owned TERM/KILL teardown bounded by the launcher |
+| Deadline | 21,600 s build, 1,800 s verifier, with up to 20 s from owned QEMU TERM to KILL |
 | Disk reserve | At least 30 GiB beyond remaining bounded allocations on each affected filesystem |
 
 Before fresh preparation the conservative complete budget is 287 GiB:
@@ -52,6 +52,16 @@ filesystem and watches remaining headroom while QEMU runs. It stops its own
 attempt if headroom disappears. It never deletes shared caches or foreign
 artifacts and never automatically retries.
 
+CPUWeight keeps the whole cgroup low priority when it competes for CPU.
+The CPU and memory caps still apply independently. A host rule such as
+ananicy-cpp's `Heavy_CPU` can change QEMU from nice 10 to 9 without changing
+the cgroup. The launcher tolerates that adjustment, checks the running QEMU
+process and its cgroup about every five seconds, and stops the attempt if the
+priority floor or required limits are lost at a check. The exit receipt
+includes the last QEMU observation of `nice`, `ionice` (via util-linux), and
+`cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
+is refused for the measurement guest.
+
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,
 plan lock second; keep the innermost direct parent as literal
@@ -59,11 +69,13 @@ plan lock second; keep the innermost direct parent as literal
 locks. Confirm that any preceding heavy unit has finished teardown or adopted
 the same host lock before queueing a measurement.
 
-For an independently prepared and approved base, capsule and public policy:
+For an independently prepared and approved base, capsule and public policy,
+the example assumes a shell at nice 0. `nice -n 10` is a relative adjustment.
+If the shell inherits another value, adjust the increment to start at nice 10.
 
 ```sh
 systemd-run --user --scope \
-  -p CPUQuota=400% -p MemoryMax=24G -p MemorySwapMax=0 -p IOWeight=10 \
+  -p CPUQuota=400% -p CPUWeight=10 -p MemoryMax=24G -p MemorySwapMax=0 -p IOWeight=10 \
   nice -n 10 taskset -c "${IMAGE_CPUS:?select exactly four logical CPUs}" \
   flock --exclusive --close /tmp/host-heavy.lock \
   python3 ci/kernel-runner/vm.py image \
@@ -565,6 +577,15 @@ declare strace as a test tool.
 
 Receipts record source/base/input identities, launcher/QEMU process start
 identities, times, caps, exit/stop reason, reaping and descriptor closure.
+Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
+idle I/O loop checks for cancellation at least once per second. The launcher
+stops draining pipes and sends TERM to the owned QEMU process, then sends KILL
+if it has not exited after 20 seconds. It reaps QEMU, discards the anonymous
+overlay, closes descriptors and writes `exit.json` with `stop_reason` set to
+`cancelled` and `launcher_exit` set to `1` before returning a nonzero status.
+Additional signals do not reset the grace period or interrupt the receipt.
+An interruption before creating an attempt has no guest or teardown receipt.
+Allow up to 600 seconds for owned teardown and receipt I/O on a responsive host.
 After forced death, the next admission reconciles the exact owned overlay
 inode and process identities. A remaining holder blocks admission; no foreign
 process is killed. Forced destruction never claims that guest cleanup ran.

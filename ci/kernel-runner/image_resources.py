@@ -6,9 +6,12 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import resource
-from typing import Final
+import subprocess
+from typing import Final, TypedDict
 
 GIB: Final = 1024**3
+MIN_NICE: Final = 9
+MAX_CPU_WEIGHT: Final = 10
 
 
 class AdmissionError(Exception):
@@ -53,9 +56,9 @@ def require_host_lock() -> None:
     raise AdmissionError("image profile requires outer flock --exclusive --close /tmp/host-heavy.lock")
 
 
-def cgroup_admission() -> None:
-    """Require an actual unified cgroup, including inherited ancestor limits."""
-    membership = Path("/proc/self/cgroup").read_text().strip()
+def cgroup_limits(pid: int | str) -> int:
+    """Require low CPU weight on the process's cgroup and effective hard caps."""
+    membership = Path(f"/proc/{pid}/cgroup").read_text().strip()
     if not membership.startswith("0::/"):
         raise AdmissionError("image profile requires unified cgroup v2")
     group = Path("/sys/fs/cgroup") / membership[4:].lstrip("/")
@@ -90,8 +93,45 @@ def cgroup_admission() -> None:
         raise AdmissionError("image profile needs effective MemorySwapMax=0")
     if not weights or min(weights) > 10:
         raise AdmissionError("image profile needs effective IOWeight <= 10")
-    if len(os.sched_getaffinity(0)) != CAPS.cpus or os.getpriority(os.PRIO_PROCESS, 0) < 10:
-        raise AdmissionError("image profile needs four selected CPUs and nice >= 10")
+    cpu_weight = group / "cpu.weight"
+    if not cpu_weight.is_file() or not 1 <= (weight := int(cpu_weight.read_text())) <= MAX_CPU_WEIGHT:
+        raise AdmissionError(f"image profile needs CPUWeight <= {MAX_CPU_WEIGHT} on its cgroup")
+    return weight
+
+
+def require_process_priority(pid: int) -> int:
+    """Admit only low-priority, non-realtime CPU scheduling."""
+    nice = os.getpriority(os.PRIO_PROCESS, pid)
+    if (nice < MIN_NICE or os.sched_getscheduler(pid) not in
+            (os.SCHED_OTHER, os.SCHED_BATCH, os.SCHED_IDLE)):
+        raise AdmissionError(f"image profile needs non-realtime scheduling and nice >= {MIN_NICE}")
+    return nice
+
+
+class PriorityObservation(TypedDict):
+    nice: int
+    ionice: str
+    cpu_weight: int
+
+
+def process_priority(pid: int) -> PriorityObservation:
+    """Observe the owned QEMU process, including containment after exec."""
+    nice = require_process_priority(pid)
+    cpu_weight = cgroup_limits(pid)
+    ionice = subprocess.run(
+        ["ionice", "-p", str(pid)], check=True, capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"], "LC_ALL": "C"}, timeout=1).stdout.strip()
+    if ionice.startswith("realtime"):
+        raise AdmissionError("image profile forbids realtime I/O priority")
+    return {"nice": nice, "ionice": ionice, "cpu_weight": cpu_weight}
+
+
+def cgroup_admission() -> None:
+    """Check the launcher before any image preparation or guest is started."""
+    cgroup_limits("self")
+    require_process_priority(0)
+    if len(os.sched_getaffinity(0)) != CAPS.cpus:
+        raise AdmissionError("image profile needs four selected CPUs")
     available = next(int(line.split()[1]) * 1024
                      for line in Path("/proc/meminfo").read_text().splitlines()
                      if line.startswith("MemAvailable:"))

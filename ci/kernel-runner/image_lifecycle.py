@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import partial
 import json
 import os
@@ -14,11 +14,12 @@ import time
 import tempfile
 import uuid
 
-from image_resources import CAPS, GIB, AdmissionError, disk_headroom
+from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
+from vm_process import POLL_SECONDS, Cancellation, run, wait
 
 @contextmanager
-def job_disk(base: Path, image_job=None):
+def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = None):
     """Shared anonymous disk lifecycle used by vm.py's kernel and image paths."""
     from vm import die_with_parent
     with tempfile.TemporaryFile(prefix="job-", dir=base.parent) as overlay_file:
@@ -26,10 +27,9 @@ def job_disk(base: Path, image_job=None):
         if image_job:
             image_job.overlay_created(disk_fd)
         overlay = Path(f"/proc/self/fd/{disk_fd}")
-        subprocess.run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
-                        "-b", str(base), str(overlay)], check=True,
-                       pass_fds=(disk_fd,), preexec_fn=partial(die_with_parent, os.getpid()),
-                       timeout=180)
+        run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
+             "-b", str(base), str(overlay)], cancellation=cancellation or Cancellation(),
+            pass_fds=(disk_fd,), preexec_fn=partial(die_with_parent, os.getpid()), timeout=180)
         yield overlay, disk_fd
 
 def process_identity(pid: int) -> str:
@@ -94,16 +94,23 @@ def reconcile(store: Path) -> None:
 class ImageJob:
     """Mutable attempt journal and private descriptor ownership for one guest."""
 
-    def __init__(self, directory: Path, identity: Identity, capsule: Path) -> None:
+    def __init__(self, directory: Path, identity: Identity, capsule: Path,
+                 cancellation: Cancellation | None = None) -> None:
         self.directory = directory
         self.identity = identity
-        self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
-        self.console_read, self.console_write = os.pipe()
+        self.cancellation = cancellation or Cancellation()
+        self.outputs = ExitStack()
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
                       "launcher": process_identity(os.getpid()), "acquired_at": time.time(),
                       "stop_reason": "not started", "qemu_reaped": False,
                       "stream_budget": CAPS.stream_max,
                       "input_descriptor_closed": False, "overlay_descriptor_closed": False}
+        self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            self.console_read, self.console_write = os.pipe()
+        except OSError:
+            os.close(self.capsule_fd)
+            raise
 
     def __enter__(self) -> ImageJob:
         return self
@@ -113,10 +120,24 @@ class ImageJob:
         os.close(self.console_read)
         if self.console_write >= 0:
             os.close(self.console_write)
-        self.state.update(input_descriptor_closed=True, ended_at=time.time())
-        if error:
-            self.state["stop_reason"] = type(error).__name__
-        receipt(self.directory / "exit.json", self.state)
+        try:
+            self.outputs.close()
+        except OSError as output_error:
+            error = output_error
+            raise
+        finally:
+            self.state.update(input_descriptor_closed=True, ended_at=time.time(),
+                              launcher_exit=int(error is not None))
+            if error:
+                self.state["stop_reason"] = type(error).__name__
+            exit_path = self.directory / "exit.json"
+            if not self.cancellation.requested:
+                receipt(exit_path, self.state)
+            # A first signal during the atomic write must also reach the receipt.
+            if self.cancellation.requested:
+                self.state.update(stop_reason="cancelled", launcher_exit=1)
+                receipt(exit_path, self.state)
+            self.cancellation.check()
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
@@ -139,6 +160,7 @@ class ImageJob:
         os.close(self.console_write)
         self.console_write = -1
         end = time.monotonic() + seconds
+        next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
         with selectors.DefaultSelector() as events:
             files = {}
@@ -147,15 +169,35 @@ class ImageJob:
                 events.register(pipe, selectors.EVENT_READ, name)
                 fd = os.open(self.directory / (name + ".partial"),
                              os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                files[name] = os.fdopen(fd, "wb")
+                output = self.outputs.enter_context(os.fdopen(fd, "wb"))
+                self.outputs.callback(sync_output, output)
+                files[name] = output
             try:
-                while events.get_map():
-                    if time.monotonic() >= end:
+                while events.get_map() or process.poll() is None:
+                    self.cancellation.check()
+                    now = time.monotonic()
+                    if now >= end:
                         raise subprocess.TimeoutExpired("image guest", seconds)
-                    for event, _mask in events.select(timeout=1):
+                    if now >= next_priority_check and process.poll() is None:
+                        try:
+                            self.state["qemu_priority"] = process_priority(process.pid)
+                        except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
+                            if process.poll() is None:
+                                raise
+                        next_priority_check = now + 5
+                    try:
+                        ready = events.select(timeout=min(POLL_SECONDS, end - now))
+                    except InterruptedError:
+                        continue
+                    self.cancellation.check()
+                    for event, _mask in ready:
+                        self.cancellation.check()
                         name = event.data
                         fd = event.fileobj if type(event.fileobj) is int else event.fileobj.fileno()
-                        chunk = os.read(fd, 1024 * 1024)
+                        try:
+                            chunk = os.read(fd, 1024 * 1024)
+                        except InterruptedError:
+                            continue
                         if not chunk:
                             events.unregister(event.fileobj)
                             continue
@@ -169,10 +211,12 @@ class ImageJob:
                     remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
                     disk_headroom(((Path(self.state["overlay_directory"]), remaining_overlay),
                                    (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
-                process.wait(timeout=max(0.1, end - time.monotonic()))
+                wait(process, end, self.cancellation)
             finally:
-                for output in files.values():
-                    output.flush()
-                    os.fsync(output.fileno())
-                    output.close()
                 self.state["stream_bytes"] = counts["stream"]
+
+
+def sync_output(output) -> None:
+    """Sync output only after the child has been stopped and reaped."""
+    output.flush()
+    os.fsync(output.fileno())
