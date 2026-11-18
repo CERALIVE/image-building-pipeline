@@ -51,19 +51,43 @@ source = [line.strip() for line in instructions
 pin = re.compile(r"^RUN mkosi_commit=[0-9a-f]{40}\s*&&")
 assert len(source) == 1 and pin.match(source[0]), "mkosi source must pin a full Git commit"
 git = r'git -C "\$\{mkosi_src\}" '
-assert re.search(
+gate = re.search(
     git + r'fetch --depth=1 --no-tags https://github\.com/systemd/mkosi\.git "\$\{mkosi_commit\}"\s*&&\s*'
     + git + r'checkout --detach FETCH_HEAD\s*&&\s*'
-    r'test "\$\(' + git + r'rev-parse HEAD\)" = "\$\{mkosi_commit\}"\s*&&\s*'
-    r'wheelhouse="\$\(mktemp -d\)"\s*&&\s*'
-    r'python3 -m venv /opt/mkosi\s*&&\s*'
-    r'/opt/mkosi/bin/python -m pip download --disable-pip-version-check --no-cache-dir\s+'
-    r'--index-url https://pypi\.org/simple --only-binary=:all: --require-hashes\s+'
-    r'--requirement /opt/mkosi-build-requirements\.txt --dest "\$\{wheelhouse\}"\s*&&\s*'
-    r'/opt/mkosi/bin/python -m pip install --no-cache-dir\s+'
-    r'--no-index --find-links "\$\{wheelhouse\}" "\$\{mkosi_src\}"(?:\s*&&|$)',
+    r'test "\$\(' + git + r'rev-parse HEAD\)" = "\$\{mkosi_commit\}"\s*&&\s*',
     source[0],
-), "mkosi install must verify HEAD and install offline from hash-checked wheels"
+)
+assert gate, "mkosi install must be gated on verifying the fetched checkout's HEAD"
+# Assert the actual fail-closed command chain, including which lock each
+# installer reads. Normalize whitespace from Dockerfile continuations.
+commands = [" ".join(cmd.split()) for cmd in source[0][gate.end():].split("&&")]
+assert commands[:3] == [
+    'wheelhouse="$(mktemp -d)"',
+    'python3 -m venv /opt/mkosi',
+    '/opt/mkosi/bin/python -m pip download --disable-pip-version-check --no-cache-dir '
+    '--index-url https://pypi.org/simple --only-binary=:all: --require-hashes '
+    '--requirement /opt/mkosi-build-requirements.txt --dest "${wheelhouse}"',
+], "mkosi wheels must be downloaded with hash verification"
+assert commands[3:5] == [
+    'python3 -m venv "${wheelhouse}/build-venv"',
+    '"${wheelhouse}/build-venv/bin/python" -m pip install --no-cache-dir '
+    '--no-index --find-links "${wheelhouse}" --require-hashes '
+    '--requirement /opt/mkosi-build-requirements.txt',
+], "mkosi build venv must install from the hash lock with the index disabled"
+assert commands[5:9] == [
+    '"${wheelhouse}/build-venv/bin/python" -m pip wheel --no-cache-dir '
+    '--no-index --no-deps --no-build-isolation --check-build-dependencies '
+    '--wheel-dir "${wheelhouse}" "${mkosi_src}"',
+    'set -- "${wheelhouse}"/mkosi-*.whl',
+    'test "$#" = 1',
+    'wheel_hash="$(sha256sum "$1")"',
+], "mkosi must build one wheel from the verified checkout and hash it"
+assert commands[9:11] == [
+    r'''printf '%s --hash=sha256:%s\n' "$1" "${wheel_hash%% *}" > "${wheelhouse}/mkosi-install.txt"''',
+    '/opt/mkosi/bin/python -m pip install --no-cache-dir '
+    '--no-index --find-links "${wheelhouse}" --require-hashes '
+    '--requirement "${wheelhouse}/mkosi-install.txt"',
+], "mkosi runtime venv must verify the built wheel hash with the index disabled"
 assert instructions.count("COPY mkosi-build-requirements.txt /opt/mkosi-build-requirements.txt") == 1, (
     "mkosi builder must copy in its hashed requirements"
 )

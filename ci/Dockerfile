@@ -141,7 +141,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       && mv /tmp/ceralive-docker-clean /etc/apt/apt.conf.d/docker-clean || true
 
 # Fetch the commit behind v26 directly so moving the tag cannot change the build.
-# Use only verified wheels when pip populates the isolated build environment.
+# Check hashes again when installing into the build venv and the runtime venv.
+# Pip cannot hash a source directory, so build a wheel from the verified checkout.
 COPY mkosi-build-requirements.txt /opt/mkosi-build-requirements.txt
 RUN mkosi_commit=84af20892b61c8e177e391f997ded8b4cb5514f2 \
  && mkosi_src="$(mktemp -d)" \
@@ -154,8 +155,20 @@ RUN mkosi_commit=84af20892b61c8e177e391f997ded8b4cb5514f2 \
  && /opt/mkosi/bin/python -m pip download --disable-pip-version-check --no-cache-dir \
       --index-url https://pypi.org/simple --only-binary=:all: --require-hashes \
       --requirement /opt/mkosi-build-requirements.txt --dest "${wheelhouse}" \
+ && python3 -m venv "${wheelhouse}/build-venv" \
+ && "${wheelhouse}/build-venv/bin/python" -m pip install --no-cache-dir \
+      --no-index --find-links "${wheelhouse}" --require-hashes \
+      --requirement /opt/mkosi-build-requirements.txt \
+ && "${wheelhouse}/build-venv/bin/python" -m pip wheel --no-cache-dir \
+      --no-index --no-deps --no-build-isolation --check-build-dependencies \
+      --wheel-dir "${wheelhouse}" "${mkosi_src}" \
+ && set -- "${wheelhouse}"/mkosi-*.whl \
+ && test "$#" = 1 \
+ && wheel_hash="$(sha256sum "$1")" \
+ && printf '%s --hash=sha256:%s\n' "$1" "${wheel_hash%% *}" > "${wheelhouse}/mkosi-install.txt" \
  && /opt/mkosi/bin/python -m pip install --no-cache-dir \
-      --no-index --find-links "${wheelhouse}" "${mkosi_src}" \
+      --no-index --find-links "${wheelhouse}" --require-hashes \
+      --requirement "${wheelhouse}/mkosi-install.txt" \
  && ln -s /opt/mkosi/bin/mkosi* /usr/local/bin/ \
  && rm -rf "${mkosi_src}" "${wheelhouse}"
 
