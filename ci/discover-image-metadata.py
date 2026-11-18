@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import shutil
 import subprocess
 import sys
@@ -22,18 +21,17 @@ from image_policy import archive_policies
 from image_sources import source_files, source_selections
 from image_stream import StreamError
 
-ROOT = Path(__file__).resolve().parents[1]
-PRODUCER = runpy.run_path(str(ROOT / "ci/prepare-image-capsule.py"))
-SEALED = PRODUCER["SEALED"]
+from image_transport import (SEALED, TransportParser, copy_local, fetch, metadata_base, read_json,
+                             shell, transport_clients)
 
 
 def discover(args: argparse.Namespace) -> str:
-    reviewed = PRODUCER["read_json"](args.selection)
-    approved = PRODUCER["read_json"](args.trust_policy)
+    reviewed = read_json(args.selection)
+    approved = read_json(args.trust_policy)
     if (set(approved) != {"schema", "repositories"} or type(approved["schema"]) is not int
             or approved["schema"] != 1):
         raise StreamError("expected independently approved schema-1 archive policy")
-    clients = PRODUCER["transport_clients"](args)
+    clients = transport_clients(args)
     policies = archive_policies(approved["repositories"], clients.keys())
     if any(Path(repo.index_path).name not in (
             ("Packages.gz", "Packages.xz", "Sources.gz", "Sources.xz") if name == "debian-source"
@@ -115,24 +113,24 @@ def discover(args: argparse.Namespace) -> str:
             if source.is_symlink() or not source.is_file() or not 0 < source.stat().st_size <= SEALED["INDEX_LIMIT"]:
                 raise StreamError("public keyring must be a bounded regular file")
             snapshot = work / (name + ".keyring")
-            PRODUCER["copy_local"](source, snapshot, source.stat().st_size)
+            copy_local(source, snapshot, source.stat().st_size)
             digest = retain(snapshot)
             if digest != policies[name].keyring:
                 raise StreamError("public keyring differs from independently approved digest")
-            PRODUCER["shell"](
+            shell(
                 'source "$1/lib/fetch-debs-auth.sh"; auth_keyring_has_exact_fingerprints "$2" "${@:3}"',
                 [str(data / digest), *policies[name].fingerprints], env)
 
         for name, repo in sorted(policies.items()):
-            base = PRODUCER["metadata_base"](name, repo)
+            base = metadata_base(name, repo)
             release_url = original_url(base + "/" + release_names.get(name, "InRelease"))
             index_url = original_url(base + "/" + repo.index_path)
             signed = work / "signed"
             release = work / "Release"
-            release_transfer = PRODUCER["fetch"](
+            release_transfer = fetch(
                 release_url, signed, 16 * 1024**2, clients.get(repo.origin),
                 args.ca_file, args.object_timeout, env, name, repo.max_redirects)
-            PRODUCER["shell"](
+            shell(
                 'source "$1/lib/fetch-debs-auth.sh"; '
                 'auth_verify_release_to_file "$2" "$3" "$4" "${@:9}"; '
                 'auth_release_has_identity "$4" "$5" "$6" "$7" "$8"',
@@ -141,17 +139,17 @@ def discover(args: argparse.Namespace) -> str:
             validity = SEALED["valid_release"](release, repo.max_age_seconds,
                                                require_until=name not in ("firstparty", "bsp"))
             windows.append(validity)
-            signed_digest, signed_length = PRODUCER["shell"](
+            signed_digest, signed_length = shell(
                 'source "$1/lib/fetch/index.sh"; index_release_digest "$2" "$3" identity',
                 [str(release), repo.index_path], env).split("\t")
             length = int(signed_length)
             if not 0 < length <= SEALED["INDEX_LIMIT"]:
                 raise StreamError("signed package index exceeds the 256 MiB bound")
             compressed = work / "compressed"
-            index_transfer = PRODUCER["fetch"](
+            index_transfer = fetch(
                 index_url, compressed, length, clients.get(repo.origin),
                 args.ca_file, args.object_timeout, env, name, repo.max_redirects)
-            PRODUCER["shell"](
+            shell(
                 'source "$1/lib/fetch/index.sh"; log_error() { printf "%s\\n" "$*" >&2; }; '
                 'index_verify_digest "$2" "$3" discovery',
                 [str(compressed), signed_digest], env)
@@ -178,10 +176,10 @@ def discover(args: argparse.Namespace) -> str:
             decoded = work / "Packages"
             SEALED["decompress_index"](compressed, decoded, repo.index_path)
             for source in (source for source in sources if source.repository == name):
-                records = PRODUCER["shell"](
+                records = shell(
                     'source "$1/lib/rauc-build/source.sh"; rauc_debian_source_lookup "$2" "$3" "$4" identity',
                     [str(decoded), source.name, source.version], env)
-                for file in source_files(source, records, repo.origin, PRODUCER["copy_local"]):
+                for file in source_files(source, records, repo.origin, copy_local):
                     if file.sha256 in objects:
                         raise StreamError("ambiguous signed source object")
                     objects[file.sha256] = {"sha256": file.sha256, "length": file.length,
@@ -190,7 +188,7 @@ def discover(args: argparse.Namespace) -> str:
                                             "origin": repo.origin, "index_sha256": index} | asdict(file))
             for package in sorted((row for row in reviewed_packages if row["repository"] == name),
                                   key=lambda row: (row["name"], row["arch"])):
-                filename, digest, version, arch, size = PRODUCER["shell"](
+                filename, digest, version, arch, size = shell(
                     'source "$1/lib/fetch-debs-auth.sh"; auth_lookup_package "$2" "$3" "$4" "$5" identity',
                     [str(decoded), package["name"], package["version"], repo.arch], env).split("\t")
                 if arch != package["arch"] or version != package["version"]:
@@ -233,7 +231,7 @@ def discover(args: argparse.Namespace) -> str:
 
 
 def main() -> None:
-    parser = PRODUCER["TransportParser"](description=__doc__)
+    parser = TransportParser(description=__doc__)
     parser.add_argument("--selection", required=True, type=Path)
     parser.add_argument("--trust-policy", required=True, type=Path)
     parser.add_argument("--keyring", nargs=2, action="append", default=[], metavar=("REPOSITORY", "PUBLIC_KEYRING_PATH"))

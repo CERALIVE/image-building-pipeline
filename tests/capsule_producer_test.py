@@ -32,6 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ci/kernel-runner"))
 from image_capsule import unpack
 from image_stream import Identity
+from image_stream import StreamError
+from image_transport import identity_config
 
 
 def command(args: list[str], work: Path) -> bytes:
@@ -405,7 +407,8 @@ def test_bsp_rejects_non_public_hops_before_connecting() -> None:
         dns = json.loads((work / "dns.json").read_text())
         bad_answers = ("10.0.0.1", "192.168.1.1", "172.16.0.1", "127.0.0.1", "169.254.1.1",
                        "100.64.1.1", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1",
-                       "224.0.0.1", "ff02::1", "0.0.0.0", "::", "240.0.0.1", "2001:db8::1")
+                       "224.0.0.1", "ff02::1", "0.0.0.0", "::", "240.0.0.1", "2001:db8::1",
+                       "192.88.99.2", "::ffff:192.88.99.2")
         cases = [("mirror-a.example", [ip], "non-public address") for ip in bad_answers]
         cases += [("mirror-a.example", [PUBLIC, "10.0.0.1"], "non-public address"),
                   ("mirror-a.example", [], "no DNS addresses"),
@@ -878,7 +881,6 @@ def test_client_identity_config_refuses_unsafe_files_and_invalid_bindings() -> N
             assert IDENTITY not in result.stderr and not result.stdout
             assert requests == [] and not (work / "capsule.tar").exists()
         # Exercise a foreign st_uid without changing users or requiring chown privileges.
-        parser = runpy.run_path(str(ROOT / "ci/prepare-image-capsule.py"))
         fstat = os.fstat
 
         def foreign_owner(fd: int) -> os.stat_result:
@@ -889,8 +891,8 @@ def test_client_identity_config_refuses_unsafe_files_and_invalid_bindings() -> N
 
         with patch("os.fstat", foreign_owner):
             try:
-                parser["identity_config"](config)
-            except parser["StreamError"] as exc:
+                identity_config(config)
+            except StreamError as exc:
                 assert "owned by the invoking user" in str(exc)
             else:
                 raise AssertionError("accepted a foreign-owned identity file")

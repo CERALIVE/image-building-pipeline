@@ -268,7 +268,11 @@ or fetched.
 discovery and preparation. Provision the mapping outside the checkout and
 output directory. The file must be regular, owned by the invoking user, and
 mode 0600. Its parent must be owned by that user or root and must not be
-group- or other-writable. Use a real directory and file, not symlinks.
+group- or other-writable. Only the `firstparty` repository at the exact origin
+`https://apt.ceralive.tv` may receive a client identity. Debian, BSP, mirrors,
+and other repositories use anonymous GETs. Both CLI forms reject an ineligible
+binding before any network request. The transport checks the repository and
+request origin again before attaching an identity. Use a real directory and file, not symlinks.
 Put one `ORIGIN CERT_PATH KEY_PATH` record on each line:
 
 ```text
@@ -310,9 +314,9 @@ The output directory is mode 0700 and its files are mode 0600:
   `sha256/length/kind/urls/path`; they are not binary `packages` rows. Their
   `path` is the reviewed staged path and their URL joins the authenticated
   Directory/filename below the approved Debian origin. This is the existing
-  producer contract (`ci/prepare-image-capsule.py`, local-object validation at
-  lines 142-147 and binary-only package rows at lines 195-212), with archive
-  identity still enforced by `ci/kernel-runner/image_policy.py`.
+  producer contract in `ci/prepare-image-capsule.py`. Both host tools use
+  `ci/kernel-runner/image_policy.py` for archive and credential eligibility
+  and `ci/kernel-runner/image_transport.py` for the actual requests.
 - `objects/<sha256>` preserves the original signed Release, compressed index,
   and approved public keyring bytes. There are no package payload objects.
 - `discovery.json` records completion `fetched_at`, original signed Release and
@@ -454,6 +458,9 @@ TLS still verifies the URL hostname. A failed lookup, a mixed public/private
 answer, or any loopback, private, link-local, carrier-grade NAT, unique-local,
 multicast, unspecified or reserved address rejects the hop before connection.
 IPv4-mapped IPv6 answers undergo the same IPv4 checks.
+The deprecated 6to4 anycast block `192.88.99.0/24`, including the 6a44 relay,
+is excluded explicitly. Preparation also rejects metadata shared between BSP
+and another repository because the two references have different transport requirements.
 TLS failure, unexpected status, mismatched bytes or timeout reject the attempt.
 A failed transfer names the object SHA-256 (or discovery's metadata object
 name), its current validated URL, the HTTP status (000 when

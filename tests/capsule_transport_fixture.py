@@ -6,6 +6,7 @@ from pathlib import Path
 from functools import partial
 import runpy
 import socket
+import stat
 import sys
 from urllib.parse import urlsplit
 
@@ -27,6 +28,8 @@ def fixture_dns(work: Path, host: str, port: int, *, type: int) -> list[tuple]:
 def local_curl(work: Path, curl: str, port: int) -> None:
     args = sys.argv[1:]
     host = urlsplit(args[args.index("--url") + 1]).hostname
+    if host == "apt.ceralive.tv" and b"--client-identity" in Path(f"/proc/{os.getppid()}/cmdline").read_bytes():
+        assert args[args.index("-K") + 1] == "-" and stat.S_ISFIFO(os.fstat(0).st_mode)
     routes = []
     if host in ("repo.example", "apt.armbian.com", "mirror-a.example", "mirror-b.example"):
         # Translate only the vetted production pin to the fixture's listening socket.

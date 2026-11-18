@@ -7,9 +7,27 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 
 from image_capsule import object_id, original_url
 from image_stream import StreamError, unique_object
+
+
+FIRSTPARTY_ORIGIN = "https://apt.ceralive.tv"
+
+
+def require_client_origin(origin: str, repository: str = "firstparty") -> None:
+    """Download approval alone never authorizes presentation of an identity."""
+    if repository == "firstparty" and origin == FIRSTPARTY_ORIGIN:
+        return
+    # Never echo userinfo, paths, or malformed input in a rejection.
+    try:
+        host = urlsplit(origin).hostname or ""
+    except ValueError:
+        host = ""
+    label = f"https://{host}" if re.fullmatch(r"[a-z0-9.-]{1,253}", host) else "<invalid origin>"
+    raise StreamError(f"client identity requires one exact independently approved origin: {FIRSTPARTY_ORIGIN}; "
+                      f"{label} rejected by the credential and redirect policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +67,8 @@ class PublicPolicy:
 def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[str, ArchivePolicy]:
     """Parse independently approved archives without requiring image ingredients."""
     repositories = {}
+    for origin in client_origins:
+        require_client_origin(origin)
     for name, repo in rows.items():
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", name):
             raise StreamError("invalid archive policy name")
@@ -57,6 +77,8 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
         if not required_fields.issubset(repo) or set(repo) - required_fields - optional_fields:
             raise StreamError("invalid archive policy fields")
         origin = original_url(repo["origin"])
+        if origin in client_origins:
+            require_client_origin(origin, name)
         maximum = repo.get("max_redirects", 0)
         if (type(maximum) is not int or not 0 <= maximum <= 3
                 or (maximum and (name != "bsp" or origin in client_origins))):
@@ -77,9 +99,9 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
             "origin": origin, "keyring": object_id(repo["keyring"]),
             "fingerprints": tuple(fingerprints)}))
     if set(client_origins) - {repo.origin for repo in repositories.values()}:
-        raise StreamError("client identity requires one exact independently approved origin")
+        raise StreamError(f"credential origin {FIRSTPARTY_ORIGIN} missing from approved archive policy")
     if (("firstparty" in repositories
-         and (repositories["firstparty"].origin != "https://apt.ceralive.tv"
+         and (repositories["firstparty"].origin != FIRSTPARTY_ORIGIN
               or repositories["firstparty"].suite not in ("stable", "beta")
               or repositories["firstparty"].codename))
             or ("debian-source" in repositories
