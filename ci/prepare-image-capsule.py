@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import resource
 import runpy
+import shlex
 import socket
 import stat
 import subprocess
@@ -202,23 +203,50 @@ def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
     return result.stdout.strip()
 
 
-def transport_clients(args: argparse.Namespace, origins: set[str]) -> dict[str, tuple[str, str]]:
-    """Bind in-place client identities to independently approved exact origins."""
-    names = args.client_identity
+def identity_config(path: Path) -> list[list[str]]:
+    """Check the directory and file descriptors used for the actual read."""
+    try:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parent = os.fstat(directory)
+            if parent.st_mode & 0o022 or parent.st_uid not in (0, os.getuid()):
+                raise StreamError("client identity config directory must not be writable by others")
+            def open_config(name: str, flags: int) -> int:
+                return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY, dir_fd=directory)
+            with open(path.name, "rb", opener=open_config) as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                    raise StreamError("client identity config must be a regular file owned by the invoking user, mode 0600")
+                data = stream.read(1024 * 1024 + 1)
+        finally:
+            os.close(directory)
+    except OSError:
+        raise StreamError("cannot open client identity config as a regular file without following symlinks") from None
+    if len(data) > 1024 * 1024 or b"\0" in data:
+        raise StreamError("invalid or oversized client identity config")
+    try:
+        return [shlex.split(line) for line in os.fsdecode(data).split("\n")
+                if line.strip() and not line.lstrip().startswith("#")]
+    except ValueError:
+        raise StreamError("invalid quoting in client identity config") from None
+
+
+def transport_clients(args: argparse.Namespace) -> dict[str, tuple[str, str]]:
+    """Collect exact origin bindings before validating the archive policy."""
     clients = {}
-    if set(names) - origins or len(set(names)) != len(names):
-        raise StreamError("client identity requires one exact independently approved origin")
-    if names:
-        if not stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode):
-            raise StreamError("client identity paths require a stdin pipe")
-        limit = 2 * 4096 * len(names)
-        data = sys.stdin.buffer.read(limit + 1)
-        paths = data.split(b"\0")
-        if (len(data) > limit or len(paths) != 2 * len(names) + 1 or paths[-1]
-                or any(not path.startswith(b"/") or len(path) >= 4096 for path in paths[:-1])):
-            raise StreamError("expected NUL-terminated absolute certificate and key paths on stdin")
-        for index, origin in enumerate(names):
-            clients[origin] = os.fsdecode(paths[2 * index]), os.fsdecode(paths[2 * index + 1])
+    if args.client_identity:
+        print("warning: --client-identity exposes credential paths in process arguments; "
+              "use --client-identity-config instead", file=sys.stderr)
+    rows = identity_config(args.client_identity_config) if args.client_identity_config is not None else []
+    for row in [*args.client_identity, *rows]:
+        if len(row) != 3:
+            raise StreamError("client identity requires exactly ORIGIN CERT_PATH KEY_PATH")
+        origin, cert, key = row
+        if origin in clients:
+            raise StreamError("duplicate client identity origin")
+        if not Path(cert).is_absolute() or not Path(key).is_absolute():
+            raise StreamError("client certificate and key must be explicit absolute paths")
+        clients[origin] = (cert, key)
     if not 1 <= args.object_timeout <= 600:
         raise StreamError("object timeout must be between 1 and 600 seconds")
     return clients
@@ -247,7 +275,8 @@ def copy_local(source: Path, target: Path, length: int) -> None:
 
 
 def prepare(args: argparse.Namespace) -> str:
-    policy = load_policy(args.trust_policy, set(args.client_identity))
+    clients = transport_clients(args)
+    policy = load_policy(args.trust_policy, clients.keys())
     reviewed = read_json(args.inventory)
     if set(reviewed) != {"schema", "source_commit", "epoch", "board", "source_bundle",
                          "device_root", "objects", "repositories", "packages"}:
@@ -352,7 +381,6 @@ def prepare(args: argparse.Namespace) -> str:
            for digest, item in objects.items()):
         raise StreamError("undeclared network metadata")
 
-    clients = transport_clients(args, {repo.origin for repo in policy.repositories.values()})
     destination = args.output
     if destination.exists() or destination.is_symlink():
         raise StreamError("capsule output already exists")
@@ -474,6 +502,14 @@ def prepare(args: argparse.Namespace) -> str:
 
 
 class TransportParser(argparse.ArgumentParser):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_argument("--client-identity-config", type=Path, metavar="FILE",
+                          help="owned mode-0600 origin/certificate/key path mapping")
+        self.add_argument("--client-identity", action="append", nargs=3, default=[],
+                          metavar=("ORIGIN", "CERTIFICATE_PATH", "KEY_PATH"),
+                          help="legacy form exposes paths in process arguments")
+
     def error(self, message: str) -> None:
         # Legacy invocations may have supplied credential paths as extra arguments.
         super().error("invalid arguments (see --help)")
@@ -484,8 +520,6 @@ def main() -> None:
     parser.add_argument("--inventory", required=True, type=Path)
     parser.add_argument("--trust-policy", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--client-identity", action="append", default=[], metavar="ORIGIN",
-                        help="read the NUL-terminated certificate and key paths from a stdin pipe")
     parser.add_argument("--ca-file", help="explicit public HTTPS CA bundle; defaults to system trust")
     parser.add_argument("--object-timeout", type=int, default=120)
     args = parser.parse_args()

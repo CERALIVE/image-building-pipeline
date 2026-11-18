@@ -33,7 +33,8 @@ def discover(args: argparse.Namespace) -> str:
     if (set(approved) != {"schema", "repositories"} or type(approved["schema"]) is not int
             or approved["schema"] != 1):
         raise StreamError("expected independently approved schema-1 archive policy")
-    policies = archive_policies(approved["repositories"], set(args.client_identity))
+    clients = PRODUCER["transport_clients"](args)
+    policies = archive_policies(approved["repositories"], clients.keys())
     if any(Path(repo.index_path).name not in (
             ("Packages.gz", "Packages.xz", "Sources.gz", "Sources.xz") if name == "debian-source"
             else ("Packages.gz", "Packages.xz")) for name, repo in policies.items()):
@@ -72,7 +73,6 @@ def discover(args: argparse.Namespace) -> str:
         if name not in policies or name in release_names or filename not in ("InRelease", "Release"):
             raise StreamError("expected one exact signed Release name per repository")
         release_names[name] = filename
-    clients = PRODUCER["transport_clients"](args, {repo.origin for repo in policies.values()})
     destination = args.output.absolute()
     if destination.exists() or destination.is_symlink():
         raise StreamError("discovery output already exists")
@@ -239,8 +239,6 @@ def main() -> None:
     parser.add_argument("--keyring", nargs=2, action="append", default=[], metavar=("REPOSITORY", "PUBLIC_KEYRING_PATH"))
     parser.add_argument("--release-name", nargs=2, action="append", default=[], metavar=("REPOSITORY", "NAME"))
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--client-identity", action="append", default=[], metavar="ORIGIN",
-                        help="read the NUL-terminated certificate and key paths from a stdin pipe")
     parser.add_argument("--ca-file", help="explicit public HTTPS CA bundle; defaults to system trust")
     parser.add_argument("--object-timeout", type=int, default=120)
     args = parser.parse_args()

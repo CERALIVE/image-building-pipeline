@@ -27,7 +27,7 @@ def discovery(work: Path, reviewed: dict, producer_args: list[str]) -> list[str]
             "--output", str(work / "discovered")]
     for name in sorted(names):
         args += ["--keyring", name, str(work / policy["repositories"][name]["keyring"])]
-    for option, count in (("--client-identity", 2), ("--ca-file", 2), ("--object-timeout", 2)):
+    for option, count in (("--client-identity-config", 2), ("--ca-file", 2), ("--object-timeout", 2)):
         index = producer_args.index(option)
         args += producer_args[index:index + count]
     return args
@@ -313,7 +313,7 @@ def test_metadata_transport_reuses_tls_mtls_redirect_and_timeout_boundaries() ->
             if case == "untrusted-tls":
                 args[args.index("--ca-file") + 1] = str(work / "untrusted-ca.pem")
             elif case == "no-client":
-                index = args.index("--client-identity")
+                index = args.index("--client-identity-config")
                 del args[index:index + 2]
             result = run(args, env)
             assert result.returncode != 0, case
@@ -369,7 +369,8 @@ def test_approved_keyring_selection_and_origin_fail_before_any_request() -> None
                 selection["packages"] += selection["packages"]
                 (work / "selection.json").write_text(json.dumps(selection))
             elif case == "client-origin":
-                args[args.index("--client-identity") + 1] = "https://other.example"
+                config = work / "client-identities"
+                config.write_text(config.read_text().replace("apt.ceralive.tv", "other.example"))
             elif case == "format":
                 policy = json.loads((work / "archives.json").read_text())
                 policy["repositories"]["firstparty"]["index_path"] = "Sources.xz"

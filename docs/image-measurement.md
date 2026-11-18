@@ -119,7 +119,7 @@ Each policy repository (`firstparty`, `bsp` and `debian-source` are required) de
 `component`, `arch`, `index_path`, and `max_age_seconds` (at most 30 days).
 Optional `max_redirects` is an integer from 0 to 3, defaulting to 0 when absent.
 Only `bsp` may approve a nonzero value, and the policy parser rejects a nonzero
-allowance for any origin bound to `--client-identity` in that invocation.
+allowance for any origin bound to a client identity in that invocation.
 First-party and all other repositories remain at zero. Keep the Armbian BSP
 logical `origin` as `https://apt.armbian.com`; do not replace it with a mirror.
 The matching repository record repeats a nonzero allowance. Discovery omits
@@ -264,32 +264,37 @@ complete-input gzip/xz decoder verifies every concatenated stream, including a
 corrupt later xz stream, before any source lookup. No source payload is retained
 or fetched.
 
-In interactive Bash, collect the two absolute paths once. Keep these shell
-variables unexported and tracing disabled for both examples:
+**Real credentialed runs require `--client-identity-config FILE`** for both
+discovery and preparation. Provision the mapping outside the checkout and
+output directory. The file must be regular, owned by the invoking user, and
+mode 0600. Its parent must be owned by that user or root and must not be
+group- or other-writable. Use a real directory and file, not symlinks.
+Put one `ORIGIN CERT_PATH KEY_PATH` record on each line:
 
-```bash
-set +x
-set +a
-unset cert_path key_path
-IFS= read -rsp 'Client certificate path: ' cert_path; printf '\n'
-IFS= read -rsp 'Client key path: ' key_path; printf '\n'
+```text
+# One independently approved origin and two absolute paths
+https://apt.ceralive.tv /private/example/client.pem /private/example/client.key
 ```
 
-```bash
+Blank lines and full-line `#` comments are allowed. Quote paths containing
+spaces or backslashes with single quotes. The parser treats the fields as
+data and performs no shell expansion. Never export credential paths in the
+launch environment or pass them to a shell command to create the mapping.
+
+```sh
 umask 077
 mkdir -m 700 private-metadata
-builtin printf '%s\0' "$cert_path" "$key_path" |
 python3 ci/discover-image-metadata.py \
   --selection "${IMAGE_REVIEWED_PACKAGE_SELECTION:?}" \
   --trust-policy "${IMAGE_APPROVED_ARCHIVE_POLICY:?}" \
   --keyring firstparty "${IMAGE_PUBLIC_FIRSTPARTY_KEYRING:?}" \
   --keyring bsp "${IMAGE_PUBLIC_BSP_KEYRING:?}" \
-  --client-identity https://apt.ceralive.tv \
+  --client-identity-config private-config/identities \
   --output private-metadata/discovered
 ```
 
 The example assumes the selection contains firstparty and BSP packages. The
-same `--client-identity ORIGIN`, optional `--ca-file`
+same `--client-identity-config FILE`, optional `--ca-file`
 and `--object-timeout` transport rules documented below apply. Client identity
 paths and bytes never enter the output. Output must be new, below an owned
 private directory; failure removes temporary inputs and publishes no result.
@@ -406,22 +411,22 @@ a rootfs, executed from packages or re-signed.
 
 Create a private output directory and invoke one board at a time:
 
-```bash
+```sh
 umask 077
 mkdir -m 700 private-capsules
-builtin printf '%s\0' "$cert_path" "$key_path" |
 python3 ci/prepare-image-capsule.py \
   --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
   --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
-  --client-identity https://apt.ceralive.tv \
+  --client-identity-config private-config/identities \
   --output private-capsules/rock-5b-plus.tar
 ```
 
-`--client-identity ORIGIN` may repeat for distinct exact approved origins.
-Supply two NUL-terminated absolute paths (certificate, then key) per origin,
-in option order, on a stdin pipe. Close the pipe after the last pair. The old
-path arguments are no longer accepted. The Bash builtin above keeps paths
-out of process arguments and the environment. Unset both variables when done.
+With the config form, only the mapping filename appears in the command line.
+The certificate and key paths stay out of both the Python and curl argument
+vectors and environments. For compatibility, `--client-identity ORIGIN
+CERT_PATH KEY_PATH` still works and prints a warning because it exposes both
+paths in Python's process arguments. Duplicate origins within or between
+the two forms are rejected before any GET.
 For each credentialed GET, the transport sends quoted `cert` and `key` config
 lines through a fresh pipe to `curl -K -`. Curl opens the files in place.
 Neither command writes a config file or includes the paths in logs, receipts

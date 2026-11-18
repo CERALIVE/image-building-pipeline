@@ -13,8 +13,10 @@ import lzma
 import os
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -244,6 +246,10 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
         (work / IDENTITY).mkdir()
         for filename in ("client.pem", "client.key"):
             (work / IDENTITY / filename).symlink_to(work / filename)
+        identity_file = work / "client-identities"
+        identity_file.touch(mode=0o600)
+        identity_file.write_text("# Generated for this fixture only\n\n" + shlex.join(
+            ["https://apt.ceralive.tv", *(str(work / IDENTITY / f) for f in ("client.pem", "client.key"))]) + "\n")
         (work / "dns.json").write_text(json.dumps({"repo.example": [PUBLIC], "apt.armbian.com": [PUBLIC],
                                                    "mirror-a.example": [PUBLIC_V6], "mirror-b.example": [PUBLIC]}))
         curl = bin_dir / "curl"
@@ -260,7 +266,7 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
         policy_path.write_text(json.dumps(policy))
         args = ["python3", str(ROOT / "ci/prepare-image-capsule.py"), "--inventory", str(inventory_path),
                 "--trust-policy", str(policy_path), "--output", str(work / "capsule.tar"),
-                "--client-identity", "https://apt.ceralive.tv", "--ca-file", str(work / "ca.pem"),
+                "--client-identity-config", str(identity_file), "--ca-file", str(work / "ca.pem"),
                 "--object-timeout", "1" if case in ("timeout", "bsp-timeout") else "10"]
         env = {"PATH": str(bin_dir) + ":" + os.environ["PATH"], "HOME": str(work), "TMPDIR": temporary,
                "PYTHONDONTWRITEBYTECODE": "1"}
@@ -275,11 +281,9 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
 
 
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    work = Path(env["TMPDIR"])
     if args[0] == "python3":
         args = [args[0], str(ROOT / "tests/capsule_transport_fixture.py"), *args[1:]]
-    paths = "".join(str(work / IDENTITY / name) + "\0" for name in ("client.pem", "client.key"))
-    return subprocess.run(args, env=env, input=paths * args.count("--client-identity"),
+    return subprocess.run(args, env=env, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, timeout=45)
 
 
@@ -440,7 +444,7 @@ def test_firstparty_redirect_never_presents_client_identity_to_target() -> None:
             target = "https://mirror-a.example/dists/stable/binary-arm64/Packages.gz"
             redirects[url] = (302, target)
             if not credentialed:
-                index = args.index("--client-identity")
+                index = args.index("--client-identity-config")
                 del args[index:index + 2]
 
             result = run(args, env)
@@ -461,7 +465,8 @@ def test_redirect_policy_rejects_invalid_or_credentialed_allowances_before_reque
         with fixture("bsp") as (work, reviewed, args, env, requests, _remote):
             approve_redirects(work, reviewed, maximum, name)
             if identity:
-                args += ["--client-identity", "https://apt.armbian.com"]
+                args += ["--client-identity", "https://apt.armbian.com",
+                         str(work / "client.pem"), str(work / "client.key")]
 
             result = run(args, env)
 
@@ -810,7 +815,8 @@ def test_unapproved_objects_and_client_origins_are_rejected_before_requests() ->
         with fixture() as (work, reviewed, args, env, requests, _remote):
             selected = next(row for row in reviewed["objects"] if row["kind"] == "deb")
             if case == "origin":
-                args[args.index("--client-identity") + 1] = "https://other.example"
+                config = work / "client-identities"
+                config.write_text(config.read_text().replace("apt.ceralive.tv", "other.example"))
             elif case in ("traversal", "encoded-traversal", "encoded-separator"):
                 selected["urls"] = ["https://apt.ceralive.tv/" + {
                     "traversal": "../key", "encoded-traversal": "%2e%2e/key",
@@ -834,12 +840,76 @@ def test_unapproved_objects_and_client_origins_are_rejected_before_requests() ->
 
 def test_mtls_is_required_without_using_any_host_identity() -> None:
     with fixture() as (work, _reviewed, args, env, requests, _remote):
-        index = args.index("--client-identity")
+        index = args.index("--client-identity-config")
         del args[index:index + 2]
         result = run(args, env)
         assert result.returncode != 0
         assert requests == [("https://apt.ceralive.tv/dists/stable/binary-arm64/Packages.gz", False)]
         assert not (work / "capsule.tar").exists()
+
+
+def test_client_identity_config_refuses_unsafe_files_and_invalid_bindings() -> None:
+    with fixture() as (work, _reviewed, args, env, requests, _remote):
+        config = work / "client-identities"
+        valid = config.read_text()
+        alias = work / "linked-identities"
+        alias.symlink_to(config)
+        fifo = work / "fifo-identities"
+        os.mkfifo(fifo, mode=0o600)
+        directory = work / "shared"
+        directory.mkdir()
+        shared = directory / config.name
+        shared.hardlink_to(config)
+        directory.chmod(0o770)
+        for path, mode, contents, reason in (
+            (alias, 0o600, valid, "symlink"), (fifo, 0o600, valid, "regular file"),
+            (shared, 0o600, valid, "directory"), (config, 0o640, valid, "0600"),
+            (config, 0o400, valid, "0600"), (config, 0o600, valid * 2, "duplicate"),
+            (config, 0o600, valid.rstrip() + " extra", "exactly"),
+            (config, 0o600, "https://apt.ceralive.tv relative /key", "absolute"),
+            (config, 0o600, valid + "'", "quoting"),
+        ):
+            config.chmod(0o600)
+            config.write_text(contents)
+            config.chmod(mode)
+            args[args.index("--client-identity-config") + 1] = str(path)
+            result = run(args, env)
+            assert result.returncode != 0 and reason in result.stderr, result.stderr
+            assert IDENTITY not in result.stderr and not result.stdout
+            assert requests == [] and not (work / "capsule.tar").exists()
+        # Exercise a foreign st_uid without changing users or requiring chown privileges.
+        parser = runpy.run_path(str(ROOT / "ci/prepare-image-capsule.py"))
+        fstat = os.fstat
+
+        def foreign_owner(fd: int) -> os.stat_result:
+            info = fstat(fd)
+            if stat.S_ISREG(info.st_mode):
+                return os.stat_result((*info[:4], info.st_uid + 1, *info[5:]))
+            return info
+
+        with patch("os.fstat", foreign_owner):
+            try:
+                parser["identity_config"](config)
+            except parser["StreamError"] as exc:
+                assert "owned by the invoking user" in str(exc)
+            else:
+                raise AssertionError("accepted a foreign-owned identity file")
+
+
+def test_legacy_client_identity_warns_and_cannot_override_config() -> None:
+    with fixture() as (work, _reviewed, args, env, requests, _remote):
+        args += ["--client-identity", "https://apt.ceralive.tv",
+                 str(work / "client.pem"), str(work / "client.key")]
+        result = run(args, env)
+        assert result.returncode != 0 and "duplicate" in result.stderr and requests == []
+        index = args.index("--client-identity-config")
+        del args[index:index + 2]
+        result = run(args, env)
+        assert result.returncode == 0, result.stderr
+        assert len(result.stderr.splitlines()) == 1
+        assert "--client-identity-config" in result.stderr and "process arguments" in result.stderr
+        assert str(work / "client.key") not in result.stderr and str(work / "client.pem") not in result.stderr
+        assert any(authenticated for _, authenticated in requests)
 
 
 def test_signed_package_url_cannot_authorize_another_reviewed_location() -> None:

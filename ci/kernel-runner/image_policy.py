@@ -76,6 +76,8 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
         repositories[name] = ArchivePolicy(**(repo | {
             "origin": origin, "keyring": object_id(repo["keyring"]),
             "fingerprints": tuple(fingerprints)}))
+    if set(client_origins) - {repo.origin for repo in repositories.values()}:
+        raise StreamError("client identity requires one exact independently approved origin")
     if (("firstparty" in repositories
          and (repositories["firstparty"].origin != "https://apt.ceralive.tv"
               or repositories["firstparty"].suite not in ("stable", "beta")
