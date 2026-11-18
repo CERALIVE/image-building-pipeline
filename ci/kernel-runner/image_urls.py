@@ -18,7 +18,7 @@ def canonical_url(value: str) -> str:
         port = url.port
     except ValueError as exc:
         raise InputURLError("invalid sealed origin URL") from exc
-    if (url.scheme != "https" or not url.hostname or url.username or url.password
+    if (url.scheme != "https" or not url.hostname or url.username is not None or url.password is not None
             or port is not None or url.query or url.fragment or "%" in url.netloc
             or "\\" in value or re.search(r"%(?![0-9a-fA-F]{2})", url.path)
             or re.search(r"%(?:2f|5c|00)", url.path, re.IGNORECASE)):

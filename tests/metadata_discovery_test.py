@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 
-from capsule_producer_test import ROOT, command, fixture, run
+from capsule_producer_test import ROOT, approve_redirects, bsp_urls, command, fixture, mirror_url, run
 
 
 def discovery(work: Path, reviewed: dict, producer_args: list[str]) -> list[str]:
@@ -88,6 +88,113 @@ def alter_signed_metadata(work: Path, reviewed: dict, remote: dict, case: str) -
     source.write_text(release)
     remote[release_url] = command(gpg + ["--armor", "--clearsign", "--output", "-", str(source)], work)
     remote[index_url] = compressed
+
+
+def test_two_redirect_mirrors_give_identical_authenticated_rows_and_original_bytes() -> None:
+    redirects = {}
+    with fixture("bsp", redirects=redirects) as (work, reviewed, producer_args, env, requests, remote):
+        approve_redirects(work, reviewed)
+        fragments = []
+        for mirror in ("mirror-a.example", "mirror-b.example"):
+            args = discovery(work, reviewed, producer_args)
+            expected = []
+            redirects.clear()
+            for url in bsp_urls(reviewed):
+                if url.endswith(".deb"):
+                    continue
+                intermediate = mirror_url(url, mirror)
+                relative = url.removeprefix("https://apt.armbian.com")
+                final = "https://" + mirror + relative
+                redirects.update({url: (302, intermediate), intermediate: (303, relative)})
+                digest = next(row["sha256"] for row in reviewed["objects"] if row["urls"] == [url])
+                expected.append({"sha256": digest, "url": url, "final_url": final, "redirects": [
+                    {"status": 302, "from": url, "to": intermediate},
+                    {"status": 303, "from": intermediate, "to": final}]})
+            start = len(requests)
+
+            result = run(args, env)
+
+            assert result.returncode == 0, result.stderr
+            directory = work / "discovered"
+            fragments.append((directory / "inventory-fragment.json").read_bytes())
+            fragment = json.loads(fragments[-1])
+            receipt = json.loads((directory / "discovery.json").read_text())
+            record = next(row for row in receipt["repositories"] if row["repository"] == "bsp")
+            # Discovery requests Release before its authenticated index.
+            assert record["transfers"] == list(reversed(expected))
+            assert record["origin"] == "https://apt.armbian.com"
+            assert fragment["repositories"]["bsp"] == reviewed["repositories"]["bsp"]
+            for row in fragment["objects"]:
+                for url in row["urls"]:
+                    assert "mirror-" not in url
+                    if row["kind"] == "apt-metadata":
+                        assert (directory / "objects" / row["sha256"]).read_bytes() == remote[url]
+            assert all(not authenticated for url, authenticated in requests[start:]
+                       if not url.startswith("https://apt.ceralive.tv/"))
+            assert not any(url.endswith(".deb") for url, _ in requests)
+            directory.rename(work / mirror)
+        assert fragments[0] == fragments[1]
+
+
+def test_explicit_zero_redirect_policy_keeps_existing_discovery_bytes() -> None:
+    with fixture() as (work, reviewed, producer_args, env, _requests, _remote):
+        args = discovery(work, reviewed, producer_args)
+        result = run(args, env)
+        assert result.returncode == 0, result.stderr
+        original = (work / "discovered/inventory-fragment.json").read_bytes()
+        original_receipt = json.loads((work / "discovered/discovery.json").read_text())
+        (work / "discovered").rename(work / "original")
+        approve_redirects(work, reviewed, 0)
+        args = discovery(work, reviewed, producer_args)
+
+        result = run(args, env)
+
+        assert result.returncode == 0, result.stderr
+        assert (work / "discovered/inventory-fragment.json").read_bytes() == original
+        receipt = json.loads((work / "discovered/discovery.json").read_text())
+        del original_receipt["fetched_at"]
+        del receipt["fetched_at"]
+        assert receipt == original_receipt
+
+
+def test_redirected_metadata_still_requires_original_signature_and_signed_index_hash() -> None:
+    for suffix in ("InRelease", "Packages.gz"):
+        redirects = {}
+        with fixture("bsp", redirects=redirects) as (work, reviewed, producer_args, env, requests, remote):
+            approve_redirects(work, reviewed)
+            url = next(url for url in bsp_urls(reviewed) if url.endswith(suffix))
+            redirects[url] = (302, mirror_url(url))
+            if suffix == "InRelease":
+                remote[url] = remote[url].replace(b"Suite: stable", b"Suite: forged")
+            else:
+                data = remote[url]
+                remote[url] = data[:-1] + bytes([data[-1] ^ 1])
+            args = discovery(work, reviewed, producer_args)
+
+            result = run(args, env)
+
+            assert result.returncode != 0, result.stderr
+            assert "signed package lookup or control identity rejected" in result.stderr
+            assert (mirror_url(url), False) in requests
+            assert not any(request.endswith(".deb") for request, _ in requests)
+            assert not (work / "discovered").exists()
+
+
+def test_missing_redirected_metadata_names_object_and_target_without_output() -> None:
+    redirects = {}
+    with fixture("bsp", redirects=redirects) as (work, reviewed, producer_args, env, requests, _remote):
+        approve_redirects(work, reviewed)
+        url = next(url for url in bsp_urls(reviewed) if url.endswith("InRelease"))
+        target = mirror_url(url).replace("/armbian/apt/", "/missing/")
+        redirects[url] = (302, target)
+        args = discovery(work, reviewed, producer_args)
+
+        result = run(args, env)
+
+        assert result.returncode != 0, result.stderr
+        assert f"exact HTTPS GET failed for object signed at {target} (HTTP 404," in result.stderr
+        assert requests == [(url, False), (target, False)]
+        assert not (work / "discovered").exists()
 
 
 def test_metadata_only_rows_feed_unchanged_producer_and_preserve_original_objects() -> None:
@@ -197,10 +304,11 @@ def test_metadata_transport_reuses_tls_mtls_redirect_and_timeout_boundaries() ->
                  "untrusted-tls", "no-client"):
         with fixture(case) as (work, reviewed, producer_args, env, requests, _remote):
             args = discovery(work, reviewed, producer_args)
-            if case in ("untrusted-tls", "no-client"):
-                option, count = ("--ca-file", 2) if case == "untrusted-tls" else ("--client-identity", 4)
-                index = args.index(option)
-                del args[index:index + count]
+            if case == "untrusted-tls":
+                args[args.index("--ca-file") + 1] = str(work / "untrusted-ca.pem")
+            elif case == "no-client":
+                index = args.index("--client-identity")
+                del args[index:index + 4]
             result = run(args, env)
             assert result.returncode != 0, case
             assert "exact HTTPS GET failed" in result.stderr, (case, result.stderr)

@@ -143,6 +143,9 @@ The preceding `python3 ci/discover-image-metadata.py` command fills reviewed
 package hashes, sizes and URLs from approved original signed metadata without
 fetching package payloads. It emits an inventory fragment and preserves the
 metadata for review; archive public trust must be supplied independently.
+Both commands share optional bounded HTTPS redirects for uncredentialed BSP
+requests, retaining `https://apt.armbian.com` as the logical origin and recording
+the mirror chain only in receipts. Redirects default to zero.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian

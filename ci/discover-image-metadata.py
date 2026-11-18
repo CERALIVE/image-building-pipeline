@@ -33,7 +33,8 @@ def discover(args: argparse.Namespace) -> str:
     if (set(approved) != {"schema", "repositories"} or type(approved["schema"]) is not int
             or approved["schema"] != 1):
         raise StreamError("expected independently approved schema-1 archive policy")
-    policies = archive_policies(approved["repositories"])
+    policies = archive_policies(approved["repositories"],
+                               {origin for origin, _cert, _key in args.client_identity})
     if any(Path(repo.index_path).name not in (
             ("Packages.gz", "Packages.xz", "Sources.gz", "Sources.xz") if name == "debian-source"
             else ("Packages.gz", "Packages.xz")) for name, repo in policies.items()):
@@ -129,8 +130,9 @@ def discover(args: argparse.Namespace) -> str:
             index_url = original_url(base + "/" + repo.index_path)
             signed = work / "signed"
             release = work / "Release"
-            PRODUCER["fetch"](release_url, signed, 16 * 1024**2, clients.get(repo.origin),
-                              args.ca_file, args.object_timeout, env)
+            release_transfer = PRODUCER["fetch"](
+                release_url, signed, 16 * 1024**2, clients.get(repo.origin),
+                args.ca_file, args.object_timeout, env, repo.max_redirects)
             PRODUCER["shell"](
                 'source "$1/lib/fetch-debs-auth.sh"; '
                 'auth_verify_release_to_file "$2" "$3" "$4" "${@:9}"; '
@@ -147,8 +149,9 @@ def discover(args: argparse.Namespace) -> str:
             if not 0 < length <= SEALED["INDEX_LIMIT"]:
                 raise StreamError("signed package index exceeds the 256 MiB bound")
             compressed = work / "compressed"
-            PRODUCER["fetch"](index_url, compressed, length, clients.get(repo.origin),
-                              args.ca_file, args.object_timeout, env)
+            index_transfer = PRODUCER["fetch"](
+                index_url, compressed, length, clients.get(repo.origin),
+                args.ca_file, args.object_timeout, env, repo.max_redirects)
             PRODUCER["shell"](
                 'source "$1/lib/fetch/index.sh"; log_error() { printf "%s\\n" "$*" >&2; }; '
                 'index_verify_digest "$2" "$3" discovery',
@@ -161,12 +164,18 @@ def discover(args: argparse.Namespace) -> str:
             del record["max_age_seconds"]
             if not repo.codename:
                 del record["codename"]
+            if not repo.max_redirects:
+                del record["max_redirects"]
             record["fingerprints"] = list(repo.fingerprints)
             repositories[name] = record | {"inrelease": inrelease, "index": index}
             receipts.append({"repository": name, "origin": repo.origin,
                              "release_sha256": inrelease, "index_sha256": index,
                              "release_date": validity.date.isoformat(),
                              "valid_until": validity.valid_until.isoformat() if validity.valid_until else None})
+            transfers = [{"sha256": digest} | transfer for digest, transfer in
+                         ((inrelease, release_transfer), (index, index_transfer)) if transfer]
+            if transfers:
+                receipts[-1]["transfers"] = transfers
             decoded = work / "Packages"
             SEALED["decompress_index"](compressed, decoded, repo.index_path)
             for source in (source for source in sources if source.repository == name):

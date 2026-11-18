@@ -1589,6 +1589,15 @@ same-PR requirement).
   unusable primary/subkey states, and keyring parsing or normalization failures
   fail before apt runs. Source pins and the stdin-only secret rotation procedure
   are in [`docs/RELEASE-PROCESS.md`](../RELEASE-PROCESS.md) §4.
+- **Sealed BSP redirects [EXISTS: fixture-qualified]** — discovery and capsule
+  preparation share an optional `bsp.max_redirects` policy (integer 0-3,
+  default 0). Only uncredentialed BSP requests may follow manually validated
+  HTTPS hops. Keep `https://apt.armbian.com` as the logical origin and retain
+  original signed bytes and signed-index hashes/sizes; mirror URLs belong only
+  in discovery/capsule receipts, never authenticated inventory rows. Each hop
+  shares the object's deadline and size bound. See
+  [`image measurement`](../image-measurement.md). Live build transports and
+  kernel-scoped `bsp-provenance.json` are separate contracts.
 - **Non-Armbian package staging is fail-closed** — a family with
   `armbian_branch: none` emits no Armbian fetch in DRY_RUN and a real `fetch_bsp`
   invocation fails until an authenticated, exact-versioned Debian BSP source is

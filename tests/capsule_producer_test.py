@@ -12,6 +12,7 @@ import json
 import lzma
 import os
 from pathlib import Path
+import runpy
 import shutil
 import ssl
 import subprocess
@@ -19,6 +20,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+from unittest.mock import patch
 
 from sealed_inputs_test import deb
 
@@ -34,7 +36,8 @@ def command(args: list[str], work: Path) -> bytes:
 
 
 @contextmanager
-def fixture(case: str = "valid") -> Iterator[tuple]:
+def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None = None,
+            require_client: bool = True) -> Iterator[tuple]:
     with tempfile.TemporaryDirectory(prefix="capsule-producer-test-") as temporary:
         work = Path(temporary)
         work.chmod(0o700)
@@ -42,13 +45,19 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
         command(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
                  "-keyout", "ca.key", "-out", "ca.pem", "-days", "1", "-subj", "/CN=Fixture CA",
                  "-addext", "basicConstraints=critical,CA:TRUE"], work)
+        if case == "untrusted-tls":
+            command(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                     "-nodes", "-keyout", "untrusted-ca.key", "-out", "untrusted-ca.pem", "-days", "1",
+                     "-subj", "/CN=Untrusted fixture CA",
+                     "-addext", "basicConstraints=critical,CA:TRUE"], work)
         for name in ("server", "client"):
             command(["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
                      "-nodes", "-keyout", name + ".key",
                      "-out", name + ".csr", "-subj", "/CN=Fixture " + name], work)
             firstparty_name = "" if case == "hostname" else "DNS:apt.ceralive.tv,"
             extension = ("subjectAltName=" + firstparty_name + "DNS:deb.debian.org,"
-                         "DNS:repo.example,DNS:other.example\nextendedKeyUsage=serverAuth\n"
+                         "DNS:repo.example,DNS:other.example,DNS:apt.armbian.com,"
+                         "DNS:mirror-a.example,DNS:mirror-b.example\nextendedKeyUsage=serverAuth\n"
                          if name == "server" else "extendedKeyUsage=clientAuth\n")
             (work / (name + ".ext")).write_text(extension)
             command(["openssl", "x509", "-req", "-in", name + ".csr", "-CA", "ca.pem",
@@ -91,7 +100,7 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                      "tag": "fixture:" + arch, "image_id": "sha256:" + "1" * 64, "arch": arch}
                     for arch in ("arm64", "amd64")]
         origins = [("firstparty", "https://apt.ceralive.tv"),
-                   ("bsp", "https://repo.example"),
+                   ("bsp", "https://apt.armbian.com" if case.startswith("bsp") else "https://repo.example"),
                    ("debian-source", "https://deb.debian.org/debian")]
         if case.startswith("codename") or case == "packages-xz":
             origins.append(("debian-binary", "https://deb.debian.org/debian"))
@@ -170,8 +179,19 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                 url = "https://" + host + self.path
                 authenticated = bool(self.connection.getpeercert())
                 requests.append((url, authenticated))
-                if host == "apt.ceralive.tv" and not authenticated:
+                if host == "apt.ceralive.tv" and require_client and not authenticated:
                     self.send_error(403)
+                    return
+                if redirects is not None and url in redirects:
+                    status, location = redirects[url]
+                    if case == "bsp-lf-headers":
+                        self.wfile.write((f"HTTP/1.1 {status} Redirect\nLocation: {location}\n"
+                                          "Content-Length: 0\n\n").encode())
+                        return
+                    self.send_response(status)
+                    self.send_header("Location", location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
                     return
                 if case in ("redirect", "same-origin-redirect"):
                     self.send_response(302)
@@ -180,10 +200,12 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                                       else "other.example") + "/redirected")
                     self.end_headers()
                     return
-                if case == "timeout":
+                if case in ("timeout", "bsp-timeout") and (redirects is None or host.startswith("mirror-")):
                     release_response.wait(5)
                     return
                 data = remote.get(url)
+                if host in ("mirror-a.example", "mirror-b.example"):
+                    data = remote.get("https://apt.armbian.com" + self.path.removeprefix("/armbian/apt"))
                 if case == "missing-object" and host == "apt.ceralive.tv" and url.endswith(".deb"):
                     data = None
                 if data is None:
@@ -191,11 +213,12 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                     return
                 if case == "package-hash" and url.endswith(".deb"):
                     data = data[:-1] + bytes([data[-1] ^ 1])
-                if case == "oversize":
+                oversize = case == "oversize" or (case == "bsp-oversize" and host.startswith("mirror-"))
+                if oversize:
                     data += b"excess"
                 self.send_response(200)
                 # No Content-Length on the oversize case: file limits must still hold.
-                if case != "oversize":
+                if not oversize:
                     self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 try:
@@ -233,8 +256,8 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                 "--trust-policy", str(policy_path), "--output", str(work / "capsule.tar"),
                 "--client-identity", "https://apt.ceralive.tv", str(work / "client.pem"),
                 str(work / "client.key"), "--ca-file", str(work / "ca.pem"),
-                "--object-timeout", "1" if case == "timeout" else "10"]
-        env = {"PATH": str(bin_dir) + ":" + os.environ["PATH"], "HOME": str(work),
+                "--object-timeout", "1" if case in ("timeout", "bsp-timeout") else "10"]
+        env = {"PATH": str(bin_dir) + ":" + os.environ["PATH"], "HOME": str(work), "TMPDIR": temporary,
                "PYTHONDONTWRITEBYTECODE": "1"}
         try:
             yield work, reviewed, args, env, requests, remote
@@ -248,6 +271,278 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
 
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=45)
+
+
+def approve_redirects(work: Path, reviewed: dict, maximum: int = 3, name: str = "bsp") -> None:
+    """Make the fixture's independent policy and reviewed delivery record agree."""
+    policy = json.loads((work / "policy.json").read_text())
+    policy["repositories"][name]["max_redirects"] = maximum
+    reviewed["repositories"][name]["max_redirects"] = maximum
+    (work / "policy.json").write_text(json.dumps(policy))
+    (work / "reviewed.json").write_text(json.dumps(reviewed))
+
+
+def bsp_urls(reviewed: dict) -> list[str]:
+    return [url for row in reviewed["objects"] for url in row["urls"]
+            if url.startswith("https://apt.armbian.com/")]
+
+
+def mirror_url(url: str, mirror: str = "mirror-a.example") -> str:
+    return url.replace("https://apt.armbian.com", "https://" + mirror + "/armbian/apt", 1)
+
+
+def capsule_receipt(work: Path, digest: str, imported: str = "imported") -> tuple:
+    capsule = unpack(work / "capsule.tar", work / imported,
+                     Identity("test", "rock-5b-plus", "a" * 40, 1234, digest))
+    receipts = [json.loads((capsule.directory / row.sha256).read_bytes())
+                for row in capsule.objects if row.kind == "apt-metadata" and not row.urls
+                and (capsule.directory / row.sha256).read_bytes().startswith(b'{"delivery"')]
+    assert len(receipts) == 1
+    return capsule, receipts[0]
+
+
+def test_bsp_redirect_chain_preserves_authenticated_bytes_and_logical_origin() -> None:
+    redirects = {}
+    with fixture("bsp", redirects=redirects) as (work, reviewed, args, env, requests, remote):
+        approve_redirects(work, reviewed)
+        expected = []
+        for url in sorted(bsp_urls(reviewed), key=lambda value: value.endswith(".deb")):
+            first = mirror_url(url)
+            second = mirror_url(url, "mirror-b.example")
+            last = second.replace("/armbian/apt/", "/")
+            redirects.update({url: (302, first), first: (307, second), second: (308, last)})
+            digest = next(row["sha256"] for row in reviewed["objects"] if row["urls"] == [url])
+            expected.append({"sha256": digest, "url": url, "final_url": last, "redirects": [
+                {"status": 302, "from": url, "to": first},
+                {"status": 307, "from": first, "to": second},
+                {"status": 308, "from": second, "to": last}]})
+
+        result = run(args, env)
+
+        assert result.returncode == 0, result.stderr
+        capsule, receipt = capsule_receipt(work, result.stdout.strip())
+        assert receipt["transfers"] == expected
+        assert json.loads((capsule.directory / "inventory.json").read_text())["repositories"] == reviewed["repositories"]
+        for row in capsule.objects:
+            for url in row.urls:
+                assert (capsule.directory / row.sha256).read_bytes() == remote[url]
+        assert all(not authenticated for url, authenticated in requests
+                   if not url.startswith("https://apt.ceralive.tv/"))
+        assert not any("mirror-" in url for row in capsule.objects for url in row.urls)
+
+
+def test_bsp_redirect_rejections_leave_no_capsule_or_target_request() -> None:
+    for case, expected in (
+        ("limit", "redirect limit exceeded"),
+        ("downgrade", "sealed objects require exact HTTPS origin URLs"),
+        ("userinfo", "sealed objects require exact HTTPS origin URLs"),
+        ("empty-userinfo", "sealed objects require exact HTTPS origin URLs"),
+        ("loop", "redirect loop"),
+        ("path", "redirect target changes logical object path"),
+        ("missing", "HTTP 404"),
+    ):
+        redirects = {}
+        with fixture("bsp", redirects=redirects) as (work, reviewed, args, env, requests, _remote):
+            approve_redirects(work, reviewed)
+            url = bsp_urls(reviewed)[0]
+            target = mirror_url(url)
+            if case == "limit":
+                for prefix in ("one", "two", "three", "four"):
+                    next_url = target.replace("/armbian/apt/", "/" + prefix + "/")
+                    redirects[url] = (302, next_url)
+                    url = next_url
+                forbidden = url
+            elif case == "loop":
+                redirects[url] = (302, target)
+                redirects[target] = (302, url)
+                forbidden = None
+            else:
+                target = {
+                    "downgrade": target.replace("https://", "http://"),
+                    "userinfo": target.replace("https://", "https://user:password@"),
+                    "empty-userinfo": target.replace("https://", "https://@"),
+                    "path": "https://mirror-a.example/unrelated",
+                    "missing": target.replace("/armbian/apt/", "/missing/"),
+                }[case]
+                redirects[url] = (302, target)
+                forbidden = None if case == "missing" else target
+
+            result = run(args, env)
+
+            assert result.returncode != 0, case
+            assert expected in result.stderr, (case, result.stderr)
+            assert "object " in result.stderr, (case, result.stderr)
+            assert all(request != forbidden for request, _ in requests), case
+            if case == "loop":
+                assert [request for request, _ in requests].count(url) == 1
+            if case == "missing":
+                assert requests[-1] == (target, False)
+                assert next(row["sha256"] for row in reviewed["objects"] if row["urls"] == [url]) in result.stderr
+            assert not (work / "capsule.tar").exists(), case
+            assert not list(work.glob(".prefetch-*")), case
+
+
+def test_firstparty_redirect_never_presents_client_identity_to_target() -> None:
+    for credentialed in (True, False):
+        redirects = {}
+        with fixture(redirects=redirects, require_client=credentialed) as (
+                work, _reviewed, args, env, requests, _remote):
+            url = "https://apt.ceralive.tv/dists/stable/binary-arm64/Packages.gz"
+            target = "https://mirror-a.example/dists/stable/binary-arm64/Packages.gz"
+            redirects[url] = (302, target)
+            if not credentialed:
+                index = args.index("--client-identity")
+                del args[index:index + 4]
+
+            result = run(args, env)
+
+            assert result.returncode != 0, result.stderr
+            assert "HTTP 302" in result.stderr
+            assert requests == [(url, credentialed)]
+            assert not any(authenticated for request, authenticated in requests if request == target)
+            assert not (work / "capsule.tar").exists()
+
+
+def test_redirect_policy_rejects_invalid_or_credentialed_allowances_before_requests() -> None:
+    for name, maximum, identity in (
+        ("bsp", 4, False), ("bsp", -1, False), ("bsp", True, False),
+        ("bsp", "3", False), ("firstparty", 1, False), ("debian-source", 1, False),
+        ("bsp", 3, True),
+    ):
+        with fixture("bsp") as (work, reviewed, args, env, requests, _remote):
+            approve_redirects(work, reviewed, maximum, name)
+            if identity:
+                args += ["--client-identity", "https://apt.armbian.com",
+                         str(work / "client.pem"), str(work / "client.key")]
+
+            result = run(args, env)
+
+            assert result.returncode != 0, (name, maximum)
+            assert "redirect policy" in result.stderr, result.stderr
+            assert requests == []
+            assert not (work / "capsule.tar").exists()
+
+
+def test_redirected_mirror_bytes_must_match_reviewed_hashes() -> None:
+    for suffix in ("InRelease", "Packages.gz", ".deb"):
+        redirects = {}
+        with fixture("bsp", redirects=redirects) as (work, reviewed, args, env, requests, remote):
+            approve_redirects(work, reviewed)
+            url = next(url for url in bsp_urls(reviewed) if url.endswith(suffix))
+            redirects[url] = (302, mirror_url(url))
+            data = remote[url]
+            remote[url] = data[:-1] + bytes([data[-1] ^ 1])
+
+            result = run(args, env)
+
+            assert result.returncode != 0, result.stderr
+            assert "size or digest mismatch" in result.stderr
+            assert (mirror_url(url), False) in requests
+            assert not (work / "capsule.tar").exists()
+
+
+def test_redirected_targets_keep_size_and_timeout_bounds() -> None:
+    for case in ("bsp-oversize", "bsp-timeout"):
+        redirects = {}
+        with fixture(case, redirects=redirects) as (work, reviewed, args, env, requests, _remote):
+            approve_redirects(work, reviewed)
+            url = bsp_urls(reviewed)[0]
+            redirects[url] = (302, mirror_url(url))
+
+            result = run(args, env)
+
+            assert result.returncode != 0, result.stderr
+            assert "exact HTTPS GET failed for object " in result.stderr
+            assert (mirror_url(url), False) in requests
+            assert not (work / "capsule.tar").exists()
+
+
+def test_redirected_metadata_and_package_sizes_must_match_signed_sizes() -> None:
+    for case in ("index", "package"):
+        redirects = {}
+        with fixture("bsp", redirects=redirects) as (work, reviewed, args, env, _requests, remote):
+            approve_redirects(work, reviewed)
+            urls = bsp_urls(reviewed)
+            release_url = next(url for url in urls if url.endswith("InRelease"))
+            index_url = next(url for url in urls if url.endswith("Packages.gz"))
+            repository = reviewed["repositories"]["bsp"]
+            index = remote[index_url]
+            source = work / "signed-size-fixture"
+            source.write_bytes(remote[release_url])
+            gpg = ["gpg", "--homedir", str(work / "gnupg"), "--batch", "--yes",
+                   "--pinentry-mode", "loopback", "--passphrase", ""]
+            release = command(gpg + ["--decrypt", str(source)], work).decode()
+            if case == "index":
+                release = release.replace(f" {len(index)} {repository['index_path']}",
+                                          f" {len(index) + 1} {repository['index_path']}")
+            else:
+                package_url = next(url for url in urls if url.endswith(".deb"))
+                size = len(remote[package_url])
+                payload = gzip.decompress(index).replace(f"Size: {size}\n".encode(),
+                                                         f"Size: {size + 1}\n".encode())
+                changed = gzip.compress(payload, mtime=0)
+                digest = hashlib.sha256(changed).hexdigest()
+                release = release.replace(hashlib.sha256(index).hexdigest(), digest)
+                release = release.replace(f" {len(index)} {repository['index_path']}",
+                                          f" {len(changed)} {repository['index_path']}")
+                row = next(row for row in reviewed["objects"] if row["urls"] == [index_url])
+                row.update(sha256=digest, length=len(changed))
+                repository["index"] = digest
+                remote[index_url] = changed
+            source.write_text(release)
+            signed = command(gpg + ["--armor", "--clearsign", "--output", "-", str(source)], work)
+            digest = hashlib.sha256(signed).hexdigest()
+            row = next(row for row in reviewed["objects"] if row["urls"] == [release_url])
+            row.update(sha256=digest, length=len(signed))
+            repository["inrelease"] = digest
+            remote[release_url] = signed
+            for url in urls:
+                redirects[url] = (302, mirror_url(url))
+            (work / "reviewed.json").write_text(json.dumps(reviewed))
+
+            result = run(args, env)
+
+            assert result.returncode != 0, (case, result.stderr)
+            assert ("signature/index/identity verification rejected" if case == "index" else
+                    "reviewed package differs from original signed index") in result.stderr
+            assert not (work / "capsule.tar").exists()
+
+
+def test_malformed_redirect_headers_never_appear_in_failure_diagnostics() -> None:
+    redirects = {}
+    with fixture("bsp-lf-headers", redirects=redirects) as (work, reviewed, args, env, requests, _remote):
+        approve_redirects(work, reviewed)
+        url = bsp_urls(reviewed)[0]
+        redirects[url] = (302, mirror_url(url).replace("https://", "https://user:password@"))
+
+        result = run(args, env)
+
+        assert result.returncode != 0, result.stderr
+        assert "user:password" not in result.stderr
+        assert "Location:" not in result.stderr
+        assert next(row["sha256"] for row in reviewed["objects"] if row["urls"] == [url]) in result.stderr
+        assert not any("mirror-" in request for request, _ in requests)
+        assert not (work / "capsule.tar").exists()
+
+
+def test_redirect_hops_share_one_object_deadline() -> None:
+    redirects = {}
+    with fixture("bsp", redirects=redirects) as (work, reviewed, _args, env, requests, _remote):
+        url = bsp_urls(reviewed)[0]
+        redirects[url] = (302, mirror_url(url))
+        row = next(row for row in reviewed["objects"] if row["urls"] == [url])
+        producer = runpy.run_path(str(ROOT / "ci/prepare-image-capsule.py"))
+
+        with patch("time.monotonic", side_effect=[0, 0, 9, 11]):
+            try:
+                producer["fetch"](url, work / row["sha256"], row["length"], None,
+                                  str(work / "ca.pem"), 10, env, 3)
+            except producer["StreamError"] as error:
+                assert "object timeout" in str(error), str(error)
+            else:
+                raise AssertionError("redirect hop received a fresh object deadline")
+
+        assert requests == [(url, False)]
 
 
 def test_codename_path_accepts_original_signed_suite() -> None:
@@ -416,8 +711,7 @@ def test_redirects_unknown_tls_and_bounded_transfers_never_publish() -> None:
     for case in ("redirect", "same-origin-redirect", "oversize", "timeout", "untrusted-tls", "hostname"):
         with fixture(case) as (work, _reviewed, args, env, requests, _remote):
             if case == "untrusted-tls":
-                index = args.index("--ca-file")
-                del args[index:index + 2]
+                args[args.index("--ca-file") + 1] = str(work / "untrusted-ca.pem")
             result = run(args, env)
             assert result.returncode != 0, case
             assert "exact HTTPS GET failed" in result.stderr, (case, result.stderr)

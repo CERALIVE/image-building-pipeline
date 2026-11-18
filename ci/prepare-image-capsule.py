@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
+from email.parser import BytesParser
 import hashlib
 import io
 import json
@@ -18,6 +19,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+from urllib.parse import urljoin, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
@@ -42,25 +45,69 @@ def read_json(path: Path) -> dict:
 
 
 def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
-          ca_file: str | None, seconds: int, env: dict[str, str]) -> None:
-    """One exact GET, without curl configuration, proxies, redirects or retries."""
-    args = ["curl", "--disable", "--silent", "--fail", "--globoff", "--noproxy", "*",
-            "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0",
-            "--connect-timeout", str(min(10, seconds)), "--max-time", str(seconds),
-            "--max-filesize", str(length), "--output", str(target),
-            "--write-out", "%{http_code}"]
-    if client:
-        args += ["--cert", client[0], "--key", client[1]]
-    if ca_file:
-        args += ["--cacert", ca_file]
-    result = subprocess.run(args + ["--url", url], env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            timeout=seconds + 5, start_new_session=True,
-                            preexec_fn=lambda: child_limit(length))
-    if result.returncode or result.stdout != b"200":
-        # Name only reviewed public identity; curl stderr can carry credential paths.
-        raise StreamError(f"exact HTTPS GET failed for object {target.name} at {url} "
-                          f"(HTTP {result.stdout.decode(errors='replace')}, curl exit {result.returncode})")
+          ca_file: str | None, seconds: int, env: dict[str, str], max_redirects: int = 0) -> dict:
+    """Bounded manual HTTPS GETs; redirects never carry a client identity."""
+    if max_redirects and client:
+        raise StreamError("invalid archive redirect policy for a client identity")
+    current = original_url(url)
+    logical_path = urlsplit(current).path
+    seen = {(urlsplit(current).hostname, logical_path)}
+    redirects = []
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic() if max_redirects else seconds
+        if remaining <= 0:
+            raise StreamError(f"object timeout for object {target.name} at {current}")
+        args = ["curl", "--disable", "--silent", "--fail", "--globoff", "--noproxy", "*",
+                "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0",
+                "--connect-timeout", str(min(10, remaining)), "--max-time", str(remaining),
+                "--max-filesize", str(length), "--output", str(target),
+                "--write-out", "%{http_code}"]
+        if client:
+            args += ["--cert", client[0], "--key", client[1]]
+        if ca_file:
+            args += ["--cacert", ca_file]
+        if max_redirects:
+            # Raw Location preserves forbidden spellings that curl may normalize away.
+            args += ["--dump-header", "-"]
+        result = subprocess.run(args + ["--url", current], env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=remaining + 5, start_new_session=True,
+                                preexec_fn=lambda: child_limit(length))
+        headers, status = result.stdout[:-3], result.stdout[-3:]
+        if result.returncode or status != b"200" and (
+                not max_redirects or status not in (b"301", b"302", b"303", b"307", b"308")):
+            # Never render curl stderr, server bytes or unvalidated redirect URLs.
+            raise StreamError(f"exact HTTPS GET failed for object {target.name} at {current} "
+                              f"(HTTP {status.decode(errors='replace')}, curl exit {result.returncode})")
+        if max_redirects and time.monotonic() > deadline:
+            raise StreamError(f"object timeout for object {target.name} at {current}")
+        if max_redirects and len(headers) > 64 * 1024:
+            raise StreamError(f"oversized response headers for object {target.name} at {current}")
+        if status == b"200":
+            return {"url": url, "redirects": redirects, "final_url": current} if redirects else {}
+        if len(redirects) >= max_redirects:
+            raise StreamError(f"redirect limit exceeded for object {target.name} at {current}")
+        final_headers = headers.removesuffix(b"\r\n\r\n").rsplit(b"\r\n\r\n", 1)[-1].partition(b"\r\n")[2]
+        locations = BytesParser().parsebytes(final_headers).get_all("Location", [])
+        if len(locations) != 1:
+            raise StreamError(f"missing or ambiguous redirect Location for object {target.name} at {current}")
+        location = locations[0]
+        try:
+            if any(char.isspace() or ord(char) < 32 for char in location):
+                raise StreamError("invalid sealed origin URL")
+            destination = original_url(urljoin(current, location))
+        except StreamError as exc:
+            raise StreamError(f"{exc} for object {target.name} at {current}") from exc
+        parsed = urlsplit(destination)
+        if not parsed.path.endswith(logical_path):
+            raise StreamError(f"redirect target changes logical object path for object {target.name} at {current}")
+        identity = (parsed.hostname, parsed.path)
+        if identity in seen:
+            raise StreamError(f"redirect loop for object {target.name} at {current}")
+        seen.add(identity)
+        redirects.append({"status": int(status), "from": current, "to": destination})
+        current = destination
 
 
 def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
@@ -111,7 +158,7 @@ def copy_local(source: Path, target: Path, length: int) -> None:
 
 
 def prepare(args: argparse.Namespace) -> str:
-    policy = load_policy(args.trust_policy)
+    policy = load_policy(args.trust_policy, {origin for origin, _cert, _key in args.client_identity})
     reviewed = read_json(args.inventory)
     if set(reviewed) != {"schema", "source_commit", "epoch", "board", "source_bundle",
                          "device_root", "objects", "repositories", "packages"}:
@@ -174,6 +221,8 @@ def prepare(args: argparse.Namespace) -> str:
         del expected["max_age_seconds"]
         if not repo.codename:
             del expected["codename"]
+        if not repo.max_redirects and "max_redirects" not in record:
+            del expected["max_redirects"]
         if (set(record) != set(expected) | {"inrelease", "index"}
                 or any(record[key] != value for key, value in expected.items())):
             raise StreamError("repository differs from independently approved policy")
@@ -188,7 +237,7 @@ def prepare(args: argparse.Namespace) -> str:
                     or objects[digest]["urls"][0] not in
                     {original_url(base + "/" + suffix) for suffix in suffixes}):
                 raise StreamError("metadata URL is outside the exact approved repository objects")
-            allowed[digest] = repo.origin
+            allowed[digest] = repo
         if objects[record["inrelease"]]["length"] > 16 * 1024**2:
             raise StreamError("signed Release metadata exceeds the 16 MiB bound")
 
@@ -229,6 +278,7 @@ def prepare(args: argparse.Namespace) -> str:
         data.mkdir(mode=0o700)
         env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": temporary,
                "TMPDIR": temporary, "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}
+        transfers = []
         for digest, item in objects.items():
             if item["kind"] == "deb":
                 continue
@@ -239,8 +289,11 @@ def prepare(args: argparse.Namespace) -> str:
                     source = args.inventory.parent / source
                 copy_local(source, target, item["length"])
             else:
-                fetch(item["urls"][0], target, item["length"], clients.get(allowed[digest]),
-                      args.ca_file, args.object_timeout, env)
+                repo = allowed[digest]
+                transfer = fetch(item["urls"][0], target, item["length"], clients.get(repo.origin),
+                                 args.ca_file, args.object_timeout, env, repo.max_redirects)
+                if transfer:
+                    transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
             if target.stat().st_size != item["length"] or digest_file(target) != digest:
                 raise StreamError("prefetched object size or digest mismatch")
@@ -271,18 +324,21 @@ def prepare(args: argparse.Namespace) -> str:
         package_inventory = []
         for digest, package in packages.items():
             repo = policy.repositories[package["repository"]]
-            record = shell('source "$1/lib/fetch-debs-auth.sh"; auth_lookup_package "$2" "$3" "$4" "$5"',
+            record = shell('source "$1/lib/fetch-debs-auth.sh"; auth_lookup_package "$2" "$3" "$4" "$5" identity',
                            [str(indexes[package["repository"]]), package["name"], package["version"], repo.arch], env)
-            filename, signed_digest, version = record.split("\t")
+            filename, signed_digest, version, arch, size = record.split("\t")
             if filename.startswith("/") or ".." in filename or "://" in filename:
                 raise StreamError("signed package filename is unsafe")
             url = original_url(bases[package["repository"]] + "/" + filename.removeprefix("./"))
             item = objects[digest]
-            if signed_digest != digest or version != package["version"] or item["urls"] != [url]:
+            if (signed_digest != digest or version != package["version"] or arch != package["arch"]
+                    or int(size) != item["length"] or item["urls"] != [url]):
                 raise StreamError("reviewed package differs from original signed index")
             target = data / digest
-            fetch(url, target, item["length"], clients.get(repo.origin),
-                  args.ca_file, args.object_timeout, env)
+            transfer = fetch(url, target, item["length"], clients.get(repo.origin),
+                             args.ca_file, args.object_timeout, env, repo.max_redirects)
+            if transfer:
+                transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
             if target.stat().st_size != item["length"] or digest_file(target) != digest:
                 raise StreamError("package size or digest mismatch")
@@ -294,7 +350,8 @@ def prepare(args: argparse.Namespace) -> str:
         receipt = json.dumps({"schema": 1, "delivery": "offline-capsule",
                               "fetched_at": inventory["fetched_at"],
                               "packages": package_inventory,
-                              "metadata_validity": read_json(data / "metadata-validity.json")},
+                              "metadata_validity": read_json(data / "metadata-validity.json")} |
+                             ({"transfers": transfers} if transfers else {}),
                              sort_keys=True, separators=(",", ":")).encode()
         receipt_digest = hashlib.sha256(receipt).hexdigest()
         (data / receipt_digest).write_bytes(receipt)
