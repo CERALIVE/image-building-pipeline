@@ -198,6 +198,32 @@ def test_metadata_transport_reuses_tls_mtls_redirect_and_timeout_boundaries() ->
             assert str(work / "client.key") not in result.stderr
 
 
+def test_missing_metadata_names_http_404_and_leaves_no_output_or_payload_requests() -> None:
+    for missing_name in ("InRelease", "Release", "Packages.gz"):
+        with fixture() as (work, reviewed, producer_args, env, requests, remote):
+            args = discovery(work, reviewed, producer_args)
+            private = work / "private"
+            private.mkdir(mode=0o700)
+            args[args.index("--output") + 1] = str(private / "discovered")
+            if missing_name == "Release":
+                alter_signed_metadata(work, reviewed, remote, "signed-release")
+                args += ["--release-name", "firstparty", "Release"]
+            missing_url = "https://apt.ceralive.tv/dists/stable/binary-arm64/" + missing_name
+            del remote[missing_url]
+
+            result = run(args, env)
+
+            assert result.returncode != 0, missing_name
+            assert "exact HTTPS GET failed for object" in result.stderr, result.stderr
+            assert f"at {missing_url} (HTTP 404," in result.stderr, result.stderr
+            assert result.stdout == ""
+            assert str(work / "client.pem") not in result.stderr
+            assert str(work / "client.key") not in result.stderr
+            assert requests[-1] == (missing_url, True)
+            assert not any(url.endswith(".deb") for url, _ in requests), requests
+            assert list(private.iterdir()) == []
+
+
 def test_approved_keyring_selection_and_origin_fail_before_any_request() -> None:
     for case in ("keyring", "fingerprint", "origin", "duplicate-selection", "client-origin", "format", "existing"):
         with fixture() as (work, reviewed, producer_args, env, requests, _remote):
