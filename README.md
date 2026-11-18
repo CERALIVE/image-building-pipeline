@@ -135,8 +135,10 @@ artifacts stay private and require an independent verifier. This route does
 not create a signed candidate or refresh the size baselines.
 Its host preparation command, `python3 ci/prepare-image-capsule.py`, fetches an
 explicit reviewed package closure with origin-scoped client certificate paths
-and preserves the original signed metadata. See the profile's preparation
-contract before authorizing any authenticated prefetch.
+and preserves the original signed metadata. It supports separately pinned signed
+Suite/Codename identities and bounded gzip/xz binary-index decoding, including
+complete validation of every concatenated xz stream and its padding. See the
+profile's preparation contract before authorizing any authenticated prefetch.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian

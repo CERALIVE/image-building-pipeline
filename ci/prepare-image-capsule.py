@@ -26,7 +26,7 @@ from image_policy import load_policy
 from image_stream import Identity, StreamError, unique_object
 
 SEALED = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
-INDEX_LIMIT = 256 * 1024**2
+INDEX_LIMIT = SEALED["INDEX_LIMIT"]
 
 
 def child_limit(length: int) -> None:
@@ -136,10 +136,12 @@ def prepare(args: argparse.Namespace) -> str:
         expected = asdict(repo)
         expected["fingerprints"] = list(repo.fingerprints)
         del expected["max_age_seconds"]
+        if not repo.codename:
+            del expected["codename"]
         if (set(record) != set(expected) | {"inrelease", "index"}
                 or any(record[key] != value for key, value in expected.items())):
             raise StreamError("repository differs from independently approved policy")
-        base = repo.origin + "/dists/" + repo.suite
+        base = repo.origin + "/dists/" + (repo.codename or repo.suite)
         if name == "firstparty":
             base += "/binary-" + repo.arch
         bases[name] = base if name == "firstparty" else repo.origin
@@ -250,8 +252,7 @@ def prepare(args: argparse.Namespace) -> str:
         for name in dict.fromkeys(package["repository"] for package in packages.values()):
             index = data / reviewed["repositories"][name]["index"]
             indexes[name] = work / (name + ".Packages")
-            shell('source "$1/lib/fetch/index.sh"; index_decompress_gz "$2" "$3"',
-                  [str(index), str(indexes[name])], env)
+            SEALED["decompress_index"](index, indexes[name], policy.repositories[name].index_path)
         package_inventory = []
         for digest, package in packages.items():
             repo = policy.repositories[package["repository"]]

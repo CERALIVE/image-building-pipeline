@@ -9,6 +9,7 @@ import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import lzma
 import os
 from pathlib import Path
 import shutil
@@ -89,16 +90,22 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
         builders = [{"object": store(("builder " + arch).encode(), "builder-image"),
                      "tag": "fixture:" + arch, "image_id": "sha256:" + "1" * 64, "arch": arch}
                     for arch in ("arm64", "amd64")]
-        for name, origin in (("firstparty", "https://apt.ceralive.tv"),
-                             ("bsp", "https://repo.example"),
-                             ("debian-source", "https://deb.debian.org/debian")):
-            base = origin + "/dists/stable"
+        origins = [("firstparty", "https://apt.ceralive.tv"),
+                   ("bsp", "https://repo.example"),
+                   ("debian-source", "https://deb.debian.org/debian")]
+        if case.startswith("codename") or case == "packages-xz":
+            origins.append(("debian-binary", "https://deb.debian.org/debian"))
+        for name, origin in origins:
+            suite = "trixie" if case.startswith("codename") and name == "debian-binary" else "stable"
+            if case == "packages-xz" and name == "debian-binary":
+                suite = "stable-updates"
+            base = origin + "/dists/" + suite
             if name == "firstparty":
                 base += "/binary-arm64"
             index_path = "Packages.gz" if name == "firstparty" else "main/binary-arm64/Packages.gz"
             index_bytes = b"Package: source-fixture\n"
             if name != "debian-source":
-                version = "1.0" if name == "firstparty" else "1.1"
+                version = {"firstparty": "1.0", "bsp": "1.1", "debian-binary": "1.2"}[name]
                 package = deb("9.0" if case == "control-version" and name == "firstparty" else version,
                               "amd64" if case == "control-arch" and name == "firstparty" else "arm64")
                 filename = "ceralive-device_" + version + "_arm64.deb"
@@ -110,15 +117,30 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                                f"Filename: {filename}\nSize: {len(package)}\nSHA256: {digest}\n\n").encode()
                 if case == "ambiguous" and name == "firstparty":
                     index_bytes += index_bytes
-            compressed = gzip.compress(index_bytes)
+            if case == "packages-xz" and name in ("bsp", "debian-binary"):
+                index_path = index_path.removesuffix(".gz") + ".xz"
+            compressed = lzma.compress(index_bytes) if index_path.endswith(".xz") else gzip.compress(index_bytes)
             index_digest = hashlib.sha256(compressed).hexdigest()
             index = store(compressed + (b"tampered" if case == "index" and name == "firstparty" else b""),
                           "apt-metadata", base + "/" + index_path)
             now = datetime.now(timezone.utc)
             date = now - timedelta(days=2 if case == "expired" else 0, minutes=1)
             until = now + timedelta(days=-1 if case == "expired" else 1)
-            release = (f"Origin: {'Debian' if name == 'debian-source' else name}\nSuite: stable\n"
-                       f"Components: main\nArchitectures: arm64\nDate: {format_datetime(date)}\n")
+            signed_suite = "stable" if case.startswith("codename") and name == "debian-binary" else suite
+            if name == "debian-binary" and case == "codename-suite-mismatch":
+                signed_suite = "testing"
+            component = "contrib" if name == "debian-binary" and case == "codename-component" else "main"
+            architecture = "amd64" if name == "debian-binary" and case == "codename-arch" else "arm64"
+            release = (f"Origin: {'Debian' if name.startswith('debian-') else name}\nSuite: {signed_suite}\n"
+                       f"Components: {component}\nArchitectures: {architecture}\nDate: {format_datetime(date)}\n")
+            if name == "debian-binary" and case != "codename-missing":
+                release += "Codename: " + ("bookworm" if case == "codename-mismatch" else "trixie") + "\n"
+                if case == "codename-duplicate":
+                    release += "Codename: trixie\n"
+                if case == "codename-extra-token":
+                    release = release.replace("Codename: trixie\n", "Codename: trixie bookworm\n")
+                if case == "codename-duplicate-suite":
+                    release += "Suite: stable\n"
             if not (case == "debian-waiver" and name == "debian-source"):
                 release += f"Valid-Until: {format_datetime(until)}\n"
             release += f"SHA256:\n {index_digest} {len(compressed)} {index_path}\n"
@@ -128,7 +150,9 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
                 signed = signed.replace(b"Suite: stable", b"Suite: forged")
             inrelease = store(signed, "apt-metadata", base + "/InRelease")
             repo = {"origin": origin, "keyring": keyring, "fingerprints": [fingerprint],
-                    "suite": "stable", "component": "main", "arch": "arm64", "index_path": index_path}
+                    "suite": suite, "component": "main", "arch": "arm64", "index_path": index_path}
+            if case.startswith("codename") and name == "debian-binary":
+                repo |= {"suite": "stable", "codename": "trixie"}
             policies[name] = repo | {"max_age_seconds": 86400}
             repositories[name] = repo | {"inrelease": inrelease, "index": index}
         reviewed = {"schema": 1, "source_commit": "a" * 40, "epoch": 1234, "board": "rock-5b-plus",
@@ -224,6 +248,88 @@ def fixture(case: str = "valid") -> Iterator[tuple]:
 
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=45)
+
+
+def test_codename_path_accepts_original_signed_suite() -> None:
+    with fixture("codename") as (work, _reviewed, args, env, requests, remote):
+        result = run(args, env)
+        assert result.returncode == 0, result.stderr
+        capsule = unpack(work / "capsule.tar", work / "imported",
+                         Identity("test", "rock-5b-plus", "a" * 40, 1234, result.stdout.strip()))
+        url = "https://deb.debian.org/debian/dists/trixie/InRelease"
+        row = next(row for row in capsule.objects if url in row.urls)
+        assert (capsule.directory / row.sha256).read_bytes() == remote[url]
+        assert b"Suite: stable\n" in remote[url] and b"Codename: trixie\n" in remote[url]
+        assert {url for url, _authenticated in requests} == set(remote)
+
+
+def test_xz_only_binary_indexes_seal_and_import_original_bytes() -> None:
+    with fixture("packages-xz") as (work, _reviewed, args, env, requests, remote):
+        result = run(args, env)
+        assert result.returncode == 0, result.stderr
+        capsule = unpack(work / "capsule.tar", work / "imported",
+                         Identity("test", "rock-5b-plus", "a" * 40, 1234, result.stdout.strip()))
+        shutil.copyfile(work / "policy.json", capsule.directory / "trust.json")
+        importer_env = env | {"CERALIVE_SEALED_INPUTS": str(capsule.directory),
+                              "CERALIVE_DEBCACHE": "0", "ARCH": "arm64",
+                              "CERALIVE_BUILD_MODE": "production",
+                              "ARMBIAN_APT_URL": "https://repo.example"}
+        script = ('source "$1/lib/fetch-debs.sh"; sealed_repository bsp "$2/state"; '
+                  '_SEALED_BASE=https://repo.example; _SEALED_DEBS="$2/debs"; '
+                  'mkdir -p "$_SEALED_DEBS"; sealed_stage_deb ceralive-device=1.1')
+        imported = run(["bash", "-euo", "pipefail", "-c", script, "_", str(ROOT), str(work)], importer_env)
+        assert imported.returncode == 0, imported.stderr
+        assert (work / "debs/ceralive-device_1.1_arm64.deb").read_bytes() == remote[
+            "https://repo.example/ceralive-device_1.1_arm64.deb"]
+        for row in capsule.objects:
+            for url in row.urls:
+                assert (capsule.directory / row.sha256).read_bytes() == remote[url]
+        assert {url for url, _authenticated in requests} == set(remote)
+        assert ("https://deb.debian.org/debian/dists/stable-updates/main/binary-arm64/Packages.xz",
+                False) in requests
+        assert ("https://deb.debian.org/debian/dists/stable-updates/main/binary-arm64/Packages.gz",
+                False) not in requests
+
+
+def test_codename_does_not_waive_signed_suite_component_arch_or_cardinality() -> None:
+    for case in ("codename-suite-mismatch", "codename-mismatch", "codename-missing",
+                 "codename-duplicate", "codename-duplicate-suite", "codename-extra-token",
+                 "codename-component", "codename-arch"):
+        with fixture(case) as (work, _reviewed, args, env, requests, _remote):
+            result = run(args, env)
+            assert result.returncode != 0, case
+            assert "signature/index/identity verification rejected" in result.stderr, (case, result.stderr)
+            assert not any(url.endswith(".deb") for url, _ in requests), case
+            assert not (work / "capsule.tar").exists(), case
+
+
+def test_codename_cannot_be_changed_without_independent_policy_approval() -> None:
+    for case, expected in (
+        ("inventory", "repository differs from independently approved policy"),
+        ("url", "metadata URL is outside the exact approved repository objects"),
+        ("firstparty", "missing approved first-party/BSP/Debian-source origin policy"),
+        ("traversal", "invalid archive validity or identity policy"),
+    ):
+        with fixture("codename") as (work, reviewed, args, env, requests, _remote):
+            if case == "inventory":
+                reviewed["repositories"]["debian-binary"]["codename"] = "bookworm"
+            elif case == "url":
+                digest = reviewed["repositories"]["debian-binary"]["inrelease"]
+                selected = next(row for row in reviewed["objects"] if row["sha256"] == digest)
+                selected["urls"] = ["https://deb.debian.org/debian/dists/testing/InRelease"]
+            else:
+                policy = json.loads((work / "policy.json").read_text())
+                name = "firstparty" if case == "firstparty" else "debian-binary"
+                value = "trixie" if case == "firstparty" else "../trixie"
+                policy["repositories"][name]["codename"] = value
+                reviewed["repositories"][name]["codename"] = value
+                (work / "policy.json").write_text(json.dumps(policy))
+            (work / "reviewed.json").write_text(json.dumps(reviewed))
+            result = run(args, env)
+            assert result.returncode != 0, case
+            assert expected in result.stderr, (case, result.stderr)
+            assert requests == [], case
+            assert not (work / "capsule.tar").exists(), case
 
 
 def test_cli_seals_original_bytes_and_importer_accepts_authenticated_closure() -> None:

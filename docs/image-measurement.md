@@ -117,6 +117,16 @@ fields are not accepted by this policy.
 Each policy repository (`firstparty`, `bsp` and `debian-source` are required) declares exact
 `origin`, `keyring` object digest, primary `fingerprints`, signed `suite`,
 `component`, `arch`, `index_path`, and `max_age_seconds` (at most 30 days).
+An optional `codename` selects the exact `/dists/<codename>/` metadata path
+instead of `/dists/<suite>/`. It must match exactly one signed `Codename`
+field; `suite` must still match exactly one signed `Suite` field. For example,
+Debian's trixie path uses `suite: "stable", codename: "trixie"`, updates uses
+`suite: "stable-updates", codename: "trixie-updates"`, and security uses
+`suite: "stable-security", codename: "trixie-security"`. Pin the component
+token as signed, including `updates/main` when the security Release names it.
+The two identities are independently approved, not interchangeable alternatives.
+Omitting `codename` retains the existing suite path and strict Suite check.
+First-party channels remain `stable` or `beta` and cannot set `codename`.
 The matching capsule record repeats those identities and adds `inrelease`
 and compressed `index` object digests. The import compares the independent
 policy before invoking the existing gpgv, Release identity, signed-index digest,
@@ -192,6 +202,17 @@ The repository's `inrelease` and `index` objects likewise need one URL each
 and cannot use local paths. First-party metadata lives below
 `origin/dists/suite/binary-arm64/`; other repository metadata lives below
 `origin/dists/suite/`. The signed `index_path` supplies the exact index URL.
+When an approved `codename` is present, it replaces only the distribution
+path segment; the original Release must authenticate both identities.
+Binary `Packages.gz` and `Packages.xz` indexes use the same bounded streaming
+decoder in the producer and sealed package importer. Gzip uses Python's
+standard `gzip` module and xz uses standard `lzma`; each decoded index is at
+most 256 MiB, including concatenated streams. Truncated, corrupt, oversized
+or unsupported formats fail closed and leave no partial decoded index.
+Every xz stream must reach its verified end, including later concatenated
+streams; only correctly aligned null-byte stream padding may follow a stream.
+Trailing non-stream bytes are rejected instead of accepting a valid prefix.
+There is no format probing, alternative URL fetch, recompression or re-signing.
 Original signed `InRelease` (or a signed `Release` accepted by the existing
 verifier) and compressed indexes are preserved byte for byte. Detached
 `Release.gpg` support is not added. The original signature, Release identity,
