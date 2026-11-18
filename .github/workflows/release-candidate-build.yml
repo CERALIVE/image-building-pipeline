@@ -127,9 +127,9 @@ jobs:
           RUNNER_ARCH_NAME: ${{ runner.arch }}
           MKOSI_TOOL_KEY: ${{ hashFiles('.mkosi-version') }}
           MKOSI_SOURCE_KEY: >-
-            ${{ hashFiles('build', 'lib/**/*.sh', 'mkosi/**/*', 'manifests/**/*', 'ci/Dockerfile') }}
+            ${{ hashFiles('build', 'lib/**/*.sh', 'mkosi/**/*', 'manifests/**/*', 'ci/Dockerfile', 'ci/mkosi-build-requirements.txt') }}
           BUILDER_SOURCE_KEY: >-
-            ${{ hashFiles('ci/Dockerfile', 'ci/requirements-ci.txt', '.mkosi-version') }}
+            ${{ hashFiles('ci/Dockerfile', 'ci/mkosi-build-requirements.txt', 'ci/requirements-ci.txt', '.mkosi-version') }}
         run: |
           set -euo pipefail
           board="${CERALIVE_RELEASE_BOARD}"

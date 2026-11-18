@@ -1156,7 +1156,12 @@ never about the file share.
 The **container build is the canonical path.** The orchestrator runs mkosi v26
 inside a pinned `debian:trixie-slim` builder (`ci/Dockerfile`). The Dockerfile
 fetches the full upstream commit behind v26 and verifies `HEAD` before
-installation. `.mkosi-version` tracks the release version. Native builds
+installation. Pip verifies the wheels from `ci/mkosi-build-requirements.txt`
+both at download and when installing them into a disposable build venv. The
+runtime venv installs the locally built mkosi wheel against its recorded
+SHA-256. Both installs disable the package index. The Dockerfile and lock
+both affect builder cache identity.
+`.mkosi-version` tracks the release version. Native builds
 (`--native` / `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12
 on a Debian trixie+ host. See [`docs/host-support.md`](../host-support.md)
 for the full host matrix.
