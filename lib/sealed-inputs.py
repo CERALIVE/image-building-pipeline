@@ -7,9 +7,11 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import lzma
 import os
 from pathlib import Path
 import re
@@ -19,9 +21,12 @@ import sys
 import subprocess
 import tempfile
 from urllib.parse import urlsplit
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_urls import InputURLError, canonical_url
+
+INDEX_LIMIT = 256 * 1024**2
 
 
 class SealedError(Exception):
@@ -39,6 +44,7 @@ class Repository:
     index_path: str
     fingerprints: tuple[str, ...]
     max_age_seconds: int
+    codename: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +87,8 @@ def repository(directory: Path, name: str) -> Repository:
     for field in ("origin", "keyring", "fingerprints", "suite", "component", "arch", "index_path"):
         if row[field] != trust[field]:
             raise SealedError("sealed repository differs from independently approved trust policy")
+    if row.get("codename", "") != trust.get("codename", ""):
+        raise SealedError("sealed repository differs from independently approved trust policy")
     origin = urlsplit(row["origin"])
     if (origin.scheme != "https" or origin.username or origin.password or origin.query
             or origin.fragment or origin.port or not origin.hostname):
@@ -92,7 +100,57 @@ def repository(directory: Path, name: str) -> Repository:
         raise SealedError("missing independently approved archive fingerprints")
     return Repository(*(object_path(directory, row[key]) for key in ("inrelease", "index", "keyring")),
                       *(row[key] for key in ("origin", "suite", "component", "arch", "index_path")),
-                      tuple(row["fingerprints"]), trust["max_age_seconds"])
+                      tuple(row["fingerprints"]), trust["max_age_seconds"], row.get("codename", ""))
+
+
+def decompress_index(source: Path, destination: Path, index_path: str) -> None:
+    """Decode the signed index format without changing its original compressed bytes."""
+    match Path(index_path).suffix:
+        case ".gz":
+            decoded = gzip.open(source, "rb")
+            decoder = None
+        case ".xz":
+            decoded = source.open("rb")
+            decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+        case _:
+            raise SealedError("unsupported compressed package index")
+    try:
+        with decoded as stream, destination.open("wb") as output:
+            remaining = INDEX_LIMIT
+            pending = b""
+            while True:
+                length = min(1024 * 1024, remaining + 1)
+                if decoder is None:
+                    chunk = stream.read(length)
+                    if not chunk:
+                        break
+                else:
+                    if decoder.needs_input:
+                        pending = pending or stream.read(1024 * 1024)
+                        if not pending:
+                            raise EOFError("truncated xz package index")
+                    chunk = decoder.decompress(pending, max_length=length)
+                    pending = b""
+                if len(chunk) > remaining:
+                    raise SealedError("decompressed package index exceeds the 256 MiB bound")
+                output.write(chunk)
+                remaining -= len(chunk)
+                if decoder is not None and decoder.eof:
+                    pending = decoder.unused_data or stream.read(1024 * 1024)
+                    padding = 0
+                    while pending.startswith(b"\0"):
+                        unpadded = pending.lstrip(b"\0")
+                        padding += len(pending) - len(unpadded)
+                        pending = unpadded or stream.read(1024 * 1024)
+                    if padding % 4:
+                        raise SealedError("misaligned xz stream padding")
+                    if not pending:
+                        break
+                    # LZMAFile can hide later stream errors; each decoder must reach EOF.
+                    decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+    except (OSError, EOFError, lzma.LZMAError, zlib.error, SealedError) as exc:
+        destination.unlink(missing_ok=True)
+        raise SealedError("invalid or oversized compressed package index") from exc
 
 
 def valid_release(path: Path, max_age: int, require_until: bool = True) -> ReleaseValidity:
@@ -141,8 +199,8 @@ def mirror_validities(directory: Path) -> tuple[ReleaseValidity, ...]:
 source "$1/fetch-debs-auth.sh"
 source "$1/fetch/index.sh"
 log_error() { printf '%s\\n' "$*" >&2; }
-auth_verify_release_to_file "$2" "$3" "$4" "${@:10}"
-auth_release_has_identity "$4" "$5" "$6" "$7"
+auth_verify_release_to_file "$2" "$3" "$4" "${@:11}"
+auth_release_has_identity "$4" "$5" "$6" "$7" "${10}"
 expected="$(index_release_digest "$4" "$8")"
 index_verify_digest "$9" "$expected" sealed-mirror
 '''
@@ -153,7 +211,8 @@ index_verify_digest "$9" "$expected" sealed-mirror
             try:
                 subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(library),
                                 str(repo.keyring), str(repo.inrelease), str(release), repo.suite,
-                                repo.component, repo.arch, repo.index_path, str(repo.index), *repo.fingerprints],
+                                repo.component, repo.arch, repo.index_path, str(repo.index),
+                                repo.codename, *repo.fingerprints],
                                check=True, capture_output=True, text=True, timeout=60,
                                env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "TMPDIR": temporary})
             except subprocess.SubprocessError as exc:
@@ -240,7 +299,7 @@ def serve(directory: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("copy", "repository", "valid-release", "serve"))
+    parser.add_argument("operation", choices=("copy", "repository", "valid-release", "decompress-index", "serve"))
     parser.add_argument("values", nargs="*")
     args = parser.parse_args()
     directory = Path(os.environ["CERALIVE_SEALED_INPUTS"])
@@ -250,13 +309,16 @@ def main() -> None:
             shutil.copyfile(url_object(directory, url), destination)
         case "repository":
             repo = repository(directory, args.values[0])
-            for key in ("inrelease", "index", "keyring", "origin", "suite", "component", "arch", "index_path"):
+            for key in ("inrelease", "index", "keyring", "origin", "suite", "component", "arch", "index_path", "codename"):
                 print("sealed_" + key + "=" + shlex.quote(str(getattr(repo, key))))
             print("sealed_fingerprints=(" + " ".join(shlex.quote(fp) for fp in repo.fingerprints) + ")")
             print("sealed_max_age=" + shlex.quote(str(repo.max_age_seconds)))
         case "valid-release":
             path, age, *repository_name = args.values
             valid_release(Path(path), int(age), require_until=repository_name not in (["firstparty"], ["bsp"]))
+        case "decompress-index":
+            source, destination, index_path = args.values
+            decompress_index(Path(source), Path(destination), index_path)
         case "serve":
             serve(directory)
 

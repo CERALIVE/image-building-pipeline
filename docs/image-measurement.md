@@ -117,6 +117,16 @@ fields are not accepted by this policy.
 Each policy repository (`firstparty`, `bsp` and `debian-source` are required) declares exact
 `origin`, `keyring` object digest, primary `fingerprints`, signed `suite`,
 `component`, `arch`, `index_path`, and `max_age_seconds` (at most 30 days).
+An optional `codename` selects the exact `/dists/<codename>/` metadata path
+instead of `/dists/<suite>/`. It must match exactly one signed `Codename`
+field; `suite` must still match exactly one signed `Suite` field. For example,
+Debian's trixie path uses `suite: "stable", codename: "trixie"`, updates uses
+`suite: "stable-updates", codename: "trixie-updates"`, and security uses
+`suite: "stable-security", codename: "trixie-security"`. Pin the component
+token as signed, including `updates/main` when the security Release names it.
+The two identities are independently approved, not interchangeable alternatives.
+Omitting `codename` retains the existing suite path and strict Suite check.
+First-party channels remain `stable` or `beta` and cannot set `codename`.
 The matching capsule record repeats those identities and adds `inrelease`
 and compressed `index` object digests. The import compares the independent
 policy before invoking the existing gpgv, Release identity, signed-index digest,
@@ -156,10 +166,109 @@ bootstrap metadata, RAUC upstream/Debian source inputs and the recipe-pinned
 MediaMTX payload. The latter uses the existing checksum-checked local-tarball
 path inside the guest source mount.
 
-The host downloader is an owner operation outside this command: finite exact
-GET/HEAD objects, normal TLS, bounded sizes/time, no cross-origin credential
-forwarding or guest-selected requests. This implementation imports prepared
-bytes and never reads an existing host APT client or RAUC signing directory.
+### Host package capsule preparation [EXISTS: fixture-qualified]
+
+`python3 ci/prepare-image-capsule.py` supplies the host-side producer. Running
+authenticated prefetch still requires separate owner authorization. It takes
+an **explicit reviewed complete closure**, not board-manifest seeds. The normal
+image installation dependency solver remains in mkosi/APT; this producer does
+not invoke it, discover dependencies or claim the submitted closure is complete.
+Include every bootstrap, BSP and first-party dependency selected for this board,
+plus the already prepared public source bundle, public trust, pinned sources,
+released kernel metadata and builder archives described above. An omitted
+dependency still fails closed in the offline guest.
+
+The reviewed JSON input uses the capsule inventory fields `schema`,
+`source_commit`, `epoch`, `board`, `source_bundle`, `device_root`, `objects` and
+`repositories`, plus a `packages` array. Omit `fetched_at`: the producer records
+its actual completion time. Repository records and the separate public policy
+use the existing schema above. Every object has the existing exact `sha256`,
+`length`, `kind` and `urls` fields. Local ingredients additionally have `path`,
+absolute or relative to the reviewed input file, without `..` components.
+They must be regular files matching the reviewed size and digest. Archive
+keyrings use `apt-metadata` with no URLs. Never nominate client credentials or
+private signing material as local ingredients.
+
+Each package row has exactly `repository`, `name`, `version`, `arch` (`arm64`
+or `all`), and `sha256`, referring to one `deb` object. Every `deb` object needs
+one row and one exact original HTTPS URL; packages cannot use local paths.
+For example, a reviewed package row has this shape:
+
+```json
+{"repository":"firstparty","name":"ceralive-device","version":"2026.11.2","arch":"arm64","sha256":"<reviewed package SHA-256>"}
+```
+
+The repository's `inrelease` and `index` objects likewise need one URL each
+and cannot use local paths. First-party metadata lives below
+`origin/dists/suite/binary-arm64/`; other repository metadata lives below
+`origin/dists/suite/`. The signed `index_path` supplies the exact index URL.
+When an approved `codename` is present, it replaces only the distribution
+path segment; the original Release must authenticate both identities.
+Binary `Packages.gz` and `Packages.xz` indexes use the same bounded streaming
+decoder in the producer and sealed package importer. Gzip uses Python's
+standard `gzip` module and xz uses standard `lzma`; each decoded index is at
+most 256 MiB, including concatenated streams. Truncated, corrupt, oversized
+or unsupported formats fail closed and leave no partial decoded index.
+Every xz stream must reach its verified end, including later concatenated
+streams; only correctly aligned null-byte stream padding may follow a stream.
+Trailing non-stream bytes are rejected instead of accepting a valid prefix.
+There is no format probing, alternative URL fetch, recompression or re-signing.
+Original signed `InRelease` (or a signed `Release` accepted by the existing
+verifier) and compressed indexes are preserved byte for byte. Detached
+`Release.gpg` support is not added. The original signature, Release identity,
+validity and signed-index validators run before package requests. Each
+reviewed package must match the existing unique signed-index lookup, original
+URL, SHA-256 and Debian control identity. Nothing is installed, unpacked into
+a rootfs, executed from packages or re-signed.
+
+Create a private output directory and invoke one board at a time:
+
+```sh
+umask 077
+mkdir -m 700 private-capsules
+python3 ci/prepare-image-capsule.py \
+  --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
+  --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
+  --client-identity https://apt.ceralive.tv \
+    "${APT_CLIENT_CERT_PATH:?absolute certificate path}" \
+    "${APT_CLIENT_KEY_PATH:?absolute key path}" \
+  --output private-capsules/rock-5b-plus.tar
+```
+
+`--client-identity ORIGIN CERTIFICATE_PATH KEY_PATH` may repeat for distinct
+exact approved policy origins. Only paths reach curl's arguments; credentials
+are used in place and are never copied into the capsule. A client identity
+cannot authorize another origin. Normal system CA and hostname validation
+apply; `--ca-file` selects an explicit public CA bundle when required.
+Ambient curl configuration, proxies and credential environment are excluded.
+Transfers have no terminal or stdin for key-password prompts; a key requiring
+interactive unlocking fails closed.
+Each transfer is one GET with no redirect following or retry. Non-200 status,
+TLS failure, mismatched bytes or timeout reject the attempt. A failed
+transfer names the object SHA-256, its reviewed URL, the HTTP status (000 when
+no response arrived) and curl's exit code; credential paths are never printed.
+The default
+per-object deadline is 120 seconds (`--object-timeout` permits 1–600); connect
+time is at most 10 seconds. Curl's size bound is backed by a process file-size
+limit, including responses without Content-Length. Decompressed package
+indexes and compressed metadata are limited to 256 MiB, signed Release files
+to 16 MiB, and each validator invocation to 120 seconds.
+The finite reviewed list bounds the number of requests; the unchanged capsule
+limits are 32 GiB, 1 MiB inventory and 20,000 regular tar members.
+
+The output is mode 0600, created only after the merged importer accepts its
+transport digest, structure, sizes and hashes; existing outputs are never
+overwritten. Temporary inputs, archive and importer check can require three
+capsule lengths of disk space, in addition to retained inputs and the normal
+reserve. Temporary storage is private and removed on success or failure.
+The command prints only the capsule SHA-256 on success. Its capsule contains
+an additional digest-named `apt-metadata` JSON object with `delivery:
+offline-capsule`, completion time, the verified package identity/size/hash/URL
+inventory, original logical repository origins and the existing metadata
+validity receipt. This is transport provenance, not a new repository signature
+or a live guest fetch receipt. Source/builder content qualification and actual
+offline VM admission remain separate checks.
+
 The guest-only mirror has a finite inventory, no CONNECT/upstream relay and no
 host endpoint. Build-only Debian routing does not change shipped APT sources.
 An absent dependency or source object fails; networking is never enabled.
@@ -187,7 +296,9 @@ firmware closure/package-lock/parity stages still run. The raw assembly and
 shared slot writer are reused. Only bundle signing and raw compression are
 omitted. Actual populated rootfs_a/rootfs_b images are retained after compiled
 boot-payload injection and the existing clean-ext4 reserve assertion.
-Normal builds continue to call `rauc_pki_resolve` and sign/compress as before.
+Normal non-dry-run builds continue to call `rauc_pki_resolve` and sign/compress as
+before. Separate `DRY_RUN=1` build plans skip RAUC PKI entirely, including for
+`x86-minipc`; they do not enter this measurement purpose or validate public trust.
 
 A successful content run emits a measurement-specific receipt. The host
 receives `measurement.json` with a `metadata_validity` record generated by the

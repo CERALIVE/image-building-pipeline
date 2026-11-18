@@ -7,12 +7,14 @@ import gzip
 import hashlib
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import runpy
+from unittest.mock import patch
 from bootstrap_metadata_test import bootstrap_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +119,106 @@ def test_sealed_import_preserves_production_and_original_authenticated_origin() 
     code, output = scenario("valid")
     assert code == 0, output
     assert "NETWORK ATTEMPT" not in output
+
+
+def test_index_decoding_keeps_original_bytes_and_enforces_one_shared_size_bound() -> None:
+    module = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
+    decode = module["decompress_index"]
+    with tempfile.TemporaryDirectory() as temporary, patch.dict(decode.__globals__, {"INDEX_LIMIT": 32}):
+        source = Path(temporary) / "original"
+        destination = Path(temporary) / "Packages"
+        for suffix, compress in ((".gz", gzip.compress), (".xz", lzma.compress)):
+            for length in (31, 32):
+                payload = b"x" * length
+                original = compress(payload)
+                source.write_bytes(original)
+                decode(source, destination, "main/binary-arm64/Packages" + suffix)
+                assert destination.read_bytes() == payload
+                assert source.read_bytes() == original
+            for original in (compress(b"x" * 33), compress(b"x" * 16) + compress(b"x" * 17),
+                             compress(b"valid")[:-1], b"invalid compressed bytes"):
+                source.write_bytes(original)
+                try:
+                    decode(source, destination, "main/binary-arm64/Packages" + suffix)
+                except module["SealedError"] as error:
+                    assert "invalid or oversized compressed package index" in str(error)
+                else:
+                    raise AssertionError(f"invalid or oversized {suffix} index accepted")
+                assert not destination.exists()
+                assert source.read_bytes() == original
+        source.write_bytes(gzip.compress(b"valid"))
+        try:
+            decode(source, destination, "Packages.bz2")
+        except module["SealedError"] as error:
+            assert "unsupported compressed package index" in str(error)
+        else:
+            raise AssertionError("unsupported index format accepted")
+        assert not destination.exists()
+
+
+def test_xz_decoding_rejects_every_invalid_stream_and_trailing_byte() -> None:
+    module = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
+    decode = module["decompress_index"]
+    first = lzma.compress(b"first")
+    second = lzma.compress(b"second")
+    corrupt_header = bytearray(second)
+    corrupt_header[8] ^= 1
+    corrupt_footer = bytearray(second)
+    corrupt_footer[-12] ^= 1
+    cases = (
+        ("corrupt-second-header", first + bytes(corrupt_header)),
+        ("corrupt-second-footer", first + bytes(corrupt_footer)),
+        ("corrupt-third-header", first + second + bytes(corrupt_header)),
+        ("trailing-garbage", first + b"garbage"),
+        ("long-trailing-garbage", first + b"trailing non-stream bytes"),
+        ("truncated-first", first[:-1]),
+        ("truncated-second-header", first + second[:5]),
+        ("truncated-second-footer", first + second[:-1]),
+        ("truncated-third-footer", first + second + second[:-1]),
+        ("misaligned-padding", first + b"\0" + second),
+        ("misaligned-final-padding", first + b"\0" * 3),
+        ("padding-before-garbage", first + b"\0" * 4 + b"garbage"),
+        ("padding-before-long-garbage", first + b"\0" * 4 + b"trailing non-stream bytes"),
+        ("empty-input", b""),
+    )
+    accepted = []
+    with tempfile.TemporaryDirectory() as temporary:
+        source = Path(temporary) / "original"
+        destination = Path(temporary) / "Packages"
+        for name, original in cases:
+            source.write_bytes(original)
+            try:
+                decode(source, destination, "Packages.xz")
+            except module["SealedError"] as error:
+                assert "invalid or oversized compressed package index" in str(error), name
+                assert not destination.exists(), name
+            else:
+                accepted.append(name)
+            assert source.read_bytes() == original, name
+    assert accepted == [], f"invalid xz input accepted: {accepted}"
+
+
+def test_valid_concatenated_indexes_preserve_all_streams_and_padding() -> None:
+    module = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
+    decode = module["decompress_index"]
+    first, second = b"a" * 16, b"b" * 16
+    with tempfile.TemporaryDirectory() as temporary, patch.dict(decode.__globals__, {"INDEX_LIMIT": 32}):
+        source = Path(temporary) / "original"
+        destination = Path(temporary) / "Packages"
+        for suffix, compress in ((".gz", gzip.compress), (".xz", lzma.compress)):
+            for padding in (b"", b"\0" * 4, b"\0" * (1024 * 1024)):
+                original = compress(first) + padding + compress(second) + b"\0" * 8
+                source.write_bytes(original)
+                decode(source, destination, "Packages" + suffix)
+                assert destination.read_bytes() == first + second
+                assert source.read_bytes() == original
+        payload = b"x" * (1024 * 1024 + 1) + b"tail"
+        original = lzma.compress(payload[:-4]) + lzma.compress(payload[-4:])
+        source.write_bytes(original)
+        with patch.dict(decode.__globals__, {"INDEX_LIMIT": len(payload)}):
+            decode(source, destination, "Packages.xz")
+        assert destination.read_bytes() == payload
+        assert source.read_bytes() == original
 
 
 def test_sealed_import_rejects_signature_index_package_identity_and_validity_failures() -> None:

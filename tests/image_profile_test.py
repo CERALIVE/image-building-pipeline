@@ -162,7 +162,8 @@ def test_image_admission_requires_effective_cgroup_caps() -> None:
 def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
-        with tempfile.TemporaryFile(dir=root) as owned:
+        # Keep the inode linked through reconciliation so unrelated CI logs cannot reuse it.
+        with (root / "overlay").open("w+b") as owned:
             inode = os.fstat(owned.fileno())
             (root / "active.json").write_text(json.dumps({
                 "attempt": "interrupted", "overlay_inode": [inode.st_dev, inode.st_ino]}))
@@ -172,7 +173,8 @@ def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() 
                 pass
             else:
                 raise AssertionError("live owned overlay admitted another guest")
-        reconcile(root)
+        with (root / "unrelated.log").open("wb"):
+            reconcile(root)
         record = json.loads((root / "interrupted.reconciled.json").read_text())
         assert record["overlay_descriptors_closed"] is True
         assert record["stop_reason"] == "previous launcher interrupted; guest cleanup unknown"

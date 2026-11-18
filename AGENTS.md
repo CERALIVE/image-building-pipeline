@@ -94,5 +94,6 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 - Do not log private keys or credential values; mTLS client keys must remain `_apt`-readable without undoing their numeric ownership.
 - One firmware owner: pin archive identity as well as version; an unexplained missing retained-module firmware reference fails closed.
 - Never treat DRY_RUN, a clean boot or a test-pattern stream as proof of physical capture, radio or full-image qualification.
+- Plan-only `DRY_RUN=1` must never resolve or access RAUC PKI; normal signer preflight and measurement public-root admission remain separate.
 - Kernel release runners must use throwaway KVM disks, no host shares/secrets and the workflow-restricted `kernel-release` group; never register a persistent or default-group runner.
 - Offline measurements use the explicit production purpose, approved public root, sealed inputs and private returns; they never constitute signed candidates.
