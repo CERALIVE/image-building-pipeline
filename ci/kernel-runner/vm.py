@@ -22,7 +22,7 @@ import yaml
 from image_resources import AdmissionError
 from image_stream import StreamError
 from image_lifecycle import job_disk
-from vm_process import Cancellation, run, terminate, wait
+from vm_process import Cancellation, read_check_script, run, terminate, wait
 
 HERE = Path(__file__).resolve().parent
 IMAGE_URL = "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img"
@@ -222,6 +222,7 @@ def main(cancellation: Cancellation) -> int:
                 raise RuntimeError("image base exceeds the 32 GiB allocated-byte budget")
             disk.chmod(0o444)
             # link is create-only, including against a concurrent base builder.
+            cancellation.check()
             os.link(disk, base)
         return 0
     if not base.is_file():
@@ -251,9 +252,10 @@ def main(cancellation: Cancellation) -> int:
                 raise RuntimeError("invalid JIT response")
             boot(overlay, payload, "jit", args.timeout, disk_fd=disk_fd, cancellation=cancellation)
         else:
-            boot(overlay, args.check_script.read_bytes(), "check", args.timeout,
+            boot(overlay, read_check_script(args.check_script, cancellation), "check", args.timeout,
                  source_bundle=args.source_bundle, disk_fd=disk_fd, cancellation=cancellation)
     print("CERALIVE_OVERLAY_REMOVED")
+    cancellation.check()
     return 0
 
 
@@ -262,9 +264,7 @@ if __name__ == "__main__":
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, cancellation.request)
     try:
-        code = main(cancellation)
-        cancellation.check()
-        sys.exit(code)
+        sys.exit(main(cancellation))
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
             StreamError, subprocess.SubprocessError) as exc:
         print(f"kernel runner: {exc}", file=sys.stderr)

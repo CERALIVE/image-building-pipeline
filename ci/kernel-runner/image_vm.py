@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
@@ -17,7 +18,10 @@ from image_lifecycle import ImageJob, receipt, reconcile
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
-from vm_process import Cancellation, run
+from vm_process import Cancelled, Cancellation, run
+
+IMAGE_ERRORS = (OSError, ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
+                StreamError, subprocess.SubprocessError)
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-capsule", type=Path)
@@ -130,13 +134,14 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
              "transport_valid": True, "content_verified": verifier})
     envelope.unlink()
 
-def execute(base: Path, directory: Path, request: dict, cancellation: Cancellation) -> Path:
+def execute(base: Path, directory: Path, request: dict, cancellation: Cancellation,
+            jobs: list[ImageJob]) -> Path:
     """One owned overlay, exit receipt and independent host transport validation."""
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
     directory.mkdir(mode=0o700)
-    store = directory.parents[1]
     with ImageJob(directory, identity, request["capsule"], cancellation) as job:
+        jobs.append(job)
         job.state.update(base_sha256=request["base_sha256"], base=str(base),
                          public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
                          overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
@@ -159,12 +164,44 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
         disk_headroom(((directory, 16 * GIB),))
         validate_return(job, request["payload"]["operation"] != "measure")
         job.state["stop_reason"] = "guest exited; transport validated"
-    (store / "active.json").unlink()
     return directory / "artifacts"
 
 
 def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
               cancellation: Cancellation) -> int:
+    """Decide the launcher status once and publish it in every owned exit receipt."""
+    jobs: list[ImageJob] = []
+    error = None
+    acceptance = None
+    try:
+        acceptance = measure_image(args, parser, cancellation, jobs)
+    except IMAGE_ERRORS as exc:
+        error = exc
+
+    try:
+        # Commit point: after this check signals cannot change the receipt or exit status.
+        cancellation.check()
+        if error is None and acceptance is not None:
+            receipt(*acceptance)
+    except IMAGE_ERRORS as exc:
+        error = exc
+
+    status = int(error is not None)
+    if isinstance(error, Cancelled):
+        for job in jobs:
+            job.state["stop_reason"] = "cancelled"
+    elif error is not None and jobs:
+        jobs[-1].state["stop_reason"] = type(error).__name__
+    for job in jobs:
+        job.state["launcher_exit"] = status
+        receipt(job.directory / "exit.json", job.state)
+    if error is not None:
+        print(f"kernel runner: {error}", file=sys.stderr)
+    return status
+
+
+def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
+                  cancellation: Cancellation, jobs: list[ImageJob]) -> tuple[Path, dict] | None:
     if not all((args.input_capsule, args.input_sha256, args.base_sha256,
                 args.trust_policy, args.output_dir, args.attempt, args.board,
                 args.source_commit, args.source_epoch is not None)):
@@ -197,12 +234,13 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     request = {"capsule": args.input_capsule, "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {
                    "schema": 1, "identity": asdict(identity), "operation": args.image_mode, "trust": trust}}
-    artifacts = execute(base, directory / "build", request, cancellation)
+    artifacts = execute(base, directory / "build", request, cancellation, jobs)
+    cancellation.check()
     if args.image_mode == "probe":
         result = json.loads((artifacts / "verification.json").read_text())
         if result != {"schema": 1, "identity": asdict(identity), "network_denied": True}:
             raise StreamError("offline probe receipt mismatch")
-        return 0
+        return None
     capsule = directory / "verifier-input.tar"
     inventory = verification_capsule(args.input_capsule, artifacts, capsule, cancellation.check)
     verification = Identity(identity.attempt, identity.board, identity.commit, identity.epoch,
@@ -213,17 +251,18 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                    + sum(file.stat().st_blocks * 512 for file in artifacts.iterdir()),
                "payload": {"schema": 1, "identity": asdict(verification), "operation": "verify",
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
-    verified = execute(base, directory / "verify", request, cancellation)
+    verified = execute(base, directory / "verify", request, cancellation, jobs)
+    cancellation.check()
     result = json.loads((verified / "verification.json").read_text())
     if (result["schema"] != 1 or result["verified"] is not True
             or result["build_identity"] != asdict(identity) or result["artifacts"] != inventory
             or {row["slot"] for row in result["slots"]} != {"rootfs_a", "rootfs_b"}):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
-    cancellation.check()
-    receipt(directory / "acceptance.json", {"schema": 1, "identity": asdict(identity),
-            "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,
-            "public_root_der_sha256": trust["root_der_sha256"],
-            "lock_unit_started_at": acquired_at,
-            "verification_input_sha256": verification.input_sha256})
     capsule.unlink()
-    return 0
+    return directory / "acceptance.json", {
+        "schema": 1, "identity": asdict(identity),
+        "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,
+        "public_root_der_sha256": trust["root_der_sha256"],
+        "lock_unit_started_at": acquired_at,
+        "verification_input_sha256": verification.input_sha256,
+    }

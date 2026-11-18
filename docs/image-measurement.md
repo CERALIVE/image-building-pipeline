@@ -584,6 +584,11 @@ if it has not exited after 20 seconds. It reaps QEMU, discards the anonymous
 overlay, closes descriptors and writes `exit.json` with `stop_reason` set to
 `cancelled` and `launcher_exit` set to `1` before returning a nonzero status.
 Additional signals do not reset the grace period or interrupt the receipt.
+The launcher honors cancellation through final validation. It then fixes the
+result before publishing acceptance and the final exit status. Signals during
+that final publication do not change the result. For measurement runs, a
+guest's teardown receipt can appear before the verifier finishes. Its
+`launcher_exit` field is added when the launcher has decided the outcome.
 An interruption before creating an attempt has no guest or teardown receipt.
 Allow up to 600 seconds for owned teardown and receipt I/O on a responsive host.
 After forced death, the next admission reconciles the exact owned overlay

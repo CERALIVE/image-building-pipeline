@@ -2,6 +2,8 @@
 """Run the real launcher lifecycle against small Python children, never a VM."""
 
 from dataclasses import asdict, dataclass, replace
+import errno
+import fcntl
 import io
 import json
 import hashlib
@@ -34,6 +36,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     """Run the CLI and deliver a real signal inside the poll owned by select()."""
     poll_type = selectors.EpollSelector._selector_cls
     replace_file = os.replace
+    read_text = pathlib.Path.read_text
     directory = root / "returns/fixture/build"
     sent = False
 
@@ -52,9 +55,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             held.add(str(root / "capsule"))
             held.update(str(file) for file in directory.glob("*.partial"))
             (root / "leaks").write_text(json.dumps(sorted(live & held)))
-            if mode == "receipt" and not sent:
+            frozen = "launcher_exit" in json.loads(pathlib.Path(source).read_text())
+            if not sent and (mode == "receipt" or mode == "committed" and frozen):
                 cancel()
         replace_file(source, destination)
+
+    def read_result(path, *args, **kwargs):
+        if mode == "validation" and path == directory / "artifacts/verification.json":
+            cancel()
+        return read_text(path, *args, **kwargs)
 
     def poller():
         epoll = poll_type()
@@ -64,7 +73,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return getattr(epoll, name)
 
             def poll(self, *args):
-                if mode != "receipt" and not sent:
+                if mode not in {"receipt", "validation", "committed"} and not sent:
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
@@ -85,6 +94,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 "--attempt", IDENTITY.attempt, "--board", IDENTITY.board, "--image-mode", "probe"]
     with patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)), \
             patch.object(os, "replace", publish), \
+            patch.object(pathlib.Path, "read_text", read_result), \
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None), \
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()), \
@@ -146,7 +156,7 @@ fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
 (root / "owned-fds").write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
 (root / "pid").write_text(str(os.getpid()))
 (root / "ready").touch()
-if mode == "receipt":
+if mode in {{"receipt", "validation", "committed"}}:
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
 if mode == "slow":
@@ -179,7 +189,12 @@ while True:
                     if (root / "pid").exists():
                         pid = int((root / "pid").read_text())
                         try:
-                            os.kill(pid, signal.SIGKILL)
+                            handle = os.pidfd_open(pid)
+                            try:
+                                if os.getpgid(pid) == launcher.pid:
+                                    signal.pidfd_send_signal(handle, signal.SIGKILL)
+                            finally:
+                                os.close(handle)
                         except ProcessLookupError:
                             pass
                     try:
@@ -188,17 +203,19 @@ while True:
                         os.killpg(launcher.pid, signal.SIGKILL)
                         launcher.communicate()
 
-        assert launcher.returncode == 1, stderr.decode()
+        expected_status = 0 if mode == "committed" else 1
+        assert launcher.returncode == expected_status, stderr.decode()
         pid = (root / "pid").read_text()
         assert not pathlib.Path(f"/proc/{pid}").exists(), "QEMU was not reaped"
         assert not list(root.glob("job-*"))
         assert json.loads((root / "leaks").read_text()) == []
         directory = root / "returns/fixture/build"
         record = json.loads((directory / "exit.json").read_text())
-        assert record["stop_reason"] == "cancelled", record
+        assert record["stop_reason"] == (
+            "guest exited; transport validated" if mode == "committed" else "cancelled"), record
         assert record["input_descriptor_closed"] is True
         assert record["overlay_descriptor_closed"] is True
-        assert record["launcher_exit"] == 1
+        assert record["launcher_exit"] == expected_status
         assert record["identity"] == asdict(identity)
         if mode == "overlay":
             assert not (directory / "started.json").exists()
@@ -207,8 +224,9 @@ while True:
             assert record["qemu"].split(":")[0] == pid
             assert record["qemu_reaped"] is True
             assert record["qemu_exit"] == {"ignore": -9, "slow": -15}.get(mode, 0)
-            if mode != "receipt":
+            if mode not in {"receipt", "validation", "committed"}:
                 assert record["qemu_priority"] == FIXTURE_PRIORITY
+        assert not (root / "returns/active.json").exists()
         assert time.monotonic() - float((root / "sent").read_text()) < seconds
         if mode in {"term", "ignore", "repeat"}:
             assert (root / "term").exists(), "QEMU did not receive TERM"
@@ -224,6 +242,75 @@ def test_term_int_hup_and_repeated_term_preserve_teardown() -> None:
                          ("slow", signal.SIGTERM), ("overlay", signal.SIGTERM),
                          ("receipt", signal.SIGTERM)):
         cancelled_fixture(mode, signum)
+
+
+def test_term_during_final_probe_validation_updates_receipt_and_status() -> None:
+    cancelled_fixture("validation")
+
+
+def test_term_after_final_outcome_is_decided_preserves_receipt_and_status() -> None:
+    cancelled_fixture("committed")
+
+
+def test_term_while_check_waits_for_fifo_releases_its_overlay_and_lock() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        script, base, lock = (root / name for name in ("script.fifo", "base", "fixture.lock"))
+        os.mkfifo(script)
+        base.touch()
+        qemu_img = root / "qemu-img"
+        qemu_img.write_text("#!/bin/sh\nexit 0\n")
+        qemu_img.chmod(0o700)
+        qemu = root / "qemu-system-x86_64"
+        qemu.write_text(f"#!/bin/sh\ntouch '{root / 'unexpected-qemu'}'\nexit 3\n")
+        qemu.chmod(0o700)
+        command = ["flock", "--exclusive", "--close", str(lock), sys.executable,
+                   str(ROOT / "ci/kernel-runner/vm.py"), "check",
+                   "--check-script", str(script), "--base", str(base)]
+        with subprocess.Popen(command, start_new_session=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env={"PATH": f"{root}:/usr/bin:/bin",
+                              "TMPDIR": temporary, "PYTHONDONTWRITEBYTECODE": "1"}) as launcher:
+            writer = handle = None
+            try:
+                until = time.monotonic() + 5
+                while writer is None:
+                    try:
+                        writer = os.open(script, os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError as error:
+                        if error.errno != errno.ENXIO:
+                            raise
+                        assert time.monotonic() < until, "launcher did not open the FIFO"
+                        time.sleep(0.01)
+                children = pathlib.Path(f"/proc/{launcher.pid}/task/{launcher.pid}/children")
+                pid, = map(int, children.read_text().split())
+                handle = os.pidfd_open(pid)
+                descriptors = [os.readlink(fd) for fd in pathlib.Path(f"/proc/{pid}/fd").iterdir()]
+                assert any(str(root) in fd and fd.endswith(" (deleted)") for fd in descriptors)
+
+                signal.pidfd_send_signal(handle, signal.SIGTERM)
+                try:
+                    output, stderr = launcher.communicate(timeout=3)
+                except subprocess.TimeoutExpired as error:
+                    raise AssertionError("one TERM left the empty FIFO and lock held") from error
+
+                assert launcher.returncode == 1, stderr.decode()
+                assert b"runner cancelled" in stderr
+                assert not output and not (root / "unexpected-qemu").exists()
+                assert not pathlib.Path(f"/proc/{pid}").exists()
+                assert not list(root.glob("job-*"))
+                with lock.open("rb") as lock_file:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                if writer is not None:
+                    os.close(writer)
+                if handle is not None:
+                    os.close(handle)
+                if launcher.poll() is None:
+                    try:
+                        launcher.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(launcher.pid, signal.SIGKILL)
+                        launcher.communicate()
 
 
 def test_image_has_no_nic_shares_registration_or_credential_environment() -> None:

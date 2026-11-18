@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import selectors
 import subprocess
 import time
 
@@ -24,6 +27,29 @@ class Cancellation:
     def check(self) -> None:
         if self.requested:
             raise Cancelled("runner cancelled")
+
+
+def read_check_script(path: Path, cancellation: Cancellation) -> bytes:
+    """Read a regular file or FIFO without blocking cancellation on a FIFO writer."""
+    chunks = bytearray()
+    cancellation.check()
+    with open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK)) as source, \
+            selectors.PollSelector() as events:
+        fd = source.fileno()
+        events.register(fd, selectors.EVENT_READ)
+        while True:
+            cancellation.check()
+            try:
+                # Wait first on Linux: a FIFO with no writer yet returns false EOF on read.
+                if not events.select(timeout=POLL_SECONDS):
+                    continue
+                cancellation.check()
+                chunk = os.read(fd, 1024 * 1024)
+            except (BlockingIOError, InterruptedError):
+                continue
+            if not chunk:
+                return bytes(chunks)
+            chunks.extend(chunk)
 
 
 def wait(process: subprocess.Popen, deadline: float | None,

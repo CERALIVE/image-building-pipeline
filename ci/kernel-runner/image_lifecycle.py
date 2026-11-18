@@ -100,6 +100,7 @@ class ImageJob:
         self.identity = identity
         self.cancellation = cancellation or Cancellation()
         self.outputs = ExitStack()
+        self.active = directory.parents[1] / "active.json"
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
                       "launcher": process_identity(os.getpid()), "acquired_at": time.time(),
                       "stop_reason": "not started", "qemu_reaped": False,
@@ -126,24 +127,19 @@ class ImageJob:
             error = output_error
             raise
         finally:
-            self.state.update(input_descriptor_closed=True, ended_at=time.time(),
-                              launcher_exit=int(error is not None))
+            self.state.update(input_descriptor_closed=True, ended_at=time.time())
             if error:
                 self.state["stop_reason"] = type(error).__name__
-            exit_path = self.directory / "exit.json"
-            if not self.cancellation.requested:
-                receipt(exit_path, self.state)
-            # A first signal during the atomic write must also reach the receipt.
-            if self.cancellation.requested:
-                self.state.update(stop_reason="cancelled", launcher_exit=1)
-                receipt(exit_path, self.state)
-            self.cancellation.check()
+            receipt(self.directory / "exit.json", self.state)
+            if (self.state["overlay_descriptor_closed"] and "overlay_inode" in self.state
+                    and ("qemu" not in self.state or self.state["qemu_reaped"])):
+                self.active.unlink(missing_ok=True)
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
         inode = os.fstat(disk_fd)
         self.state.update(overlay_fd=disk_fd, overlay_inode=[inode.st_dev, inode.st_ino])
-        receipt(self.directory.parents[1] / "active.json", {
+        receipt(self.active, {
             "attempt": self.identity.attempt, "launcher": self.state["launcher"],
             "overlay_inode": self.state["overlay_inode"],
         })
@@ -153,7 +149,7 @@ class ImageJob:
         self.state.update(qemu=process_identity(process.pid), started_at=time.time(),
                           stop_reason="running")
         receipt(self.directory / "started.json", self.state)
-        receipt(self.directory.parents[1] / "active.json", {
+        receipt(self.active, {
             "attempt": self.identity.attempt, "launcher": self.state["launcher"],
             "qemu": self.state["qemu"], "overlay_inode": self.state["overlay_inode"],
         })
