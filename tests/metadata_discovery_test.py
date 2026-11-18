@@ -107,6 +107,18 @@ def test_metadata_only_rows_feed_unchanged_producer_and_preserve_original_object
                                               key=lambda row: (row["repository"], row["name"], row["arch"]))
         assert fragment["repositories"] == {name: reviewed["repositories"][name]
                                             for name in ("firstparty", "bsp", "debian-binary")}
+        assert set(receipt) == {"schema", "fetched_at", "repositories", "packages"}
+        expected_digests = {row["sha256"] for row in reviewed["packages"]} | {
+            reviewed["repositories"][name][key] for name in fragment["repositories"]
+            for key in ("keyring", "inrelease", "index")}
+        expected_objects = [
+            (row | {"path": str(directory / "objects" / row["sha256"])}) if "path" in row else row
+            for row in reviewed["objects"] if row["sha256"] in expected_digests]
+        expected_fragment = {"packages": fragment["packages"],
+                             "repositories": fragment["repositories"],
+                             "objects": sorted(expected_objects, key=lambda row: row["sha256"])}
+        assert (directory / "inventory-fragment.json").read_bytes() == (
+            json.dumps(expected_fragment, sort_keys=True, separators=(",", ":")) + "\n").encode()
         metadata = {reviewed["repositories"][name][key]
                     for name in ("firstparty", "bsp", "debian-binary") for key in ("inrelease", "index")}
         expected_urls = {url for row in reviewed["objects"] if row["sha256"] in metadata for url in row["urls"]}
