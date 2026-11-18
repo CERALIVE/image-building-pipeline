@@ -21,6 +21,11 @@ from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import POLL_SECONDS, Cancelled, Cancellation, run, wait
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
+
+
+class ReceiptError(OSError):
+    """A receipt publication failed."""
 
 @contextmanager
 def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = None):
@@ -107,7 +112,7 @@ class Receipt:
 
     def mask_block(self) -> None:
         if self.outcome is not None:
-            self.mask = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+            self.mask = signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
 
     def rename(self) -> None:
         if self.outcome is not None and self.row["stop_reason"] != "cancelled":
@@ -115,10 +120,7 @@ class Receipt:
             if signal.sigpending().intersection(STOP_SIGNALS):
                 raise Cancelled("runner cancelled")
         os.replace(self.temporary, self.path)
-        # The rename commits the outcome. Latch the status before any fallible step.
         self.renamed = True
-        if self.outcome is not None:
-            self.outcome.committed_exit = self.row["launcher_exit"]
 
     def mask_restore(self) -> None:
         if self.mask is not None:
@@ -168,7 +170,9 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             elif not isinstance(error, Cancelled):
                 transaction.errors.append(error)
     if failure is not None and (outcome is None or not transaction.renamed):
-        raise failure
+        if isinstance(failure, Cancelled):
+            raise failure
+        raise ReceiptError(str(failure)) from failure
 
 
 def report_error(error: BaseException) -> None:

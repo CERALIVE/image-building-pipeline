@@ -19,7 +19,7 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import STOP_SIGNALS, job_disk, report_error
+from image_lifecycle import CATCHABLE_SIGNALS, STOP_SIGNALS, job_disk, report_error
 from vm_process import Cancellation, read_check_script, run, terminate, wait
 
 HERE = Path(__file__).resolve().parent
@@ -263,7 +263,7 @@ def main(cancellation: Cancellation) -> int:
 
 
 def exit_launcher() -> None:
-    """Terminate without interpreter shutdown hooks overriding the committed code."""
+    """Return the status in the published image receipt through the only exit point."""
     cancellation = Cancellation()
     status = 1
     try:
@@ -273,23 +273,35 @@ def exit_launcher() -> None:
     except SystemExit as exc:
         if type(exc.code) is int and 0 < exc.code <= 255:
             status = exc.code
-        if cancellation.committed_exit is not None or status == 1:
+        if cancellation.exit_receipt is not None or status == 1:
             report_error(exc)
     except BaseException as exc:
         report_error(exc)
     finally:
         try:
-            # Image publication uses unbuffered diagnostics. Other paths still
-            # print to buffered streams and must flush before the direct exit.
-            if cancellation.committed_exit is None:
+            if cancellation.exit_receipt is not None:
+                status = 1
+                # No handler should interrupt readback and the direct exit.
+                # The receipt's own mask restoration already delivered pending signals.
+                try:
+                    signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
+                except BaseException as exc:
+                    report_error(exc)
+                try:
+                    published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
+                    if type(published) is not int or published not in (0, 1):
+                        raise ValueError("invalid launcher_exit in image receipt")
+                    status = published
+                except BaseException as exc:
+                    report_error(exc)
+            else:
                 for stream in (sys.stdout, sys.stderr):
                     try:
                         stream.flush()
                     except BaseException as exc:
                         report_error(exc)
         finally:
-            committed = cancellation.committed_exit
-            os._exit(status if committed is None else committed)
+            os._exit(status)
 
 
 if __name__ == "__main__":

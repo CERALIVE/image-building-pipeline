@@ -6,6 +6,7 @@ import atexit
 import errno
 import fcntl
 import io
+import inspect
 import json
 import hashlib
 import os
@@ -33,7 +34,8 @@ from image_vm import retained_outputs, validate_base
 
 IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
-SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error")
+SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error",
+                       "raising-handler", "late-exit", "unreadable-exit")
 
 
 def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> None:
@@ -42,6 +44,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     replace_file = os.replace
     sigmask = signal.pthread_sigmask
     read_text = pathlib.Path.read_text
+    read_bytes = pathlib.Path.read_bytes
     fsync = os.fsync
     unlink = pathlib.Path.unlink
     temporary_file = tempfile.TemporaryFile
@@ -49,35 +52,100 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     pair = mode.startswith("pair:")
+    audit_receipts = bool(receipt_fault) or mode == "audit-mutation"
+    events = set()
+    outside = set()
+    active_step = None
+    during = None
     sent = False
     fail_sync = False
 
+    def raising_handler(_signum, _frame):
+        (root / "handler-ran").touch()
+        raise SystemExit(71)
+
+    if mode == "raising-handler":
+        signal.signal(signal.SIGUSR1, raising_handler)
+
+    run_image = image_vm.run_image
+
+    def image_entry(*args):
+        status = run_image(*args)
+        if mode == "late-exit":
+            raise SystemExit(71)
+        return status
+
+    def fixture_read_bytes(path):
+        if mode == "unreadable-exit" and path == directory / "exit.json":
+            raise OSError(errno.EIO, "fixture final receipt readback")
+        return read_bytes(path)
+
     def step_fixture(action):
         def run_step(transaction):
-            final = transaction.path == directory / "exit.json"
-            if final:
-                with (root / "steps").open("a") as log:
-                    print(action.__name__, file=log)
-            if (final and receipt_fault and action.__name__ == receipt_fault[0]
-                    and not (root / "injected").exists()):
-                (root / "injected").touch()
-                kind = receipt_fault[1]
-                if kind == "term-before":
-                    cancel()
-                if kind in {"exception", "oserror", "systemexit", "interrupt"}:
-                    # Successful close can also report an error. For rename,
-                    # inject before the syscall to model a failed commit.
-                    if action.__name__ in {"file_close", "dir_close", "temp_cleanup"}:
-                        action(transaction)
-                    error = {"exception": Exception, "oserror": OSError,
-                             "systemexit": SystemExit, "interrupt": KeyboardInterrupt}[kind]
-                    raise error(f"fixture {action.__name__}")
-                action(transaction)
-                if kind == "term-during" and action.__name__ != "rename":
-                    cancel()
-            else:
-                action(transaction)
+            nonlocal active_step, during
+            active_step = action.__name__
+            try:
+                inject_step(action, transaction)
+            finally:
+                active_step = during = None
         return run_step
+
+    def inject_step(action, transaction):
+        nonlocal during
+        final = transaction.path == directory / "exit.json"
+        if final:
+            with (root / "steps").open("a") as log:
+                print(action.__name__, file=log)
+        if (final and receipt_fault and action.__name__ == receipt_fault[0]
+                and not (root / "injected").exists()):
+            (root / "injected").touch()
+            kind = receipt_fault[1]
+            if kind == "term-before":
+                cancel()
+            if kind in {"exception", "oserror", "systemexit", "interrupt"}:
+                # Successful close can also report an error. For rename,
+                # inject before the syscall to model a failed commit.
+                if action.__name__ in {"file_close", "dir_close", "temp_cleanup"}:
+                    action(transaction)
+                error = {"exception": Exception, "oserror": OSError,
+                         "systemexit": SystemExit, "interrupt": KeyboardInterrupt}[kind]
+                raise error(f"fixture {action.__name__}")
+            if kind == "term-during":
+                during = action.__code__
+        action(transaction)
+
+    def observe(operation, frame):
+        while frame is not None:
+            if (frame.f_code.co_filename == image_lifecycle.__file__
+                    and frame.f_code.co_name == "receipt"):
+                if active_step is None:
+                    outside.add(operation)
+                else:
+                    events.add((active_step, operation))
+                break
+            frame = frame.f_back
+
+    def audit(event, _args):
+        if event == "open" or event.startswith("os."):
+            observe(event, sys._getframe(1))
+
+    native = {fn: fn.__name__ for fn in (
+        os.rename, os.replace, os.fsync, os.close, os.unlink, os.kill, os.open,
+        os.write, os.stat, os.lstat, signal.signal, sigmask, signal.sigpending,
+    )}
+
+    def profile(frame, event, arg):
+        nonlocal during
+        if event == "call" and frame.f_code is during and active_step != "rename":
+            during = None
+            cancel()
+        elif event == "c_call":
+            operation = native.get(arg)
+            if operation is None and isinstance(getattr(arg, "__self__", None), io.IOBase):
+                if arg.__name__ in {"write", "flush", "close"}:
+                    operation = arg.__name__
+            if operation is not None:
+                observe(operation, frame)
 
     def mask(how, signals):
         if (mode == "mask-restore-error" and how == signal.SIG_SETMASK
@@ -100,7 +168,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         cancel()
 
     def publish(source, destination) -> None:
-        nonlocal fail_sync
+        nonlocal during, fail_sync
         if pair:
             with (root / "sequence").open("a") as log:
                 print(destination.relative_to(root / "returns"), file=log)
@@ -133,7 +201,13 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     raise AssertionError("receipt written without the lock held")
             if mode == "pair:fail" and destination == directory.parent / "verify/teardown.json":
                 raise OSError(errno.EIO, "fixture verifier teardown rename")
+        if during is not None and active_step == "rename" and destination == directory / "exit.json":
+            during = None
+            cancel()
+            assert signum in signal.sigpending(), "TERM was not pending in the rename step"
         replace_file(source, destination)
+        if mode == "raising-handler" and destination == directory / "exit.json":
+            os.kill(os.getpid(), signal.SIGUSR1)
 
     def sync(fd):
         nonlocal fail_sync
@@ -141,6 +215,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if fail_sync and path == directory:
             fail_sync = False
             raise OSError(errno.EIO, "fixture exit directory sync")
+        if mode == "raising-handler" and path == directory and (directory / "exit.json").exists():
+            (root / "final-sync").touch()
         for location, stage in ((root, "parent-sync"), (directory / "stream.partial", "capture-sync"),
                                 (directory / "artifacts/verification.json", "artifact-sync"),
                                 (directory / "artifacts", "artifact-dir-sync")):
@@ -182,7 +258,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return getattr(epoll, name)
 
             def poll(self, *args):
-                if not fault and not receipt_fault and not pair and mode not in SUCCESS_GUEST_MODES and not sent:
+                if (not fault and not audit_receipts and not pair
+                        and mode not in SUCCESS_GUEST_MODES and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
@@ -214,20 +291,43 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 "--attempt", IDENTITY.attempt, "--board", IDENTITY.board, "--image-mode",
                 "measure" if pair else "probe"]
     table = (tuple((step_fixture(action), cleanup) for action, cleanup in image_lifecycle.RECEIPT_STEPS)
-             if receipt_fault else image_lifecycle.RECEIPT_STEPS)
-    if receipt_fault:
+             if audit_receipts else image_lifecycle.RECEIPT_STEPS)
+    real_exit = os._exit
+
+    def audited_exit(status):
+        sys.setprofile(None)
+        try:
+            (root / "audit").write_text(json.dumps({"events": sorted(events), "outside": sorted(outside)}))
+        finally:
+            real_exit(status)
+
+    writer = image_lifecycle.receipt
+    if mode == "audit-mutation":
+        namespace = image_lifecycle.__dict__.copy()
+        source = inspect.getsource(writer) + "\n    transaction.path.stat()\n"
+        exec(compile(source, image_lifecycle.__file__, "exec"), namespace)
+        writer = namespace["receipt"]
+        writer.__globals__["RECEIPT_STEPS"] = table
+    if audit_receipts:
         def shutdown_hook():
             (root / "atexit-ran").touch()
             raise SystemExit(7)
         atexit.register(shutdown_hook)
+        sys.addaudithook(audit)
+        sys.setprofile(profile)
     with patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)), \
             patch.object(image_lifecycle, "RECEIPT_STEPS", table), \
+            patch.object(image_lifecycle, "receipt", writer), \
+            patch.object(image_vm, "receipt", writer), \
+            patch.object(image_vm, "run_image", image_entry), \
+            patch.object(os, "_exit", audited_exit if audit_receipts else real_exit), \
             patch.object(os, "replace", publish), \
             patch.object(signal, "pthread_sigmask", mask), \
             patch.object(os, "fsync", sync), \
             patch.object(pathlib.Path, "unlink", remove), \
             patch.object(tempfile, "TemporaryFile", overlay), \
             patch.object(pathlib.Path, "read_text", read_result), \
+            patch.object(pathlib.Path, "read_bytes", fixture_read_bytes), \
             patch.object(image_vm, "validate_return", fixture_return), \
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None), \
@@ -309,7 +409,7 @@ if mode.startswith("pair:"):
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
-if mode in {SUCCESS_GUEST_MODES!r} or mode.startswith(("fault:", "receipt-step:")):
+if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(("fault:", "receipt-step:")):
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
 if mode == "slow":
@@ -357,6 +457,16 @@ while True:
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode == "unreadable-exit":
+            assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
+            assert launcher.returncode == 1 and b"fixture final receipt readback" in stderr
+            assert json.loads((root / "leaks").read_text()) == []
+            return
+        if mode == "audit-mutation":
+            assert launcher.returncode == 0, stderr.decode()
+            audit = json.loads((root / "audit").read_text())
+            assert "stat" in audit["outside"], audit
+            return
         if mode.startswith("pair:"):
             attempt = directory.parent
             accepted = attempt / "acceptance.json"
@@ -386,6 +496,10 @@ while True:
             index, rename = names.index(point), names.index("rename")
             after = index > rename or index == rename and action == "term-during"
             assert (root / "injected").exists(), (mode, stderr)
+            audit = json.loads((root / "audit").read_text())
+            assert not audit["outside"], (mode, audit["outside"])
+            if action.startswith("term-"):
+                assert [point, "os.kill"] in audit["events"], (mode, audit)
             assert launcher.returncode == (0 if after else 1), (mode, stderr)
             assert marker.exists() == (after or action.startswith("term-")), mode
             if marker.exists():
@@ -422,7 +536,8 @@ while True:
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
-        expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error"} else 1
+        expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error",
+                                        "raising-handler", "late-exit"} else 1
         pid = (root / "pid").read_text()
         assert not pathlib.Path(f"/proc/{pid}").exists(), "QEMU was not reaped"
         assert not list(root.glob("job-*"))
@@ -449,6 +564,11 @@ while True:
             assert b"fixture exit directory sync" in stderr
         elif mode == "mask-restore-error":
             assert b"fixture final mask restoration" in stderr
+        elif mode == "raising-handler":
+            assert (root / "handler-ran").exists(), "SIGUSR1 handler did not run after unmasking"
+            assert (root / "final-sync").exists(), "raising handler skipped final directory sync"
+        elif mode == "late-exit":
+            assert b"kernel runner: 71" in stderr
         else:
             assert time.monotonic() - float((root / "sent").read_text()) < seconds
         if mode in {"term", "ignore", "repeat"}:
@@ -483,6 +603,15 @@ def test_mask_restoration_after_rename_cannot_change_launcher_exit() -> None:
     cancelled_fixture("mask-restore-error")
 
 
+def test_raising_signal_handler_during_rename_cannot_change_published_status() -> None:
+    cancelled_fixture("raising-handler")
+
+
+def test_single_exit_point_uses_readback_after_return_or_exception() -> None:
+    cancelled_fixture("late-exit")
+    cancelled_fixture("unreadable-exit")
+
+
 def test_each_receipt_step_preserves_commit_and_releases_owned_resources() -> None:
     declared = {name for name, value in vars(image_lifecycle.Receipt).items()
                 if not name.startswith("_") and callable(value)}
@@ -491,6 +620,10 @@ def test_each_receipt_step_preserves_commit_and_releases_owned_resources() -> No
     for step, _cleanup in image_lifecycle.RECEIPT_STEPS:
         for action in ("exception", "oserror", "systemexit", "interrupt", "term-before", "term-during"):
             cancelled_fixture(f"receipt-step:{step.__name__}:{action}")
+
+
+def test_receipt_audit_detects_executed_work_outside_step_table() -> None:
+    cancelled_fixture("audit-mutation")
 
 
 def test_failed_verifier_receipt_does_not_publish_pair_acceptance() -> None:

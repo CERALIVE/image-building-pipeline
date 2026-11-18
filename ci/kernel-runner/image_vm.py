@@ -206,6 +206,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     build = jobs[0]
     probe = args.image_mode == "probe"
     path = (build.directory if probe else build.directory.parent) / "exit.json"
+    cancellation.exit_receipt = path
     while True:
         if cancellation.requested:
             error = Cancelled("runner cancelled")
@@ -221,7 +222,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             if not status:
                 row["acceptance_sha256"] = accepted_sha
         try:
-            # Rename latches the only authoritative exit status for the CLI.
+            # Rename commits the receipt that the CLI will read to determine its status.
             receipt(path, row, outcome=cancellation, diagnostic=error)
         except Cancelled as exc:
             error = exc
