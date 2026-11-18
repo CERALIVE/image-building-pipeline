@@ -33,7 +33,7 @@ from image_lifecycle import ImageJob, reconcile
 from image_stream import Identity, StreamError, encode
 import vm
 from image_vm import retained_outputs, validate_base
-from vm_process import CATCHABLE_SIGNALS
+from vm_process import CATCHABLE_SIGNALS, Cancellation, run
 
 IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
@@ -53,6 +53,11 @@ def fixture_signal_mask():
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
+def signal_status(path: pathlib.Path) -> tuple[int, int, int]:
+    fields = dict(line.split(":", 1) for line in path.read_text().splitlines() if ":" in line)
+    return tuple(int(fields[key], 16) for key in ("SigBlk", "SigIgn", "SigCgt"))
+
+
 def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> None:
     """Run the CLI and deliver a real signal inside the poll owned by select()."""
     poll_type = selectors.EpollSelector._selector_cls
@@ -67,6 +72,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     pair = mode.startswith("pair:")
+    inherited = mode == "inherited"
     critical_target = mode.removeprefix("pair:critical:") if mode.startswith("pair:critical:") else None
     mask_mutation = mode == "pair:mask-mutation"
     trace_terminal = critical_target is not None or mask_mutation
@@ -84,6 +90,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     during = None
     sent = False
     fail_sync = False
+    if inherited:
+        (root / "status-launcher").write_text(pathlib.Path("/proc/self/status").read_text())
 
     def raising_handler(_signum, _frame):
         (root / "handler-ran").touch()
@@ -210,6 +218,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def audit(event, _args):
         if event == "open" or event.startswith("os."):
             observe(event, sys._getframe(1))
+
+    def audit_terminal_spawns(event, _args):
+        if terminal_entered and event in {"subprocess.Popen", "os.posix_spawn", "os.fork", "os.exec"}:
+            violations.add((event, -1))
 
     native = {fn: fn.__name__ for fn in (
         os.rename, os.replace, os.fsync, os.close, os.unlink, os.kill, os.open,
@@ -437,6 +449,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit)
         sys.setprofile(profile)
     if trace_terminal:
+        sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)), \
             patch.object(image_lifecycle, "RECEIPT_STEPS", table), \
@@ -457,7 +470,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None), \
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()), \
             patch.object(image_lifecycle, "disk_headroom"), \
-            patch.object(image_lifecycle, "process_priority", return_value=FIXTURE_PRIORITY):
+            patch.object(image_lifecycle, "process_priority",
+                         side_effect=image_resources.process_priority if inherited else None,
+                         return_value=FIXTURE_PRIORITY), \
+            patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]), \
+            patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]):
         runpy.run_path(sys.argv[0], run_name="__main__")
 
 
@@ -466,7 +483,9 @@ class FixturePolicy:
     root_der_sha256: str = "d" * 64
 
 
-def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM) -> None:
+def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
+                      blocked: tuple[signal.Signals, ...] = (),
+                      ignored: tuple[signal.Signals, ...] = ()) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         capsule = root / "capsule"
@@ -489,6 +508,8 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM) -> Non
         qemu_img = root / "qemu-img"
         qemu_img.write_text(f"""#!{sys.executable}
 import json, os, pathlib, signal, sys, time
+root = pathlib.Path({tmp!r})
+(root / ("status-" + sys.argv[1])).write_text(pathlib.Path(f"/proc/{{os.getpid()}}/status").read_text())
 if sys.argv[1] == "info":
     print(json.dumps({{"format": "qcow2", "virtual-size": 137438953472}}))
 elif sys.argv[1] == "create":
@@ -508,6 +529,7 @@ else:
 import json, os, pathlib, signal, sys, time
 root = pathlib.Path({tmp!r})
 mode = {mode!r}
+(root / "status-qemu").write_text(pathlib.Path(f"/proc/{{os.getpid()}}/status").read_text())
 def term(_signum, _frame):
     (root / "term").touch()
     if mode == "repeat":
@@ -543,12 +565,32 @@ while True:
     signal.pause()
 """)
         qemu.chmod(0o700)
+        if blocked or ignored:
+            ionice = root / "ionice"
+            ionice.write_text(f"""#!{sys.executable}
+import pathlib
+pathlib.Path({str(root / "status-ionice")!r}).write_text(pathlib.Path("/proc/self/status").read_text())
+print("best-effort: prio 7")
+""")
+            ionice.chmod(0o700)
 
         # A private flock gives the real CLI its required direct parent without
         # participating in workstation admission or touching the real host lock.
+        command = ["flock", "--exclusive", "--close", str(root / "fixture.lock"), sys.executable,
+                   __file__, "--fixture-launcher", str(root), mode, str(signum.value)]
+        if blocked or ignored:
+            # exec keeps flock as the launcher's direct parent and passes on
+            # the calling process's mask and ignored dispositions.
+            setup = f"""
+import os, signal, sys
+for signum in {tuple(map(int, ignored))!r}:
+    signal.signal(signum, signal.SIG_IGN)
+signal.pthread_sigmask(signal.SIG_BLOCK, {tuple(map(int, blocked))!r})
+os.execvp(sys.argv[1], sys.argv[1:])
+"""
+            command = [sys.executable, "-c", setup, *command]
         with subprocess.Popen(
-            ["flock", "--exclusive", "--close", str(root / "fixture.lock"), sys.executable,
-             __file__, "--fixture-launcher", str(root), mode, str(signum.value)],
+            command,
             env={"PATH": f"{root}:/usr/bin:/bin", "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1"},
             start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         ) as launcher:
@@ -718,12 +760,56 @@ while True:
             assert not (root / "handler-ran").exists(), "SIGUSR1 ran before direct exit"
         else:
             assert time.monotonic() - float((root / "sent").read_text()) < seconds
-        if mode in {"term", "ignore", "repeat"}:
+        if mode in {"term", "ignore", "repeat", "inherited"}:
             assert (root / "term").exists(), "QEMU did not receive TERM"
+        if blocked or ignored:
+            stop_bits = sum(1 << (sig - 1) for sig in vm.STOP_SIGNALS)
+            entry_mask, entry_ignored, _ = signal_status(root / "status-launcher")
+            if blocked:
+                assert entry_mask & sum(1 << (sig - 1) for sig in blocked) == sum(1 << (sig - 1) for sig in blocked)
+                assert b"cleared inherited signal mask" in stderr
+            if ignored:
+                assert entry_ignored & (1 << (signal.SIGTERM - 1))
+                assert b"replaced inherited ignored stop signals: SIGTERM" in stderr
+            for child in ("info", "create", "qemu", "ionice"):
+                mask, ignored_bits, caught = signal_status(root / f"status-{child}")
+                assert mask == 0, (child, blocked, mask)
+                assert ignored_bits & stop_bits == 0, (child, ignored, ignored_bits)
+                # CPython installs default_int_handler after exec.
+                assert caught & stop_bits == 1 << (signal.SIGINT - 1), (child, caught)
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:
     cancelled_fixture("ignore")
+
+
+def test_inherited_blocked_and_ignored_signals_do_not_reach_children() -> None:
+    for blocked in ((signal.SIGTERM,), (signal.SIGINT,), (signal.SIGHUP,),
+                    vm.STOP_SIGNALS, (signal.SIGUSR1,)):
+        cancelled_fixture("inherited", blocked=blocked)
+    cancelled_fixture("inherited", ignored=(signal.SIGTERM,))
+
+
+def test_no_qemu_or_helper_spawn_under_terminal_mask() -> None:
+    cancellation = Cancellation()
+    with fixture_signal_mask(), patch.object(subprocess, "Popen") as spawn:
+        cancellation.begin_finalization()
+        for attempt in (
+            lambda: run(["unused"], timeout=1, cancellation=cancellation),
+            lambda: vm.boot(pathlib.Path("/unused"), b"", "check", 1, cancellation=cancellation),
+            lambda: image_resources.process_priority(os.getpid(), cancellation),
+        ):
+            with patch.object(image_resources, "require_process_priority", return_value=10), \
+                    patch.object(image_resources, "cgroup_limits", return_value=10):
+                try:
+                    attempt()
+                except RuntimeError as error:
+                    assert "during terminal finalization" in str(error)
+                else:
+                    raise AssertionError("child spawn allowed during terminal finalization")
+            spawn.assert_not_called()
 
 
 def test_term_int_hup_and_repeated_term_preserve_teardown() -> None:

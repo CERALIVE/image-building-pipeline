@@ -578,6 +578,13 @@ declare strace as a test tool.
 
 ### Teardown and publication
 
+At startup, the launcher installs its TERM, INT and HUP handlers, then
+clears the inherited signal mask. It logs a cleared mask or replaced ignored
+stop handlers. A stop already pending at startup is handled as cancellation.
+Before fork, the launcher requires a clean mask and no ignored stop signals.
+Exec resets caught stop handlers to default in QEMU and its helpers. The
+launcher refuses to spawn children after terminal finalization begins.
+
 Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
 idle I/O loop checks for cancellation at least once per second. The launcher
 stops draining pipes and sends TERM to the owned QEMU process, then sends KILL

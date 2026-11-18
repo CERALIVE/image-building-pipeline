@@ -9,6 +9,8 @@ import resource
 import subprocess
 from typing import Final, TypedDict
 
+from vm_process import Cancellation, check_spawn_signals
+
 GIB: Final = 1024**3
 MIN_NICE: Final = 9
 MAX_CPU_WEIGHT: Final = 10
@@ -114,12 +116,13 @@ class PriorityObservation(TypedDict):
     cpu_weight: int
 
 
-def process_priority(pid: int) -> PriorityObservation:
+def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
     """Observe the owned QEMU process, including containment after exec."""
     nice = require_process_priority(pid)
     cpu_weight = cgroup_limits(pid)
+    check_spawn_signals(cancellation)
     ionice = subprocess.run(
-        ["ionice", "-p", str(pid)], check=True, capture_output=True, text=True,
+        ["ionice", "-p", str(pid)], check=True, capture_output=True, text=True, restore_signals=True,
         env={"PATH": os.environ["PATH"], "LC_ALL": "C"}, timeout=1).stdout.strip()
     if ionice.startswith("realtime"):
         raise AdmissionError("image profile forbids realtime I/O priority")

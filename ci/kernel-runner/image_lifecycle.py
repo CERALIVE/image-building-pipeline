@@ -18,9 +18,7 @@ import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
-from vm_process import POLL_SECONDS, Cancelled, Cancellation, run, wait
-
-STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, run, wait
 
 
 class ReceiptError(OSError):
@@ -169,7 +167,7 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
         raise ReceiptError(str(failure)) from failure
 
 
-def report_error(error: BaseException) -> None:
+def report_error(error: BaseException | str) -> None:
     """Diagnostics must not affect an already committed exit code."""
     try:
         os.write(2, f"kernel runner: {error}\n".encode(errors="backslashreplace"))
@@ -302,7 +300,7 @@ class ImageJob:
                         raise subprocess.TimeoutExpired("image guest", seconds)
                     if now >= next_priority_check and process.poll() is None:
                         try:
-                            self.state["qemu_priority"] = process_priority(process.pid)
+                            self.state["qemu_priority"] = process_priority(process.pid, self.cancellation)
                         except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
                             if process.poll() is None:
                                 raise

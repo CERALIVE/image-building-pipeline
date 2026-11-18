@@ -12,6 +12,7 @@ import time
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
 CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
 class Cancelled(RuntimeError):
@@ -37,6 +38,16 @@ class Cancellation:
         if not self.finalizing:
             signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
             self.finalizing = True
+
+
+def check_spawn_signals(cancellation: Cancellation) -> None:
+    """Allow exec to inherit a clean mask and reset caught stop dispositions."""
+    if cancellation.finalizing:
+        raise RuntimeError("cannot spawn a child during terminal finalization")
+    cancellation.check()
+    if (signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            or any(signal.getsignal(sig) == signal.SIG_IGN for sig in STOP_SIGNALS)):
+        raise RuntimeError("cannot spawn a child with blocked signals or ignored stop signals")
 
 
 def read_check_script(path: Path, cancellation: Cancellation) -> bytes:
@@ -94,11 +105,11 @@ def terminate(process: subprocess.Popen) -> None:
 def run(args: list[str], *, timeout: int, cancellation: Cancellation,
         capture_output: bool = False, **options) -> subprocess.CompletedProcess:
     """Like run(check=True), with cancellation checks during helper subprocesses."""
-    cancellation.check()
+    check_spawn_signals(cancellation)
     if capture_output:
         options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.monotonic() + timeout
-    with subprocess.Popen(args, **options) as process:
+    with subprocess.Popen(args, restore_signals=True, **options) as process:
         try:
             while True:
                 cancellation.check()
