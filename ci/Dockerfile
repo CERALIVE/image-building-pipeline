@@ -16,7 +16,7 @@
 #     stays --privileged-only (no host qemu assumptions).
 #
 # VERSION PINS — keep in lockstep with .mkosi-version:
-#   * mkosi  : v26, installed from the upstream git tag via pipx. (Debian trixie's
+#   * mkosi  : v26, installed from the pinned upstream commit via pipx. (Debian trixie's
 #              apt ships only mkosi 25.3, which is older than the pin, so apt is
 #              NOT used for mkosi.)
 #   * Python : trixie's python3 == 3.13.x, which satisfies mkosi 26's >= 3.12
@@ -54,13 +54,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # lib/assemble-disk.sh shell out to, so the containerized build is self-contained:
 #   debian-archive-keyring  verify the Debian repos mkosi pulls the rootfs from
 #   apt-utils dpkg-dev      apt/dpkg plumbing mkosi and the staging step invoke
-#   ca-certificates         HTTPS for apt + the pipx git fetch of mkosi
+#   ca-certificates         HTTPS for apt + the git fetch of mkosi
 #   reprepro                local apt repo handling for staged BSP/first-party .debs
 #   systemd-repart          Stage-4 disk/partition assembly
 #   zstd                    faster bootstrap-time compression; avoids mmdebstrap gzip fallback
 #   qemu-user-static        transparent arm64 emulation (binfmt F-flag interpreter)
 #   binfmt-support          registers the qemu interpreters
-#   pipx git python3        pinned mkosi 26 install from the upstream tag
+#   pipx git python3        pinned mkosi 26 install from the upstream commit
 #   python3-pefile          PE/COFF parsing used by mkosi image assembly
 #   e2fsprogs               mkfs.ext4/e2label for the shared slot-image writer
 #                           (lib/disk/slot-image.sh) when it falls back to running
@@ -143,9 +143,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     [ -f /tmp/ceralive-docker-clean ] \
       && mv /tmp/ceralive-docker-clean /etc/apt/apt.conf.d/docker-clean || true
 
-# Pin mkosi to the exact upstream tag (trixie apt mkosi is 25.3 — too old for the
-# pin). pipx isolates it in its own venv on trixie's python3 (>= 3.12 floor met).
-RUN pipx install "git+https://github.com/systemd/mkosi.git@v${MKOSI_VERSION}"
+# Fetch the commit behind v26 directly so moving the tag cannot change the build.
+RUN mkosi_commit=84af20892b61c8e177e391f997ded8b4cb5514f2 \
+ && mkosi_src="$(mktemp -d)" \
+ && git init -q "${mkosi_src}" \
+ && git -C "${mkosi_src}" fetch --depth=1 --no-tags https://github.com/systemd/mkosi.git "${mkosi_commit}" \
+ && git -C "${mkosi_src}" checkout --detach FETCH_HEAD \
+ && test "$(git -C "${mkosi_src}" rev-parse HEAD)" = "${mkosi_commit}" \
+ && pipx install "${mkosi_src}" \
+ && rm -rf "${mkosi_src}"
 
 # UPSTREAM FIX — mkosi 26 writes its build-time policy-rc.d NON-EXECUTABLE, so
 # invoke-rc.d ignores it and the denial never takes effect.
