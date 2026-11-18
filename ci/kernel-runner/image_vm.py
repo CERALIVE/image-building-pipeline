@@ -221,19 +221,14 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             if not status:
                 row["acceptance_sha256"] = accepted_sha
         try:
-            # This marker's rename commits the only authoritative outcome. A
-            # pre-rename I/O failure leaves it absent and exits 1. A post-rename
-            # directory sync error is logged and cannot change the published status.
-            receipt(path, row, before_commit=(lambda: None) if isinstance(error, Cancelled)
-                    else cancellation.check)
+            # Rename latches the only authoritative exit status for the CLI.
+            receipt(path, row, outcome=cancellation, diagnostic=error)
         except Cancelled as exc:
             error = exc
             continue
         except OSError as exc:
             report_error(exc)
             return 1
-        if error is not None:
-            report_error(error)
         return row["launcher_exit"]
 
 

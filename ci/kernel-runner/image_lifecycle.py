@@ -13,12 +13,12 @@ import signal
 import subprocess
 import time
 import tempfile
-from typing import Callable
+from typing import TextIO
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
-from vm_process import POLL_SECONDS, Cancellation, run, wait
+from vm_process import POLL_SECONDS, Cancelled, Cancellation, run, wait
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
@@ -64,44 +64,118 @@ def create_directory(path: Path, *, parents: bool = False) -> None:
     sync_directory(path.parent)
 
 
-def receipt(path: Path, row: dict, *, before_commit: Callable[[], None] | None = None) -> None:
-    """Publish a receipt. Only the final marker can supply a commit checkpoint."""
-    temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    committed = False
-    try:
-        with os.fdopen(fd, "w") as destination:
-            json.dump(row, destination, sort_keys=True, indent=2)
-            destination.write("\n")
-            destination.flush()
-            os.fsync(destination.fileno())
-        if before_commit is None:
-            os.replace(temporary, path)
-            committed = True
-        else:
-            previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
-            try:
-                before_commit()
-                os.replace(temporary, path)
-                committed = True
-            finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-        try:
-            sync_directory(path.parent)
-        except OSError as error:
-            if before_commit is None:
-                raise
+class Receipt:
+    """Own the receipt's temporary file, rename and cleanup as a single transaction."""
+
+    def __init__(self, path: Path, row: dict, outcome: Cancellation | None,
+                 diagnostic: BaseException | None) -> None:
+        self.path = path
+        self.row = row
+        self.outcome = outcome
+        self.temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
+        self.file: TextIO | None = None
+        self.mask: set[signal.Signals] | None = None
+        self.directory_fd: int | None = None
+        self.renamed = False
+        self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
+
+    def temp_open(self) -> None:
+        self.file = open(
+            self.temporary, "x", encoding="utf-8",
+            opener=lambda name, flags: os.open(Path(name), flags, 0o600))
+
+    def temp_write(self) -> None:
+        assert self.file is not None
+        json.dump(self.row, self.file, sort_keys=True, indent=2)
+        self.file.write("\n")
+
+    def temp_flush(self) -> None:
+        assert self.file is not None
+        self.file.flush()
+
+    def file_sync(self) -> None:
+        assert self.file is not None
+        os.fsync(self.file.fileno())
+
+    def file_close(self) -> None:
+        if self.file is not None:
+            self.file.close()
+
+    def temp_cleanup(self) -> None:
+        if not self.renamed:
+            self.temporary.unlink(missing_ok=True)
+
+    def mask_block(self) -> None:
+        if self.outcome is not None:
+            self.mask = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+
+    def rename(self) -> None:
+        if self.outcome is not None and self.row["stop_reason"] != "cancelled":
+            self.outcome.check()
+            if signal.sigpending().intersection(STOP_SIGNALS):
+                raise Cancelled("runner cancelled")
+        os.replace(self.temporary, self.path)
+        # The rename commits the outcome. Latch the status before any fallible step.
+        self.renamed = True
+        if self.outcome is not None:
+            self.outcome.committed_exit = self.row["launcher_exit"]
+
+    def mask_restore(self) -> None:
+        if self.mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.mask)
+
+    def dir_open(self) -> None:
+        if self.renamed:
+            self.directory_fd = os.open(self.path.parent, os.O_DIRECTORY)
+
+    def dir_sync(self) -> None:
+        if self.directory_fd is not None:
+            os.fsync(self.directory_fd)
+
+    def dir_close(self) -> None:
+        if self.directory_fd is not None:
+            os.close(self.directory_fd)
+
+    def log_errors(self) -> None:
+        for error in self.errors:
             report_error(error)
-    finally:
-        if not committed:
-            temporary.unlink(missing_ok=True)
 
 
-def report_error(error: Exception) -> None:
+# The order and failure policy here also drive the complete fault matrix.
+RECEIPT_STEPS = (
+    (Receipt.temp_open, False), (Receipt.temp_write, False),
+    (Receipt.temp_flush, False), (Receipt.file_sync, False),
+    (Receipt.file_close, True), (Receipt.mask_block, False), (Receipt.rename, False),
+    (Receipt.mask_restore, True), (Receipt.dir_open, True), (Receipt.dir_sync, True),
+    (Receipt.dir_close, True), (Receipt.temp_cleanup, True), (Receipt.log_errors, True),
+)
+
+
+def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
+            diagnostic: BaseException | None = None) -> None:
+    transaction = Receipt(path, row, outcome, diagnostic)
+    failure: BaseException | None = None
+    for action, cleanup in RECEIPT_STEPS:
+        if failure is not None and not cleanup and not transaction.renamed:
+            continue
+        try:
+            action(transaction)
+        except BaseException as error:
+            if failure is None:
+                failure = error
+            if action is Receipt.log_errors:
+                report_error(error)
+            elif not isinstance(error, Cancelled):
+                transaction.errors.append(error)
+    if failure is not None and (outcome is None or not transaction.renamed):
+        raise failure
+
+
+def report_error(error: BaseException) -> None:
     """Diagnostics must not affect an already committed exit code."""
     try:
         os.write(2, f"kernel runner: {error}\n".encode(errors="backslashreplace"))
-    except OSError:
+    except BaseException:
         return  # There may be no stderr reader.
 
 
@@ -153,41 +227,42 @@ class ImageJob:
         self.identity = identity
         self.cancellation = cancellation or Cancellation()
         self.outputs = ExitStack()
+        self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
                       "launcher": process_identity(os.getpid()), "acquired_at": time.time(),
                       "stop_reason": "not started", "qemu_reaped": False,
                       "stream_budget": CAPS.stream_max,
                       "input_descriptor_closed": False, "overlay_descriptor_closed": False}
-        self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
+        with ExitStack() as inputs:
+            self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
+            inputs.callback(os.close, self.capsule_fd)
             self.console_read, self.console_write = os.pipe()
-        except OSError:
-            os.close(self.capsule_fd)
-            raise
+            inputs.callback(os.close, self.console_read)
+            inputs.callback(self.close_console_writer)
+            self.inputs = inputs.pop_all()
 
     def __enter__(self) -> ImageJob:
         return self
 
     def __exit__(self, _type, error, _traceback) -> None:
-        os.close(self.capsule_fd)
-        os.close(self.console_read)
+        # Attempt every descriptor close even if an earlier close or sync fails.
+        with self.outputs:
+            self.inputs.close()
+            self.state["input_descriptor_closed"] = True
+        self.state["ended_at"] = time.time()
+        if error:
+            self.state["stop_reason"] = type(error).__name__
+        receipt(self.directory / "teardown.json", self.state)
+        if (self.state["overlay_descriptor_closed"] and "overlay_inode" in self.state
+                and ("qemu" not in self.state or self.state["qemu_reaped"])):
+            self.active.unlink(missing_ok=True)
+            sync_directory(self.active.parent)
+
+    def close_console_writer(self) -> None:
         if self.console_write >= 0:
-            os.close(self.console_write)
-        try:
-            self.outputs.close()
-        except OSError as output_error:
-            error = output_error
-            raise
-        finally:
-            self.state.update(input_descriptor_closed=True, ended_at=time.time())
-            if error:
-                self.state["stop_reason"] = type(error).__name__
-            receipt(self.directory / "teardown.json", self.state)
-            if (self.state["overlay_descriptor_closed"] and "overlay_inode" in self.state
-                    and ("qemu" not in self.state or self.state["qemu_reaped"])):
-                self.active.unlink(missing_ok=True)
-                sync_directory(self.active.parent)
+            fd, self.console_write = self.console_write, -1
+            os.close(fd)
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
@@ -207,8 +282,7 @@ class ImageJob:
             "attempt": self.identity.attempt, "launcher": self.state["launcher"],
             "qemu": self.state["qemu"], "overlay_inode": self.state["overlay_inode"],
         })
-        os.close(self.console_write)
-        self.console_write = -1
+        self.close_console_writer()
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}

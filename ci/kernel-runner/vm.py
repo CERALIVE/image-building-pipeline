@@ -19,8 +19,6 @@ import threading
 import time
 
 import yaml
-from image_resources import AdmissionError
-from image_stream import StreamError
 from image_lifecycle import STOP_SIGNALS, job_disk, report_error
 from vm_process import Cancellation, read_check_script, run, terminate, wait
 
@@ -134,7 +132,12 @@ def main(cancellation: Cancellation) -> int:
                         help="build-base provisioning identity; kernel defaults remain unchanged")
     from image_vm import add_arguments
     add_arguments(parser)
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit as exc:
+        if exc.code == 0:  # argparse successfully printed help.
+            return 0
+        raise
     parent = os.getppid()
     parent_proc = Path("/proc") / str(parent)
     if (
@@ -259,13 +262,35 @@ def main(cancellation: Cancellation) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def exit_launcher() -> None:
+    """Terminate without interpreter shutdown hooks overriding the committed code."""
     cancellation = Cancellation()
-    for signum in STOP_SIGNALS:
-        signal.signal(signum, cancellation.request)
+    status = 1
     try:
-        sys.exit(main(cancellation))
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
-            StreamError, subprocess.SubprocessError) as exc:
+        for signum in STOP_SIGNALS:
+            signal.signal(signum, cancellation.request)
+        status = main(cancellation)
+    except SystemExit as exc:
+        if type(exc.code) is int and 0 < exc.code <= 255:
+            status = exc.code
+        if cancellation.committed_exit is not None or status == 1:
+            report_error(exc)
+    except BaseException as exc:
         report_error(exc)
-        sys.exit(1)
+    finally:
+        try:
+            # Image publication uses unbuffered diagnostics. Other paths still
+            # print to buffered streams and must flush before the direct exit.
+            if cancellation.committed_exit is None:
+                for stream in (sys.stdout, sys.stderr):
+                    try:
+                        stream.flush()
+                    except BaseException as exc:
+                        report_error(exc)
+        finally:
+            committed = cancellation.committed_exit
+            os._exit(status if committed is None else committed)
+
+
+if __name__ == "__main__":
+    exit_launcher()

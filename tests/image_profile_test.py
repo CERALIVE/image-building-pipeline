@@ -2,6 +2,7 @@
 """Run the real launcher lifecycle against small Python children, never a VM."""
 
 from dataclasses import asdict, dataclass, replace
+import atexit
 import errno
 import fcntl
 import io
@@ -32,20 +33,57 @@ from image_vm import retained_outputs, validate_base
 
 IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
+SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error")
 
 
 def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> None:
     """Run the CLI and deliver a real signal inside the poll owned by select()."""
     poll_type = selectors.EpollSelector._selector_cls
     replace_file = os.replace
+    sigmask = signal.pthread_sigmask
     read_text = pathlib.Path.read_text
     fsync = os.fsync
     unlink = pathlib.Path.unlink
     temporary_file = tempfile.TemporaryFile
     directory = root / "returns/fixture/build"
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
+    receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
+    pair = mode.startswith("pair:")
     sent = False
     fail_sync = False
+
+    def step_fixture(action):
+        def run_step(transaction):
+            final = transaction.path == directory / "exit.json"
+            if final:
+                with (root / "steps").open("a") as log:
+                    print(action.__name__, file=log)
+            if (final and receipt_fault and action.__name__ == receipt_fault[0]
+                    and not (root / "injected").exists()):
+                (root / "injected").touch()
+                kind = receipt_fault[1]
+                if kind == "term-before":
+                    cancel()
+                if kind in {"exception", "oserror", "systemexit", "interrupt"}:
+                    # Successful close can also report an error. For rename,
+                    # inject before the syscall to model a failed commit.
+                    if action.__name__ in {"file_close", "dir_close", "temp_cleanup"}:
+                        action(transaction)
+                    error = {"exception": Exception, "oserror": OSError,
+                             "systemexit": SystemExit, "interrupt": KeyboardInterrupt}[kind]
+                    raise error(f"fixture {action.__name__}")
+                action(transaction)
+                if kind == "term-during" and action.__name__ != "rename":
+                    cancel()
+            else:
+                action(transaction)
+        return run_step
+
+    def mask(how, signals):
+        if (mode == "mask-restore-error" and how == signal.SIG_SETMASK
+                and (directory / "exit.json").exists()):
+            raise OSError(errno.EPERM, "fixture final mask restoration")
+        return sigmask(how, signals)
 
     def cancel() -> None:
         nonlocal sent
@@ -63,15 +101,24 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def publish(source, destination) -> None:
         nonlocal fail_sync
-        if destination in {directory / "exit.json", directory / "teardown.json"}:
+        if pair:
+            with (root / "sequence").open("a") as log:
+                print(destination.relative_to(root / "returns"), file=log)
+        if (destination in {directory / "exit.json", directory / "teardown.json"}
+                or pair and destination.name in {"teardown.json", "exit.json"}):
             # Compare real descriptor targets before the launcher exits.
             live = {os.readlink(fd) for fd in pathlib.Path("/proc/self/fd").iterdir()
                     if fd.is_symlink() and fd.exists()}
             owned = root / "owned-fds"
-            held = set(json.loads(owned.read_text())) if owned.exists() else set()
+            if fault and not (root / "ready").exists():
+                held = set()
+            else:
+                held = set(json.loads(owned.read_text()))
+                assert held, "started fake QEMU has no inherited descriptor inventory"
             held.add(str(root / "capsule"))
             held.update(str(file) for file in directory.glob("*.partial"))
             (root / "leaks").write_text(json.dumps(sorted(live & held)))
+            assert not live & held, sorted(live & held)
             frozen = "launcher_exit" in json.loads(pathlib.Path(source).read_text())
             if not sent and (mode == "receipt" or mode == "committed" and frozen):
                 cancel()
@@ -84,6 +131,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     pass
                 else:
                     raise AssertionError("receipt written without the lock held")
+            if mode == "pair:fail" and destination == directory.parent / "verify/teardown.json":
+                raise OSError(errno.EIO, "fixture verifier teardown rename")
         replace_file(source, destination)
 
     def sync(fd):
@@ -133,7 +182,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return getattr(epoll, name)
 
             def poll(self, *args):
-                if not fault and mode not in {"receipt", "validation", "committed", "exit-sync-error"} and not sent:
+                if not fault and not receipt_fault and not pair and mode not in SUCCESS_GUEST_MODES and not sent:
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
@@ -143,6 +192,17 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
         return Poll()
 
+    validate_return = image_vm.validate_return
+
+    def fixture_return(job, verifier):
+        # Only the production build's multi-GiB artifact set is substituted.
+        if not pair or verifier:
+            return validate_return(job, verifier)
+        job.cancellation.check()
+        target = job.directory / "artifacts"
+        target.mkdir()
+        (target / "fixture").write_bytes(b"public artifact")
+
     capsule = root / "capsule"
     base = root / "base"
     sys.argv = [str(ROOT / "ci/kernel-runner/vm.py"), "image", "--base", str(base),
@@ -151,13 +211,24 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 "--input-sha256", hashlib.sha256(capsule.read_bytes()).hexdigest(),
                 "--trust-policy", str(root / "unused-policy"), "--output-dir", str(root / "returns"),
                 "--source-commit", IDENTITY.commit, "--source-epoch", str(IDENTITY.epoch),
-                "--attempt", IDENTITY.attempt, "--board", IDENTITY.board, "--image-mode", "probe"]
+                "--attempt", IDENTITY.attempt, "--board", IDENTITY.board, "--image-mode",
+                "measure" if pair else "probe"]
+    table = (tuple((step_fixture(action), cleanup) for action, cleanup in image_lifecycle.RECEIPT_STEPS)
+             if receipt_fault else image_lifecycle.RECEIPT_STEPS)
+    if receipt_fault:
+        def shutdown_hook():
+            (root / "atexit-ran").touch()
+            raise SystemExit(7)
+        atexit.register(shutdown_hook)
     with patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)), \
+            patch.object(image_lifecycle, "RECEIPT_STEPS", table), \
             patch.object(os, "replace", publish), \
+            patch.object(signal, "pthread_sigmask", mask), \
             patch.object(os, "fsync", sync), \
             patch.object(pathlib.Path, "unlink", remove), \
             patch.object(tempfile, "TemporaryFile", overlay), \
             patch.object(pathlib.Path, "read_text", read_result), \
+            patch.object(image_vm, "validate_return", fixture_return), \
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None), \
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()), \
@@ -175,7 +246,14 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM) -> Non
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         capsule = root / "capsule"
-        capsule.write_bytes(b"public fixture")
+        if mode.startswith("pair:"):
+            with tarfile.open(capsule, "w") as archive:
+                data = b'{"objects":[]}'
+                header = tarfile.TarInfo("inventory.json")
+                header.size = len(data)
+                archive.addfile(header, io.BytesIO(data))
+        else:
+            capsule.write_bytes(b"public fixture")
         base = root / "base"
         base.write_bytes(b"public base")
         base.chmod(0o444)
@@ -218,8 +296,20 @@ fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
 (root / "owned-fds").write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
 (root / "pid").write_text(str(os.getpid()))
+with (root / "children").open("a") as logged:
+    print(os.getpid(), file=logged)
 (root / "ready").touch()
-if mode in {{"receipt", "validation", "committed", "exit-sync-error"}} or mode.startswith("fault:"):
+if mode.startswith("pair:"):
+    payload = json.loads(pathlib.Path(sys.argv[sys.argv.index("-fw_cfg") + 1].split("file=")[1]).read_text())
+    if payload["operation"] == "verify":
+        sys.path.insert(0, {str(ROOT / 'ci/kernel-runner')!r})
+        from image_stream import Identity, encode
+        result = {{"schema": 1, "verified": True, "build_identity": payload["build_identity"],
+                  "artifacts": payload["artifacts"], "slots": [{{"slot": "rootfs_a"}}, {{"slot": "rootfs_b"}}]}}
+        encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
+               Identity(**payload["identity"]))
+    sys.exit(0)
+if mode in {SUCCESS_GUEST_MODES!r} or mode.startswith(("fault:", "receipt-step:")):
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
 if mode == "slow":
@@ -267,6 +357,54 @@ while True:
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode.startswith("pair:"):
+            attempt = directory.parent
+            accepted = attempt / "acceptance.json"
+            marker = attempt / "exit.json"
+            failed = mode == "pair:fail"
+            assert launcher.returncode == int(failed), stderr.decode()
+            sequence = (root / "sequence").read_text().splitlines()
+            assert sequence.index("fixture/build/teardown.json") < sequence.index("fixture/verify/teardown.json")
+            assert "launcher_exit" not in json.loads((directory / "teardown.json").read_text())
+            if failed:
+                assert not accepted.exists() and not marker.exists()
+            else:
+                assert sequence[-2:] == ["fixture/acceptance.json", "fixture/exit.json"]
+                assert json.loads(marker.read_text())["launcher_exit"] == launcher.returncode
+            assert (image_vm.completed_acceptance(accepted) is not None) == (not failed)
+            children = (root / "children").read_text().splitlines()
+            assert len(children) == 2
+            assert all(not pathlib.Path(f"/proc/{pid}").exists() for pid in children)
+            assert not list(root.glob("job-*")) and not list(root.rglob(".receipt-*"))
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        if mode.startswith("receipt-step:"):
+            point, action = mode.split(":")[1:]
+            marker = directory / "exit.json"
+            names = [step.__name__ for step, _ in image_lifecycle.RECEIPT_STEPS]
+            index, rename = names.index(point), names.index("rename")
+            after = index > rename or index == rename and action == "term-during"
+            assert (root / "injected").exists(), (mode, stderr)
+            assert launcher.returncode == (0 if after else 1), (mode, stderr)
+            assert marker.exists() == (after or action.startswith("term-")), mode
+            if marker.exists():
+                assert json.loads(marker.read_text())["launcher_exit"] == launcher.returncode, mode
+            executed = (root / "steps").read_text().splitlines()
+            if after:
+                assert executed == names, mode
+            elif not action.startswith("term-"):
+                assert executed[index + 1:] == [
+                    step.__name__ for step, cleanup in image_lifecycle.RECEIPT_STEPS[index + 1:]
+                    if cleanup], mode
+            assert not (root / "atexit-ran").exists(), mode
+            assert not list(root.rglob(".receipt-*")), mode
+            assert not list(root.glob("job-*")), mode
+            assert json.loads((root / "leaks").read_text()) == [], mode
+            assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists(), mode
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
         if mode.startswith("fault:"):
             action, boundary = mode.split(":")[1:]
             assert (root / "injected").is_file(), (mode, stderr)
@@ -284,7 +422,7 @@ while True:
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
-        expected_status = 0 if mode in {"committed", "exit-sync-error"} else 1
+        expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error"} else 1
         pid = (root / "pid").read_text()
         assert not pathlib.Path(f"/proc/{pid}").exists(), "QEMU was not reaped"
         assert not list(root.glob("job-*"))
@@ -304,11 +442,13 @@ while True:
             assert record["qemu"].split(":")[0] == pid
             assert record["qemu_reaped"] is True
             assert record["qemu_exit"] == {"ignore": -9, "slow": -15}.get(mode, 0)
-            if mode not in {"receipt", "validation", "committed", "exit-sync-error"}:
+            if mode not in SUCCESS_GUEST_MODES:
                 assert record["qemu_priority"] == FIXTURE_PRIORITY
         assert not (root / "returns/active.json").exists()
         if mode == "exit-sync-error":
             assert b"fixture exit directory sync" in stderr
+        elif mode == "mask-restore-error":
+            assert b"fixture final mask restoration" in stderr
         else:
             assert time.monotonic() - float((root / "sent").read_text()) < seconds
         if mode in {"term", "ignore", "repeat"}:
@@ -339,7 +479,23 @@ def test_final_receipt_rename_decides_status_even_if_directory_sync_fails() -> N
     cancelled_fixture("exit-sync-error")
 
 
+def test_mask_restoration_after_rename_cannot_change_launcher_exit() -> None:
+    cancelled_fixture("mask-restore-error")
+
+
+def test_each_receipt_step_preserves_commit_and_releases_owned_resources() -> None:
+    declared = {name for name, value in vars(image_lifecycle.Receipt).items()
+                if not name.startswith("_") and callable(value)}
+    scheduled = {step.__name__ for step, _ in image_lifecycle.RECEIPT_STEPS}
+    assert scheduled == declared
+    for step, _cleanup in image_lifecycle.RECEIPT_STEPS:
+        for action in ("exception", "oserror", "systemexit", "interrupt", "term-before", "term-during"):
+            cancelled_fixture(f"receipt-step:{step.__name__}:{action}")
+
+
 def test_failed_verifier_receipt_does_not_publish_pair_acceptance() -> None:
+    cancelled_fixture("pair:fail")
+    cancelled_fixture("pair:success")
     with tempfile.TemporaryDirectory() as temporary:
         attempt = pathlib.Path(temporary) / "fixture"
         build, verifier = attempt / "build", attempt / "verify"

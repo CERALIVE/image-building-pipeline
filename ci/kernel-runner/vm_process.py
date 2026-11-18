@@ -20,6 +20,7 @@ class Cancellation:
     """A one-way flag set by the main thread's signal handler."""
 
     requested = False
+    committed_exit: int | None = None
 
     def request(self, _signum: int, _frame) -> None:
         self.requested = True

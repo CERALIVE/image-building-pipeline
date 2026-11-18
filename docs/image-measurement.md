@@ -617,12 +617,21 @@ publication failure before that rename leaves the marker absent and exits
 nonzero. Consumers treat a missing marker as failure. Cancellation before
 the final rename transaction produces a marker with `stop_reason` set to
 `cancelled` and `launcher_exit` set to 1 when storage permits. The launcher
-defers TERM, INT and HUP across the last cancellation check and rename
-syscall to serialize signals with the decision. Once renamed, the process
-returns the published `launcher_exit`. If the final directory sync fails,
-the launcher logs the error to stderr and retains that outcome. The file is
-visible at runtime, but a crash may lose the rename. SIGKILL, power loss
-and external termination of the flock are outside the orderly exit contract.
+defers TERM, INT and HUP across the final cancellation checkpoint and rename.
+It checks for pending stop signals before entering the rename syscall. The
+rename latches `launcher_exit` in memory before any fallible cleanup. The
+receipt step table then independently attempts signal-mask restoration,
+directory open, sync and close, temporary-file cleanup when applicable, and
+diagnostics. A step failure cannot skip the remaining cleanup or change a
+committed result. A final directory-sync failure leaves the file visible at
+runtime, but a crash may lose the rename.
+
+The CLI exits directly with the latched code after teardown and publication,
+so Python shutdown hooks cannot replace it. The external flock releases its
+lock when the launcher exits. The launcher has already reaped QEMU and
+closed the guest descriptors and anonymous overlay before committing success.
+SIGKILL, power loss and external termination of the flock are outside the
+orderly exit contract.
 
 After forced death, the next admission reconciles the exact owned overlay
 inode and process identities. A remaining holder blocks admission; no foreign
