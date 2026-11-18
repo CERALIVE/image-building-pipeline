@@ -21,7 +21,7 @@ import time
 import yaml
 from image_resources import AdmissionError
 from image_stream import StreamError
-from image_lifecycle import job_disk
+from image_lifecycle import STOP_SIGNALS, job_disk, report_error
 from vm_process import Cancellation, read_check_script, run, terminate, wait
 
 HERE = Path(__file__).resolve().parent
@@ -261,11 +261,11 @@ def main(cancellation: Cancellation) -> int:
 
 if __name__ == "__main__":
     cancellation = Cancellation()
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for signum in STOP_SIGNALS:
         signal.signal(signum, cancellation.request)
     try:
         sys.exit(main(cancellation))
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
             StreamError, subprocess.SubprocessError) as exc:
-        print(f"kernel runner: {exc}", file=sys.stderr)
+        report_error(exc)
         sys.exit(1)

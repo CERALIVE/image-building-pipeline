@@ -9,20 +9,25 @@ import json
 import os
 from pathlib import Path
 import selectors
+import signal
 import subprocess
 import time
 import tempfile
+from typing import Callable
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import POLL_SECONDS, Cancellation, run, wait
 
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
 @contextmanager
 def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = None):
     """Shared anonymous disk lifecycle used by vm.py's kernel and image paths."""
     from vm import die_with_parent
-    with tempfile.TemporaryFile(prefix="job-", dir=base.parent) as overlay_file:
+    overlay_file = tempfile.TemporaryFile(prefix="job-", dir=base.parent)
+    try:
         disk_fd = overlay_file.fileno()
         if image_job:
             image_job.overlay_created(disk_fd)
@@ -31,26 +36,73 @@ def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = Non
              "-b", str(base), str(overlay)], cancellation=cancellation or Cancellation(),
             pass_fds=(disk_fd,), preexec_fn=partial(die_with_parent, os.getpid()), timeout=180)
         yield overlay, disk_fd
+    finally:
+        overlay_file.close()
+        if image_job:
+            image_job.state["overlay_descriptor_closed"] = True
 
 def process_identity(pid: int) -> str:
     text = (Path("/proc") / str(pid) / "stat").read_text()
     return f"{pid}:{text[text.rindex(')') + 2:].split()[19]}"
 
 
-def receipt(path: Path, row: dict) -> None:
-    temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "w") as destination:
-        json.dump(row, destination, sort_keys=True, indent=2)
-        destination.write("\n")
-        destination.flush()
-        os.fsync(destination.fileno())
-    os.replace(temporary, path)
-    fd = os.open(path.parent, os.O_DIRECTORY)
+def sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_DIRECTORY)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def create_directory(path: Path, *, parents: bool = False) -> None:
+    """Make each new directory entry durable before relying on its children."""
+    if parents and path.is_dir():
+        return
+    if parents:
+        create_directory(path.parent, parents=True)
+    path.mkdir(mode=0o700)
+    sync_directory(path.parent)
+
+
+def receipt(path: Path, row: dict, *, before_commit: Callable[[], None] | None = None) -> None:
+    """Publish a receipt. Only the final marker can supply a commit checkpoint."""
+    temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
+    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    committed = False
+    try:
+        with os.fdopen(fd, "w") as destination:
+            json.dump(row, destination, sort_keys=True, indent=2)
+            destination.write("\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+        if before_commit is None:
+            os.replace(temporary, path)
+            committed = True
+        else:
+            previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+            try:
+                before_commit()
+                os.replace(temporary, path)
+                committed = True
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        try:
+            sync_directory(path.parent)
+        except OSError as error:
+            if before_commit is None:
+                raise
+            report_error(error)
+    finally:
+        if not committed:
+            temporary.unlink(missing_ok=True)
+
+
+def report_error(error: Exception) -> None:
+    """Diagnostics must not affect an already committed exit code."""
+    try:
+        os.write(2, f"kernel runner: {error}\n".encode(errors="backslashreplace"))
+    except OSError:
+        return  # There may be no stderr reader.
 
 
 def reconcile(store: Path) -> None:
@@ -89,6 +141,7 @@ def reconcile(store: Path) -> None:
         "overlay_descriptors_closed": True, "reconciled_at": time.time(),
     })
     active.unlink()
+    sync_directory(store)
 
 
 class ImageJob:
@@ -130,10 +183,11 @@ class ImageJob:
             self.state.update(input_descriptor_closed=True, ended_at=time.time())
             if error:
                 self.state["stop_reason"] = type(error).__name__
-            receipt(self.directory / "exit.json", self.state)
+            receipt(self.directory / "teardown.json", self.state)
             if (self.state["overlay_descriptor_closed"] and "overlay_inode" in self.state
                     and ("qemu" not in self.state or self.state["qemu_reaped"])):
                 self.active.unlink(missing_ok=True)
+                sync_directory(self.active.parent)
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""

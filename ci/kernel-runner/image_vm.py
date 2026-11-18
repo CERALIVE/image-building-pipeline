@@ -5,23 +5,24 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 from functools import partial
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
-import sys
+import tarfile
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
-from image_lifecycle import ImageJob, receipt, reconcile
+from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
 from vm_process import Cancelled, Cancellation, run
 
-IMAGE_ERRORS = (OSError, ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
-                StreamError, subprocess.SubprocessError)
+IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
+                StreamError, subprocess.SubprocessError, tarfile.TarError)
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-capsule", type=Path)
@@ -66,15 +67,34 @@ def validate_base(base: Path, expected_sha256: str,
             or specific.get("data-file-raw") or specific.get("corrupt")):
         raise AdmissionError("image profile requires a dedicated unbacked 128 GiB base")
 
+def completed_acceptance(path: Path) -> dict | None:
+    """Validate the final marker before consuming a pair's acceptance candidate."""
+    try:
+        marker = json.loads((path.parent / "exit.json").read_text())
+    except FileNotFoundError:
+        return None
+    if (marker["schema"] != 1 or type(marker["launcher_exit"]) is not int
+            or marker["launcher_exit"] != 0 or marker.get("pair_complete") is not True):
+        return None
+    raw = path.read_bytes()
+    row = json.loads(raw)
+    if (marker["acceptance_sha256"] != hashlib.sha256(raw).hexdigest()
+            or marker["identity"] != row["identity"] or row["schema"] != 1
+            or row["content_verified"] is not True):
+        raise AdmissionError("image pair marker does not match its acceptance receipt")
+    return row
+
+
 def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
     """Only a verified other board reduces the remaining pair allocation."""
     retained = 0
     boards = set()
     for accepted in store.glob("*/acceptance.json"):
-        row = json.loads(accepted.read_text())
+        row = completed_acceptance(accepted)
+        if row is None:
+            continue
         previous = Identity(**row["identity"])
-        if (row["schema"] != 1 or row["content_verified"] is not True
-                or (previous.commit, previous.epoch, row["base_sha256"], row["public_root_der_sha256"])
+        if ((previous.commit, previous.epoch, row["base_sha256"], row["public_root_der_sha256"])
                 != (identity.commit, identity.epoch, *trust_identity)):
             raise AdmissionError("private output store belongs to another approved pair")
         if previous.board == identity.board or previous.board in boards:
@@ -88,7 +108,7 @@ def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str,
 
 def validate_return(job: ImageJob, verifier: bool) -> None:
     target = job.directory / "artifacts"
-    target.mkdir(mode=0o700)
+    create_directory(target)
     envelope = job.directory / "stream.partial"
     with envelope.open("rb") as source:
         members = decode(source, target, job.identity, job.cancellation.check)
@@ -103,16 +123,18 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
         raise StreamError("returned artifact set is incomplete")
     if not verifier:
         measurement = json.loads((target / "measurement.json").read_text())
+        stages = measurement["stages"]
         if (measurement["schema"] != 1 or (measurement["purpose"], measurement["build_mode"], measurement["board"],
              measurement["source_commit"], measurement["source_date_epoch"], measurement["input_sha256"])
                 != ("rootfs-measurement", "production", job.identity.board, job.identity.commit,
                     job.identity.epoch, job.identity.input_sha256)
                 or measurement["public_root_der_sha256"] != job.state["public_root_der_sha256"]
                 or measurement["signed_candidate"] is not False
-                or set(measurement["stages"]) != {
+                or not isinstance(stages, dict)
+                or set(stages) != {
                     "resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
                     "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock", "parity", "raw-slots"}
-                or any(type(code) is not int or code != 0 for code in measurement["stages"].values())):
+                or any(type(code) is not int or code != 0 for code in stages.values())):
             raise StreamError("measurement receipt identity or stage failure")
         for member in members:
             if member.id in measurement["artifacts"] and measurement["artifacts"][member.id] != {
@@ -123,11 +145,7 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
         verify_sidecar(target / "rootfs.tar.sha256", rootfs)
         verify_sidecar(target / "boot.scr.sha256", next(member for member in members if member.id == "boot.scr"))
         job.state["guest_claimed_stage_exits"] = measurement["stages"]
-    directory_fd = os.open(target, os.O_DIRECTORY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    sync_directory(target)
     receipt(job.directory / "transport-validation.json",
             {"schema": 1, "identity": asdict(job.identity),
              "members": [asdict(member) for member in members],
@@ -139,26 +157,23 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
     """One owned overlay, exit receipt and independent host transport validation."""
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
-    directory.mkdir(mode=0o700)
+    create_directory(directory)
     with ImageJob(directory, identity, request["capsule"], cancellation) as job:
         jobs.append(job)
         job.state.update(base_sha256=request["base_sha256"], base=str(base),
                          public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
                          overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
                          stream_budget=CAPS.stream_max if request["payload"]["operation"] == "measure" else 4 * 1024**2)
-        try:
-            with job_disk(base, job, cancellation) as (overlay, disk_fd):
-                remaining = int(request["deadline"] - time.monotonic())
-                if remaining <= 0:
-                    raise AdmissionError("image deadline exhausted before guest launch")
-                seconds = min(CAPS.verify_seconds if request["payload"]["operation"] == "verify" else CAPS.build_seconds, remaining)
-                payload = json.dumps(request["payload"]).encode()
-                if len(payload) > 1024 * 1024:
-                    raise AdmissionError("image job public metadata exceeds 1 MiB")
-                boot(overlay, payload, "image", seconds,
-                     disk_fd=disk_fd, image_job=job)
-        finally:
-            job.state["overlay_descriptor_closed"] = True
+        with job_disk(base, job, cancellation) as (overlay, disk_fd):
+            remaining = int(request["deadline"] - time.monotonic())
+            if remaining <= 0:
+                raise AdmissionError("image deadline exhausted before guest launch")
+            seconds = min(CAPS.verify_seconds if request["payload"]["operation"] == "verify" else CAPS.build_seconds, remaining)
+            payload = json.dumps(request["payload"]).encode()
+            if len(payload) > 1024 * 1024:
+                raise AdmissionError("image job public metadata exceeds 1 MiB")
+            boot(overlay, payload, "image", seconds,
+                 disk_fd=disk_fd, image_job=job)
         job.outputs.close()
         cancellation.check()
         disk_headroom(((directory, 16 * GIB),))
@@ -169,35 +184,57 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
 
 def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
               cancellation: Cancellation) -> int:
-    """Decide the launcher status once and publish it in every owned exit receipt."""
+    """Publish one authoritative outcome for the entire image attempt."""
     jobs: list[ImageJob] = []
     error = None
-    acceptance = None
+    accepted_sha = None
     try:
         acceptance = measure_image(args, parser, cancellation, jobs)
-    except IMAGE_ERRORS as exc:
-        error = exc
-
-    try:
-        # Commit point: after this check signals cannot change the receipt or exit status.
-        cancellation.check()
-        if error is None and acceptance is not None:
+        if acceptance is not None:
             receipt(*acceptance)
+            accepted_sha = digest_file(acceptance[0])
+    except OSError as exc:
+        report_error(exc)
+        return 1
     except IMAGE_ERRORS as exc:
         error = exc
+    if not jobs:
+        if error is not None:
+            report_error(error)
+        return 1
 
-    status = int(error is not None)
-    if isinstance(error, Cancelled):
-        for job in jobs:
-            job.state["stop_reason"] = "cancelled"
-    elif error is not None and jobs:
-        jobs[-1].state["stop_reason"] = type(error).__name__
-    for job in jobs:
-        job.state["launcher_exit"] = status
-        receipt(job.directory / "exit.json", job.state)
-    if error is not None:
-        print(f"kernel runner: {error}", file=sys.stderr)
-    return status
+    build = jobs[0]
+    probe = args.image_mode == "probe"
+    path = (build.directory if probe else build.directory.parent) / "exit.json"
+    while True:
+        if cancellation.requested:
+            error = Cancelled("runner cancelled")
+        status = int(error is not None)
+        row = build.state | {"launcher_exit": status} if probe else {
+            "schema": 1, "identity": build.state["identity"], "launcher_exit": status,
+            "stop_reason": jobs[-1].state["stop_reason"],
+        }
+        if error is not None:
+            row["stop_reason"] = "cancelled" if isinstance(error, Cancelled) else type(error).__name__
+        if not probe:
+            row["pair_complete"] = not status
+            if not status:
+                row["acceptance_sha256"] = accepted_sha
+        try:
+            # This marker's rename commits the only authoritative outcome. A
+            # pre-rename I/O failure leaves it absent and exits 1. A post-rename
+            # directory sync error is logged and cannot change the published status.
+            receipt(path, row, before_commit=(lambda: None) if isinstance(error, Cancelled)
+                    else cancellation.check)
+        except Cancelled as exc:
+            error = exc
+            continue
+        except OSError as exc:
+            report_error(exc)
+            return 1
+        if error is not None:
+            report_error(error)
+        return row["launcher_exit"]
 
 
 def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
@@ -221,7 +258,8 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             or digest_file(args.input_capsule, cancellation.check) != identity.input_sha256):
         raise AdmissionError("input capsule transport identity mismatch")
     store = args.output_dir.resolve()
-    store.mkdir(mode=0o700, parents=True, exist_ok=True)
+    create_directory(store, parents=True)
+    cancellation.check()
     if store.stat().st_uid != os.getuid() or store.stat().st_mode & 0o077:
         raise AdmissionError("image return store must be owned by the launcher and mode 0700")
     reconcile(store)
@@ -229,7 +267,7 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     retained = retained_outputs(store, identity, (args.base_sha256, trust["root_der_sha256"]))
     disk_admission(base.parent, store, retained)
     directory = store / identity.attempt
-    directory.mkdir(mode=0o700)
+    create_directory(directory)
     CAPS.qemu_limit()
     request = {"capsule": args.input_capsule, "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {

@@ -565,7 +565,8 @@ firmware closure/inventory, package identities, kernel metadata and actual
 clean ext4 reserves. Read-only guest mounts compare slot contents with the
 emitted tar plus independently recompiled boot payload; ext4's empty
 `lost+found` is filesystem housekeeping. Only a matching verifier result
-produces the host `acceptance.json`. Transport and exit receipts are separate.
+produces the host's candidate `acceptance.json`. The final marker makes it
+eligible for use.
 The mounts retain `noexec,nodev,nosuid`. Shared parity checks require regular
 executable files with stored execute mode bits, rather than asking whether
 the verifier's mount policy permits their execution.
@@ -575,22 +576,54 @@ deny X_OK while preserving the fixture's file metadata. It creates no mount,
 executes no image binary and needs no sudo. Hosted CI and prepared test bases
 declare strace as a test tool.
 
-Receipts record source/base/input identities, launcher/QEMU process start
-identities, times, caps, exit/stop reason, reaping and descriptor closure.
+### Teardown and publication
+
 Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
 idle I/O loop checks for cancellation at least once per second. The launcher
 stops draining pipes and sends TERM to the owned QEMU process, then sends KILL
-if it has not exited after 20 seconds. It reaps QEMU, discards the anonymous
-overlay, closes descriptors and writes `exit.json` with `stop_reason` set to
-`cancelled` and `launcher_exit` set to `1` before returning a nonzero status.
-Additional signals do not reset the grace period or interrupt the receipt.
-The launcher honors cancellation through final validation. It then fixes the
-result before publishing acceptance and the final exit status. Signals during
-that final publication do not change the result. For measurement runs, a
-guest's teardown receipt can appear before the verifier finishes. Its
-`launcher_exit` field is added when the launcher has decided the outcome.
-An interruption before creating an attempt has no guest or teardown receipt.
-Allow up to 600 seconds for owned teardown and receipt I/O on a responsive host.
+if it has not exited after 20 seconds. Additional signals do not reset that
+grace period. Allow up to 600 seconds for teardown and receipt I/O on a
+responsive host.
+
+The launcher holds the flock through all of these steps:
+
+1. Create private directories and sync their parent entries. Journal the
+   overlay in `active.json` before it can be inherited. Publish `started.json`
+   and update `active.json` with the QEMU process identity when it starts.
+2. Reap QEMU and close its pipes, the payload and the anonymous overlay.
+   Closing the last overlay descriptor removes the overlay. Flush and sync
+   the captured output before decoding. Validate and sync the decoded files
+   and artifact directory before publishing their `transport-validation.json`.
+   Discard the captured stream after transport validation.
+3. Close the input capsule, console and any remaining output descriptors.
+   Write each guest's `teardown.json` after cleanup. It records source, base
+   and input identities, process start identities, timing, caps, reaping and
+   descriptor closure. Retire and sync the ownership journal only after
+   teardown has been recorded and closure is confirmed. On the measurement
+   path, repeat these steps for the independent verifier, validate its result,
+   remove its temporary capsule and write the candidate `acceptance.json`.
+4. Commit exactly one final `exit.json` last. For a probe it is in `build/`.
+   For a build and verifier pair it is in the attempt directory alongside
+   `acceptance.json`. Only a marker with `launcher_exit` equal to 0 and
+   `pair_complete` equal to true, with the matching identity and SHA-256 of
+   `acceptance.json`, completes a pair. The host retention check and other
+   consumers must reject an acceptance candidate without this marker, even
+   when guest transport and teardown receipts already exist.
+
+Every receipt is written to a mode-0600 temporary file in its own directory,
+flushed and file-synced, atomically renamed into place, and followed by a
+directory sync. The final marker's **rename is the commit point**. A
+publication failure before that rename leaves the marker absent and exits
+nonzero. Consumers treat a missing marker as failure. Cancellation before
+the final rename transaction produces a marker with `stop_reason` set to
+`cancelled` and `launcher_exit` set to 1 when storage permits. The launcher
+defers TERM, INT and HUP across the last cancellation check and rename
+syscall to serialize signals with the decision. Once renamed, the process
+returns the published `launcher_exit`. If the final directory sync fails,
+the launcher logs the error to stderr and retains that outcome. The file is
+visible at runtime, but a crash may lose the rename. SIGKILL, power loss
+and external termination of the flock are outside the orderly exit contract.
+
 After forced death, the next admission reconciles the exact owned overlay
 inode and process identities. A remaining holder blocks admission; no foreign
 process is killed. Forced destruction never claims that guest cleanup ran.
