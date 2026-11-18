@@ -16,7 +16,7 @@
 #     stays --privileged-only (no host qemu assumptions).
 #
 # VERSION PINS — keep in lockstep with .mkosi-version:
-#   * mkosi  : v26, installed from the pinned upstream commit via pipx. (Debian trixie's
+#   * mkosi  : v26, installed from the pinned upstream commit in a venv. (Debian trixie's
 #              apt ships only mkosi 25.3, which is older than the pin, so apt is
 #              NOT used for mkosi.)
 #   * Python : trixie's python3 == 3.13.x, which satisfies mkosi 26's >= 3.12
@@ -45,10 +45,7 @@ ARG MKOSI_VERSION=26
 # confined to the single RUN that uses it.
 ARG APT_PROXY=
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PIPX_HOME=/opt/pipx \
-    PIPX_BIN_DIR=/usr/local/bin \
-    PATH=/usr/local/bin:$PATH
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Build/assembly dependencies. These mirror exactly what lib/orchestrate.sh and
 # lib/assemble-disk.sh shell out to, so the containerized build is self-contained:
@@ -60,7 +57,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   zstd                    faster bootstrap-time compression; avoids mmdebstrap gzip fallback
 #   qemu-user-static        transparent arm64 emulation (binfmt F-flag interpreter)
 #   binfmt-support          registers the qemu interpreters
-#   pipx git python3        pinned mkosi 26 install from the upstream commit
+#   git python3-venv        pinned mkosi 26 install from the upstream commit
 #   python3-pefile          PE/COFF parsing used by mkosi image assembly
 #   e2fsprogs               mkfs.ext4/e2label for the shared slot-image writer
 #                           (lib/disk/slot-image.sh) when it falls back to running
@@ -135,23 +132,32 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       zstd \
       qemu-user-static \
       binfmt-support \
-      pipx \
       git \
       python3 \
+      python3-venv \
       python3-pefile; \
     rm -f /etc/apt/apt.conf.d/99ceralive-proxy /etc/apt/apt.conf.d/99ceralive-keep-cache; \
     [ -f /tmp/ceralive-docker-clean ] \
       && mv /tmp/ceralive-docker-clean /etc/apt/apt.conf.d/docker-clean || true
 
 # Fetch the commit behind v26 directly so moving the tag cannot change the build.
+# Use only verified wheels when pip populates the isolated build environment.
+COPY mkosi-build-requirements.txt /opt/mkosi-build-requirements.txt
 RUN mkosi_commit=84af20892b61c8e177e391f997ded8b4cb5514f2 \
  && mkosi_src="$(mktemp -d)" \
  && git init -q "${mkosi_src}" \
  && git -C "${mkosi_src}" fetch --depth=1 --no-tags https://github.com/systemd/mkosi.git "${mkosi_commit}" \
  && git -C "${mkosi_src}" checkout --detach FETCH_HEAD \
  && test "$(git -C "${mkosi_src}" rev-parse HEAD)" = "${mkosi_commit}" \
- && pipx install "${mkosi_src}" \
- && rm -rf "${mkosi_src}"
+ && wheelhouse="$(mktemp -d)" \
+ && python3 -m venv /opt/mkosi \
+ && /opt/mkosi/bin/python -m pip download --disable-pip-version-check --no-cache-dir \
+      --index-url https://pypi.org/simple --only-binary=:all: --require-hashes \
+      --requirement /opt/mkosi-build-requirements.txt --dest "${wheelhouse}" \
+ && /opt/mkosi/bin/python -m pip install --no-cache-dir \
+      --no-index --find-links "${wheelhouse}" "${mkosi_src}" \
+ && ln -s /opt/mkosi/bin/mkosi* /usr/local/bin/ \
+ && rm -rf "${mkosi_src}" "${wheelhouse}"
 
 # UPSTREAM FIX — mkosi 26 writes its build-time policy-rc.d NON-EXECUTABLE, so
 # invoke-rc.d ignores it and the denial never takes effect.
@@ -202,14 +208,14 @@ RUN mkosi_commit=84af20892b61c8e177e391f997ded8b4cb5514f2 \
 # write site, the image build FAILS here rather than silently reverting to a
 # build log full of warnings nobody reads. `py_compile` proves the inserted line
 # left a parseable module rather than a mis-indented one.
-RUN APT_PY="$(python3 -c 'import glob; print(glob.glob("/opt/pipx/venvs/mkosi/lib/python*/site-packages/mkosi/installer/apt.py")[0])')" \
+RUN APT_PY="$(/opt/mkosi/bin/python -c 'import mkosi.installer.apt; print(mkosi.installer.apt.__file__)')" \
  && test "$(grep -c 'policyrcd = context.root / "usr/sbin/policy-rc.d"' "${APT_PY}")" = 1 \
  && test "$(grep -c '^ *policyrcd\.write_text(' "${APT_PY}")" = 1 \
  && test "$(grep -c 'policyrcd\.chmod' "${APT_PY}")" = 0 \
  && sed -i 's|^\([[:space:]]*\)policyrcd\.write_text(.*|&\n\1policyrcd.chmod(0o755)|' "${APT_PY}" \
  && test "$(grep -c '^ *policyrcd\.chmod(0o755)$' "${APT_PY}")" = 1 \
  && python3 -m py_compile "${APT_PY}" \
- && find /opt/pipx/venvs/mkosi -name '__pycache__' -type d -prune -exec rm -rf {} +
+ && find /opt/mkosi -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # Fail the image build LOUDLY if the pin drifts: the builder MUST carry exactly
 # mkosi ${MKOSI_VERSION} on a Python that meets the >= 3.12 floor.

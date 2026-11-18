@@ -43,7 +43,8 @@ assert not checks[0].get("env"), "offline self-test must not require credentials
 
 # The only upstream mkosi source must be a full commit. Installing that
 # checkout must depend on verifying HEAD against the same pin.
-dockerfile = Path(sys.argv[2]).read_text()
+dockerfile_path = Path(sys.argv[2])
+dockerfile = dockerfile_path.read_text()
 instructions = re.sub(r"\\\n[ \t]*", " ", dockerfile).splitlines()
 source = [line.strip() for line in instructions
           if "github.com/systemd/mkosi" in line and not line.lstrip().startswith("#")]
@@ -54,9 +55,31 @@ assert re.search(
     git + r'fetch --depth=1 --no-tags https://github\.com/systemd/mkosi\.git "\$\{mkosi_commit\}"\s*&&\s*'
     + git + r'checkout --detach FETCH_HEAD\s*&&\s*'
     r'test "\$\(' + git + r'rev-parse HEAD\)" = "\$\{mkosi_commit\}"\s*&&\s*'
-    r'pipx install "\$\{mkosi_src\}"(?:\s*&&|$)',
+    r'wheelhouse="\$\(mktemp -d\)"\s*&&\s*'
+    r'python3 -m venv /opt/mkosi\s*&&\s*'
+    r'/opt/mkosi/bin/python -m pip download --disable-pip-version-check --no-cache-dir\s+'
+    r'--index-url https://pypi\.org/simple --only-binary=:all: --require-hashes\s+'
+    r'--requirement /opt/mkosi-build-requirements\.txt --dest "\$\{wheelhouse\}"\s*&&\s*'
+    r'/opt/mkosi/bin/python -m pip install --no-cache-dir\s+'
+    r'--no-index --find-links "\$\{wheelhouse\}" "\$\{mkosi_src\}"(?:\s*&&|$)',
     source[0],
-), "mkosi install must be gated on verifying the fetched checkout's HEAD"
+), "mkosi install must verify HEAD and install offline from hash-checked wheels"
+assert instructions.count("COPY mkosi-build-requirements.txt /opt/mkosi-build-requirements.txt") == 1, (
+    "mkosi builder must copy in its hashed requirements"
+)
+assert not any(re.search(r"\bpipx\s+install\b", line) for line in instructions
+               if not line.lstrip().startswith("#")), "pipx install bypasses the verified wheelhouse"
+
+locked = []
+for line in dockerfile_path.with_name("mkosi-build-requirements.txt").read_text().splitlines():
+    line = line.strip()
+    if line and not line.startswith("#"):
+        requirement = re.fullmatch(r"([a-z-]+)==[0-9]+(?:\.[0-9]+)+ --hash=sha256:[0-9a-f]{64}", line)
+        assert requirement, f"mkosi build requirement must pin a version and wheel SHA-256: {line}"
+        locked.append(requirement[1])
+assert sorted(locked) == ["packaging", "setuptools", "setuptools-scm", "vcs-versioning"], (
+    "mkosi build lock must list each dependency in the Python 3.13 closure exactly once"
+)
 PY
 
 # Given the CI cache-miss RAUC source GET, when its curl command is inspected,

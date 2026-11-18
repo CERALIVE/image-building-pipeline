@@ -437,12 +437,14 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "builder image: the auto-built mkosi tag is content-addressed over ci/Dockerfile" {
+@test "builder image: the auto-built mkosi tag covers the recipe and Python lock" {
   # ensure_builder_image skips `docker build` when the tag already exists, so a
   # constant tag pins every host to whatever layers it first built — an edit to
   # ci/Dockerfile would then silently never take effect on the machine that cuts
   # the artifacts. Same defect the kernel builder already fixed.
-  run bash -c "grep -n 'ceralive-mkosi-builder:\${MKOSI_VERSION_PIN}-\$(sha256sum' '$PIPELINE_DIR/lib/orchestrate.sh'"
+  run grep -F 'sha256sum Dockerfile mkosi-build-requirements.txt' "$PIPELINE_DIR/lib/orchestrate.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'ceralive-mkosi-builder:${MKOSI_VERSION_PIN}-$(sha256sum <<<"${builder_inputs}"' "$PIPELINE_DIR/lib/orchestrate.sh"
   [ "$status" -eq 0 ]
 
   local plan_a plan_b
