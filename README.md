@@ -139,6 +139,10 @@ and preserves the original signed metadata. It supports separately pinned signed
 Suite/Codename identities and bounded gzip/xz binary-index decoding, including
 complete validation of every concatenated xz stream and its padding. See the
 profile's preparation contract before authorizing any authenticated prefetch.
+The preceding `python3 ci/discover-image-metadata.py` command fills reviewed
+package hashes, sizes and URLs from approved original signed metadata without
+fetching package payloads. It emits an inventory fragment and preserves the
+metadata for review; archive public trust must be supplied independently.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian

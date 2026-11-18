@@ -5,3 +5,9 @@
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
 }
+
+@test "metadata discovery authenticates identities without package requests" {
+  run python3 "${BATS_TEST_DIRNAME}/metadata_discovery_test.py"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}

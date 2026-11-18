@@ -44,17 +44,10 @@ class PublicPolicy:
     os_version: str = ""
 
 
-def load_policy(path: Path) -> PublicPolicy:
-    if not path.is_file() or path.stat().st_size > 1024 * 1024:
-        raise StreamError("missing or oversized public trust policy")
-    row = json.loads(path.read_text(), object_pairs_hook=unique_object)
-    required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
-    optional = {"addon_public_object", "paseto_public_object", "os_version"}
-    if (not required.issubset(row) or set(row) - required - optional
-            or type(row["schema"]) is not int or row["schema"] != 1):
-        raise StreamError("invalid public trust policy fields")
+def archive_policies(rows: dict) -> dict[str, ArchivePolicy]:
+    """Parse independently approved archives without requiring image ingredients."""
     repositories = {}
-    for name, repo in row["repositories"].items():
+    for name, repo in rows.items():
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", name):
             raise StreamError("invalid archive policy name")
         required_fields = set(ArchivePolicy.__dataclass_fields__) - {"codename"}
@@ -75,11 +68,27 @@ def load_policy(path: Path) -> PublicPolicy:
         repositories[name] = ArchivePolicy(**(repo | {
             "origin": original_url(repo["origin"]), "keyring": object_id(repo["keyring"]),
             "fingerprints": tuple(fingerprints)}))
-    if (not {"firstparty", "bsp", "debian-source"}.issubset(repositories)
-            or repositories["firstparty"].origin != "https://apt.ceralive.tv"
-            or repositories["debian-source"].origin != "https://deb.debian.org/debian"
-            or repositories["firstparty"].suite not in ("stable", "beta")
-            or repositories["firstparty"].codename):
+    if (("firstparty" in repositories
+         and (repositories["firstparty"].origin != "https://apt.ceralive.tv"
+              or repositories["firstparty"].suite not in ("stable", "beta")
+              or repositories["firstparty"].codename))
+            or ("debian-source" in repositories
+                and repositories["debian-source"].origin != "https://deb.debian.org/debian")):
+        raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
+    return repositories
+
+
+def load_policy(path: Path) -> PublicPolicy:
+    if not path.is_file() or path.stat().st_size > 1024 * 1024:
+        raise StreamError("missing or oversized public trust policy")
+    row = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
+    optional = {"addon_public_object", "paseto_public_object", "os_version"}
+    if (not required.issubset(row) or set(row) - required - optional
+            or type(row["schema"]) is not int or row["schema"] != 1):
+        raise StreamError("invalid public trust policy fields")
+    repositories = archive_policies(row["repositories"])
+    if not {"firstparty", "bsp", "debian-source"}.issubset(repositories):
         raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
     metadata = row["kernel_metadata"]
     if set(metadata) != {"kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"}:
