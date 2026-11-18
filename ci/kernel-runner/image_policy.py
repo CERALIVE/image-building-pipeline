@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ class ArchivePolicy:
     index_path: str
     max_age_seconds: int
     codename: str = ""
+    max_redirects: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,15 +46,21 @@ class PublicPolicy:
     os_version: str = ""
 
 
-def archive_policies(rows: dict) -> dict[str, ArchivePolicy]:
+def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[str, ArchivePolicy]:
     """Parse independently approved archives without requiring image ingredients."""
     repositories = {}
     for name, repo in rows.items():
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", name):
             raise StreamError("invalid archive policy name")
-        required_fields = set(ArchivePolicy.__dataclass_fields__) - {"codename"}
-        if not required_fields.issubset(repo) or set(repo) - required_fields - {"codename"}:
+        optional_fields = {"codename", "max_redirects"}
+        required_fields = set(ArchivePolicy.__dataclass_fields__) - optional_fields
+        if not required_fields.issubset(repo) or set(repo) - required_fields - optional_fields:
             raise StreamError("invalid archive policy fields")
+        origin = original_url(repo["origin"])
+        maximum = repo.get("max_redirects", 0)
+        if (type(maximum) is not int or not 0 <= maximum <= 3
+                or (maximum and (name != "bsp" or origin in client_origins))):
+            raise StreamError("invalid archive redirect policy: only uncredentialed bsp permits 1-3 hops")
         fingerprints = repo["fingerprints"]
         if (type(fingerprints) is not list or not fingerprints or len(fingerprints) != len(set(fingerprints))
                 or any(not re.fullmatch(r"[A-F0-9]{40}", item) for item in fingerprints)
@@ -66,7 +74,7 @@ def archive_policies(rows: dict) -> dict[str, ArchivePolicy]:
                 or any(part in ("", ".", "..") for part in repo["index_path"].split("/"))):
             raise StreamError("invalid archive validity or identity policy")
         repositories[name] = ArchivePolicy(**(repo | {
-            "origin": original_url(repo["origin"]), "keyring": object_id(repo["keyring"]),
+            "origin": origin, "keyring": object_id(repo["keyring"]),
             "fingerprints": tuple(fingerprints)}))
     if (("firstparty" in repositories
          and (repositories["firstparty"].origin != "https://apt.ceralive.tv"
@@ -78,7 +86,7 @@ def archive_policies(rows: dict) -> dict[str, ArchivePolicy]:
     return repositories
 
 
-def load_policy(path: Path) -> PublicPolicy:
+def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolicy:
     if not path.is_file() or path.stat().st_size > 1024 * 1024:
         raise StreamError("missing or oversized public trust policy")
     row = json.loads(path.read_text(), object_pairs_hook=unique_object)
@@ -87,7 +95,7 @@ def load_policy(path: Path) -> PublicPolicy:
     if (not required.issubset(row) or set(row) - required - optional
             or type(row["schema"]) is not int or row["schema"] != 1):
         raise StreamError("invalid public trust policy fields")
-    repositories = archive_policies(row["repositories"])
+    repositories = archive_policies(row["repositories"], client_origins)
     if not {"firstparty", "bsp", "debian-source"}.issubset(repositories):
         raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
     metadata = row["kernel_metadata"]

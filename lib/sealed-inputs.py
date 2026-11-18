@@ -90,6 +90,8 @@ def repository(directory: Path, name: str) -> Repository:
             raise SealedError("sealed repository differs from independently approved trust policy")
     if row.get("codename", "") != trust.get("codename", ""):
         raise SealedError("sealed repository differs from independently approved trust policy")
+    if row.get("max_redirects", 0) != trust.get("max_redirects", 0):
+        raise SealedError("sealed repository differs from independently approved trust policy")
     origin = urlsplit(row["origin"])
     if (origin.scheme != "https" or origin.username or origin.password or origin.query
             or origin.fragment or origin.port or not origin.hostname):
@@ -203,8 +205,10 @@ source "$1/fetch/index.sh"
 log_error() { printf '%s\\n' "$*" >&2; }
 auth_verify_release_to_file "$2" "$3" "$4" "${@:11}"
 auth_release_has_identity "$4" "$5" "$6" "$7" "${10}"
-expected="$(index_release_digest "$4" "$8")"
+identity="$(index_release_digest "$4" "$8" identity)"
+IFS=$'\\t' read -r expected length <<< "$identity"
 index_verify_digest "$9" "$expected" sealed-mirror
+[[ "$(wc -c < "$9")" -eq "$length" ]]
 '''
     for name in data["repositories"]:
         repo = repository(directory, name)

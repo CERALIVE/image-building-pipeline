@@ -117,6 +117,13 @@ fields are not accepted by this policy.
 Each policy repository (`firstparty`, `bsp` and `debian-source` are required) declares exact
 `origin`, `keyring` object digest, primary `fingerprints`, signed `suite`,
 `component`, `arch`, `index_path`, and `max_age_seconds` (at most 30 days).
+Optional `max_redirects` is an integer from 0 to 3, defaulting to 0 when absent.
+Only `bsp` may approve a nonzero value, and the policy parser rejects a nonzero
+allowance for any origin bound to `--client-identity` in that invocation.
+First-party and all other repositories remain at zero. Keep the Armbian BSP
+logical `origin` as `https://apt.armbian.com`; do not replace it with a mirror.
+The matching repository record repeats a nonzero allowance. Discovery omits
+zero, preserving existing inventory bytes and schema 1.
 An optional `codename` selects the exact `/dists/<codename>/` metadata path
 instead of `/dists/<suite>/`. It must match exactly one signed `Codename`
 field; `suite` must still match exactly one signed `Suite` field. For example,
@@ -207,7 +214,8 @@ The discovery `--trust-policy` contains exactly `schema: 1` and `repositories`.
 Its repository rows use the **same ArchivePolicy fields and parser** as the
 complete image public policy above: `origin`, `keyring` (public file SHA-256),
 `fingerprints`, `suite`, optional `codename`, `component`, `arch`, `index_path`,
-and `max_age_seconds`. Include exactly the repositories used by the selection.
+`max_age_seconds`, and optional `max_redirects` under the restrictions above.
+Include exactly the repositories used by the selection.
 Image-root, builder and released-kernel object identities are unnecessary for
 this earlier step. Copy these independently approved repository policies into
 the eventual complete image public policy without changing them.
@@ -225,7 +233,8 @@ signature, Release identity, validity, index and bounded decompression
 validators. Default metadata names are `InRelease` and the policy's exact
 `index_path`. `--release-name REPOSITORY Release` explicitly selects an original
 signed `Release` accepted by the existing verifier. There is no fallback,
-detached `Release.gpg` request, format probing or redirect following. Only
+detached `Release.gpg` request or format probing. Redirects use only the explicit
+BSP allowance and the shared manual transport described below. Only
 gzip/xz `Packages` indexes and the approved `debian-source` repository's
 `Sources.gz` or `Sources.xz` index are supported. Signature/primary signer,
 Suite/Codename/component/architecture, Date/age, and any present Valid-Until
@@ -295,10 +304,14 @@ The output directory is mode 0700 and its files are mode 0600:
   index digests, signed `release_date` and `valid_until` (null when absent), and
   each selected package's original `filename`, `length`, architecture, version,
   SHA-256, logical origin and signed-index digest.
+  A repository with redirected metadata also records `transfers`: one row per
+  redirected object with `sha256`, logical `url`, final `final_url`, and
+  `redirects` in request order. Each redirect is `{status, from, to}`.
+  Discovery requests no payloads, so package rows have no payload redirect chain.
   With source selections it also has a `sources` array recording one row per
   file, including source name/version, signed Directory/filename, staged path,
-  length/SHA-256, original URL, origin and authenticated index digest. Binary-only
-  output has no additional fields.
+  length/SHA-256, original URL, origin and authenticated index digest. Only
+  source selections add the `sources` field.
 
 Requests and rows are sorted by repository/package identity and object digest;
 JSON uses canonical key ordering. Reordering the selection changes neither the
@@ -403,14 +416,25 @@ apply; `--ca-file` selects an explicit public CA bundle when required.
 Ambient curl configuration, proxies and credential environment are excluded.
 Transfers have no terminal or stdin for key-password prompts; a key requiring
 interactive unlocking fails closed.
-Each transfer is one GET with no redirect following or retry. Non-200 status,
-TLS failure, mismatched bytes or timeout reject the attempt. A failed
-transfer names the object SHA-256, its reviewed URL, the HTTP status (000 when
+By default each transfer is one GET, without redirects or retries. With a
+nonzero BSP policy allowance, the same transport follows 301/302/303/307/308
+manually, one GET per hop, always using `curl --max-redirs 0`, never `curl -L`.
+Each Location is resolved relative to the current URL and validated before
+contact: HTTPS only, no userinfo (including empty userinfo), explicit port,
+query, fragment, encoded separator or traversal. Its path must still end in
+the logical object's path; a mirror may prepend `/armbian/apt/`, for example.
+Missing or duplicate Location, loops, an excessive hop count and downgrades
+fail closed. No client identity, credentials, cookies or authorization headers
+are forwarded to any hop of an allowed redirected transfer.
+TLS failure, unexpected status, mismatched bytes or timeout reject the attempt.
+A failed transfer names the object SHA-256 (or discovery's metadata object
+name), its current validated URL, the HTTP status (000 when
 no response arrived) and curl's exit code; credential paths are never printed.
 The default
-per-object deadline is 120 seconds (`--object-timeout` permits 1–600); connect
-time is at most 10 seconds. Curl's size bound is backed by a process file-size
-limit, including responses without Content-Length. Decompressed package
+per-object deadline is 120 seconds (`--object-timeout` permits 1–600) across
+the whole chain; each hop receives only the remaining time, with connect
+time at most 10 seconds. Curl's size bound and process file-size limit apply
+at every hop, including responses without Content-Length. Decompressed package
 indexes and compressed metadata are limited to 256 MiB, signed Release files
 to 16 MiB, and each validator invocation to 120 seconds.
 The finite reviewed list bounds the number of requests; the unchanged capsule
@@ -426,7 +450,20 @@ an additional digest-named `apt-metadata` JSON object with `delivery:
 offline-capsule`, completion time, the verified package identity/size/hash/URL
 inventory, original logical repository origins and the existing metadata
 validity receipt. This is transport provenance, not a new repository signature
-or a live guest fetch receipt. Source/builder content qualification and actual
+or a live guest fetch receipt. If any objects redirected, it also contains
+`transfers` in fetch order, using the same object/URL/hop shape as discovery.
+No transfer fields are added when there are no redirects.
+
+Redirect targets never enter `objects[].urls`, repository origins or
+authenticated package rows. Original Armbian signatures, exact signer and
+Release identity/freshness checks, signed-index SHA-256/Size, and reviewed
+object SHA-256/length still decide acceptance. Different networks may select
+different mirrors: the authenticated inventory rows remain byte-identical
+when those mirrors serve the same signed bytes. Receipts record the actual
+chains and may differ, so complete capsule hashes may differ too. A stale or
+different mirror snapshot fails the reviewed hashes; the operator must repeat
+discovery and review, with no retry or automatic second mirror.
+Source/builder content qualification and actual
 offline VM admission remain separate checks.
 
 The guest-only mirror has a finite inventory, no CONNECT/upstream relay and no
