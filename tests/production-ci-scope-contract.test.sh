@@ -27,7 +27,8 @@ if rg -n 'REPO_ROOT/\.\./CeraUI|PIPELINE_DIR/\.\./\.\.|DEV_SYNC_HERE}/\.\./\.\./
 fi
 [[ -s "${PIPELINE_DIR}/ci/size-exceptions.txt" ]]
 
-python3 - "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" <<'PY'
+python3 - "${PIPELINE_DIR}/.github/workflows/v2-ci.yml" "${PIPELINE_DIR}/ci/Dockerfile" <<'PY'
+import re
 import sys
 from pathlib import Path
 import yaml
@@ -39,6 +40,23 @@ checks = [step for step in steps
 assert len(checks) == 1, "PR unit job must run the offline upstream watcher self-test once"
 assert "if" not in checks[0] and not checks[0].get("continue-on-error"), checks[0]
 assert not checks[0].get("env"), "offline self-test must not require credentials"
+
+# The only upstream mkosi source must be a full commit. Installing that
+# checkout must depend on verifying HEAD against the same pin.
+dockerfile = Path(sys.argv[2]).read_text()
+instructions = re.sub(r"\\\n[ \t]*", " ", dockerfile).splitlines()
+source = [line.strip() for line in instructions
+          if "github.com/systemd/mkosi" in line and not line.lstrip().startswith("#")]
+pin = re.compile(r"^RUN mkosi_commit=[0-9a-f]{40}\s*&&")
+assert len(source) == 1 and pin.match(source[0]), "mkosi source must pin a full Git commit"
+git = r'git -C "\$\{mkosi_src\}" '
+assert re.search(
+    git + r'fetch --depth=1 --no-tags https://github\.com/systemd/mkosi\.git "\$\{mkosi_commit\}"\s*&&\s*'
+    + git + r'checkout --detach FETCH_HEAD\s*&&\s*'
+    r'test "\$\(' + git + r'rev-parse HEAD\)" = "\$\{mkosi_commit\}"\s*&&\s*'
+    r'pipx install "\$\{mkosi_src\}"(?:\s*&&|$)',
+    source[0],
+), "mkosi install must be gated on verifying the fetched checkout's HEAD"
 PY
 
 # Given the CI cache-miss RAUC source GET, when its curl command is inspected,

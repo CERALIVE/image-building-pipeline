@@ -489,6 +489,9 @@ The candidate job persists only reusable build state; it never caches a
 candidate image or a trust input. BuildKit loads the canonical
 `ci/Dockerfile` builder image and exports its layers through the GitHub
 Actions cache with a stable repository/OS/architecture/board/mkosi-tool scope.
+The Dockerfile pins the full upstream mkosi commit and verifies the checkout
+before installing it. When updating mkosi, update that commit pin together
+with `MKOSI_VERSION` and `.mkosi-version`.
 The source hash is carried in the builder tag and label, while BuildKit's
 content-addressed Dockerfile/context digests select the reusable layers. The
 export uses `mode=min` so the cache contains only layers needed by the loaded
