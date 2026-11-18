@@ -119,7 +119,7 @@ Each policy repository (`firstparty`, `bsp` and `debian-source` are required) de
 `component`, `arch`, `index_path`, and `max_age_seconds` (at most 30 days).
 Optional `max_redirects` is an integer from 0 to 3, defaulting to 0 when absent.
 Only `bsp` may approve a nonzero value, and the policy parser rejects a nonzero
-allowance for any origin bound to `--client-identity` in that invocation.
+allowance for any origin bound to a client identity in that invocation.
 First-party and all other repositories remain at zero. Keep the Armbian BSP
 logical `origin` as `https://apt.armbian.com`; do not replace it with a mirror.
 The matching repository record repeats a nonzero allowance. Discovery omits
@@ -264,6 +264,27 @@ complete-input gzip/xz decoder verifies every concatenated stream, including a
 corrupt later xz stream, before any source lookup. No source payload is retained
 or fetched.
 
+**Real credentialed runs require `--client-identity-config FILE`** for both
+discovery and preparation. Provision the mapping outside the checkout and
+output directory. The file must be regular, owned by the invoking user, and
+mode 0600. Its parent must be owned by that user or root and must not be
+group- or other-writable. Only the `firstparty` repository at the exact origin
+`https://apt.ceralive.tv` may receive a client identity. Debian, BSP, mirrors,
+and other repositories use anonymous GETs. Both CLI forms reject an ineligible
+binding before any network request. The transport checks the repository and
+request origin again before attaching an identity. Use a real directory and file, not symlinks.
+Put one `ORIGIN CERT_PATH KEY_PATH` record on each line:
+
+```text
+# One independently approved origin and two absolute paths
+https://apt.ceralive.tv /private/example/client.pem /private/example/client.key
+```
+
+Blank lines and full-line `#` comments are allowed. Quote paths containing
+spaces or backslashes with single quotes. The parser treats the fields as
+data and performs no shell expansion. Never export credential paths in the
+launch environment or pass them to a shell command to create the mapping.
+
 ```sh
 umask 077
 mkdir -m 700 private-metadata
@@ -272,14 +293,12 @@ python3 ci/discover-image-metadata.py \
   --trust-policy "${IMAGE_APPROVED_ARCHIVE_POLICY:?}" \
   --keyring firstparty "${IMAGE_PUBLIC_FIRSTPARTY_KEYRING:?}" \
   --keyring bsp "${IMAGE_PUBLIC_BSP_KEYRING:?}" \
-  --client-identity https://apt.ceralive.tv \
-    "${APT_CLIENT_CERT_PATH:?absolute certificate path}" \
-    "${APT_CLIENT_KEY_PATH:?absolute key path}" \
+  --client-identity-config private-config/identities \
   --output private-metadata/discovered
 ```
 
 The example assumes the selection contains firstparty and BSP packages. The
-same `--client-identity ORIGIN CERTIFICATE_PATH KEY_PATH`, optional `--ca-file`
+same `--client-identity-config FILE`, optional `--ca-file`
 and `--object-timeout` transport rules documented below apply. Client identity
 paths and bytes never enter the output. Output must be new, below an owned
 private directory; failure removes temporary inputs and publishes no result.
@@ -295,9 +314,9 @@ The output directory is mode 0700 and its files are mode 0600:
   `sha256/length/kind/urls/path`; they are not binary `packages` rows. Their
   `path` is the reviewed staged path and their URL joins the authenticated
   Directory/filename below the approved Debian origin. This is the existing
-  producer contract (`ci/prepare-image-capsule.py`, local-object validation at
-  lines 142-147 and binary-only package rows at lines 195-212), with archive
-  identity still enforced by `ci/kernel-runner/image_policy.py`.
+  producer contract in `ci/prepare-image-capsule.py`. Both host tools use
+  `ci/kernel-runner/image_policy.py` for archive and credential eligibility
+  and `ci/kernel-runner/image_transport.py` for the actual requests.
 - `objects/<sha256>` preserves the original signed Release, compressed index,
   and approved public keyring bytes. There are no package payload objects.
 - `discovery.json` records completion `fetched_at`, original signed Release and
@@ -402,30 +421,46 @@ mkdir -m 700 private-capsules
 python3 ci/prepare-image-capsule.py \
   --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
   --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
-  --client-identity https://apt.ceralive.tv \
-    "${APT_CLIENT_CERT_PATH:?absolute certificate path}" \
-    "${APT_CLIENT_KEY_PATH:?absolute key path}" \
+  --client-identity-config private-config/identities \
   --output private-capsules/rock-5b-plus.tar
 ```
 
-`--client-identity ORIGIN CERTIFICATE_PATH KEY_PATH` may repeat for distinct
-exact approved policy origins. Only paths reach curl's arguments; credentials
-are used in place and are never copied into the capsule. A client identity
+With the config form, only the mapping filename appears in the command line.
+The certificate and key paths stay out of both the Python and curl argument
+vectors and environments. For compatibility, `--client-identity ORIGIN
+CERT_PATH KEY_PATH` still works and prints a warning because it exposes both
+paths in Python's process arguments. Duplicate origins within or between
+the two forms are rejected before any GET.
+For each credentialed GET, the transport sends quoted `cert` and `key` config
+lines through a fresh pipe to `curl -K -`. Curl opens the files in place.
+Neither command writes a config file or includes the paths in logs, receipts
+or capsule contents. A client identity
 cannot authorize another origin. Normal system CA and hostname validation
 apply; `--ca-file` selects an explicit public CA bundle when required.
 Ambient curl configuration, proxies and credential environment are excluded.
-Transfers have no terminal or stdin for key-password prompts; a key requiring
+Transfers have no terminal or interactive stdin for key-password prompts; a key requiring
 interactive unlocking fails closed.
 By default each transfer is one GET, without redirects or retries. With a
 nonzero BSP policy allowance, the same transport follows 301/302/303/307/308
 manually, one GET per hop, always using `curl --max-redirs 0`, never `curl -L`.
 Each Location is resolved relative to the current URL and validated before
-contact: HTTPS only, no userinfo (including empty userinfo), explicit port,
+contact: HTTPS only, no userinfo (including empty userinfo), non-default port,
 query, fragment, encoded separator or traversal. Its path must still end in
 the logical object's path; a mirror may prepend `/armbian/apt/`, for example.
 Missing or duplicate Location, loops, an excessive hop count and downgrades
 fail closed. No client identity, credentials, cookies or authorization headers
 are forwarded to any hop of an allowed redirected transfer.
+Every BSP GET, including the initial request to `apt.armbian.com` with a zero
+redirect allowance, requires a DNS hostname and port 443. IP literals are
+rejected. The transport resolves the host once, checks every answer for public
+unicast reachability, then pins the first vetted address with `curl --resolve`.
+TLS still verifies the URL hostname. A failed lookup, a mixed public/private
+answer, or any loopback, private, link-local, carrier-grade NAT, unique-local,
+multicast, unspecified or reserved address rejects the hop before connection.
+IPv4-mapped IPv6 answers undergo the same IPv4 checks.
+The deprecated 6to4 anycast block `192.88.99.0/24`, including the 6a44 relay,
+is excluded explicitly. Preparation also rejects metadata shared between BSP
+and another repository because the two references have different transport requirements.
 TLS failure, unexpected status, mismatched bytes or timeout reject the attempt.
 A failed transfer names the object SHA-256 (or discovery's metadata object
 name), its current validated URL, the HTTP status (000 when

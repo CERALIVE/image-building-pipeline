@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 
 from capsule_producer_test import ROOT, approve_redirects, bsp_urls, command, fixture, mirror_url, run
+from capsule_transport_fixture import IDENTITY
 
 
 def discovery(work: Path, reviewed: dict, producer_args: list[str]) -> list[str]:
@@ -26,7 +27,7 @@ def discovery(work: Path, reviewed: dict, producer_args: list[str]) -> list[str]
             "--output", str(work / "discovered")]
     for name in sorted(names):
         args += ["--keyring", name, str(work / policy["repositories"][name]["keyring"])]
-    for option, count in (("--client-identity", 4), ("--ca-file", 2), ("--object-timeout", 2)):
+    for option, count in (("--client-identity-config", 2), ("--ca-file", 2), ("--object-timeout", 2)):
         index = producer_args.index(option)
         args += producer_args[index:index + count]
     return args
@@ -256,6 +257,11 @@ def test_metadata_only_rows_feed_unchanged_producer_and_preserve_original_object
         assert (directory.stat().st_mode & 0o777) == 0o700
         assert all((path.stat().st_mode & 0o777) == 0o600 for path in directory.rglob("*") if path.is_file())
         assert str(work / "client.key") not in (directory / "discovery.json").read_text()
+        for name in ("client.pem", "client.key"):
+            path = str(work / IDENTITY / name)
+            for artifact in ("discovery.json", "inventory-fragment.json"):
+                assert json.dumps(path)[1:-1] not in (directory / artifact).read_text()
+            assert path not in result.stdout + result.stderr
         # Reordering the reviewed list must not change selected identities or request order.
         first_requests = list(requests)
         selection = json.loads((work / "selection.json").read_text())
@@ -307,8 +313,8 @@ def test_metadata_transport_reuses_tls_mtls_redirect_and_timeout_boundaries() ->
             if case == "untrusted-tls":
                 args[args.index("--ca-file") + 1] = str(work / "untrusted-ca.pem")
             elif case == "no-client":
-                index = args.index("--client-identity")
-                del args[index:index + 4]
+                index = args.index("--client-identity-config")
+                del args[index:index + 2]
             result = run(args, env)
             assert result.returncode != 0, case
             assert "exact HTTPS GET failed" in result.stderr, (case, result.stderr)
@@ -316,6 +322,8 @@ def test_metadata_transport_reuses_tls_mtls_redirect_and_timeout_boundaries() ->
             assert not (work / "discovered").exists()
             assert str(work / "client.pem") not in result.stderr
             assert str(work / "client.key") not in result.stderr
+            for name in ("client.pem", "client.key"):
+                assert str(work / IDENTITY / name) not in result.stderr
 
 
 def test_missing_metadata_names_http_404_and_leaves_no_output_or_payload_requests() -> None:
@@ -361,7 +369,8 @@ def test_approved_keyring_selection_and_origin_fail_before_any_request() -> None
                 selection["packages"] += selection["packages"]
                 (work / "selection.json").write_text(json.dumps(selection))
             elif case == "client-origin":
-                args[args.index("--client-identity") + 1] = "https://other.example"
+                config = work / "client-identities"
+                config.write_text(config.read_text().replace("apt.ceralive.tv", "other.example"))
             elif case == "format":
                 policy = json.loads((work / "archives.json").read_text())
                 policy["repositories"]["firstparty"]["index_path"] = "Sources.xz"
