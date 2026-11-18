@@ -617,13 +617,15 @@ publication failure before that rename leaves the marker absent and exits
 nonzero. Consumers treat a missing marker as failure. Cancellation before
 the final rename transaction produces a marker with `stop_reason` set to
 `cancelled` and `launcher_exit` set to 1 when storage permits. The launcher
-blocks all catchable signals across the final cancellation checkpoint,
-rename and its bookkeeping. It checks for pending stop signals before the
-rename syscall. The receipt step table then independently attempts signal-mask restoration,
-directory open, sync and close, temporary-file cleanup when applicable, and
-diagnostics. A step failure cannot skip the remaining cleanup or change a
-committed result. A final directory-sync failure leaves the file visible at
-runtime, but a crash may lose the rename.
+blocks every catchable signal once, before the final cancellation checkpoint.
+It checks for pending stop signals before the rename. The same mask remains
+in force through the rename, directory sync, receipt read-back and direct
+process exit. Pending signals after the checkpoint are discarded at exit.
+The receipt step table independently attempts directory open, sync and close,
+temporary-file cleanup when applicable, and diagnostics. A step failure
+cannot skip the remaining cleanup or change the published result. A final
+directory-sync failure leaves the file visible at runtime, but a crash may
+lose the rename.
 
 After teardown and publication, the CLI reads `launcher_exit` from the
 published marker. A missing or unreadable marker, or an invalid status,

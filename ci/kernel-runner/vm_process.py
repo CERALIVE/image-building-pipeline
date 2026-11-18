@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import selectors
+import signal
 import subprocess
 import time
 
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
+CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 
 
 class Cancelled(RuntimeError):
@@ -21,6 +23,7 @@ class Cancellation:
 
     requested = False
     exit_receipt: Path | None = None
+    finalizing = False
 
     def request(self, _signum: int, _frame) -> None:
         self.requested = True
@@ -28,6 +31,12 @@ class Cancellation:
     def check(self) -> None:
         if self.requested:
             raise Cancelled("runner cancelled")
+
+    def begin_finalization(self) -> None:
+        """Enter the single-threaded image CLI's terminal section until os._exit."""
+        if not self.finalizing:
+            signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
+            self.finalizing = True
 
 
 def read_check_script(path: Path, cancellation: Cancellation) -> bytes:

@@ -3,6 +3,8 @@
 
 from dataclasses import asdict, dataclass, replace
 import atexit
+from contextlib import contextmanager
+import dis
 import errno
 import fcntl
 import io
@@ -31,11 +33,24 @@ from image_lifecycle import ImageJob, reconcile
 from image_stream import Identity, StreamError, encode
 import vm
 from image_vm import retained_outputs, validate_base
+from vm_process import CATCHABLE_SIGNALS
 
 IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
 SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error",
-                       "raising-handler", "late-exit", "unreadable-exit")
+                       "raising-handler", "late-exit", "unreadable-exit", "shutdown-gap")
+
+
+@contextmanager
+def fixture_signal_mask():
+    """Restore the test process after calling the terminal publisher in-process."""
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    try:
+        yield
+    finally:
+        for signum in signal.sigpending().intersection(vm.STOP_SIGNALS) - previous:
+            signal.sigwait({signum})
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> None:
@@ -52,6 +67,16 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     pair = mode.startswith("pair:")
+    critical_target = mode.removeprefix("pair:critical:") if mode.startswith("pair:critical:") else None
+    mask_mutation = mode == "pair:mask-mutation"
+    trace_terminal = critical_target is not None or mask_mutation
+    terminal_code = {str(ROOT / "ci/kernel-runner" / name)
+                     for name in ("vm_process.py", "image_lifecycle.py", "image_vm.py", "vm.py")}
+    terminal_entered = False
+    terminal_synced = False
+    traced = set()
+    violations = set()
+    delivered = None
     audit_receipts = bool(receipt_fault) or mode == "audit-mutation"
     events = set()
     outside = set()
@@ -64,8 +89,60 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         (root / "handler-ran").touch()
         raise SystemExit(71)
 
-    if mode == "raising-handler":
+    if mode in {"raising-handler", "shutdown-gap"}:
         signal.signal(signal.SIGUSR1, raising_handler)
+    if trace_terminal:
+        # Linux resumes a process on SIGCONT even when blocked. Install a
+        # handler so the blocked handler delivery is also observable as pending.
+        for caught in (signal.SIGCONT, signal.SIGUSR1, signal.SIGUSR2):
+            signal.signal(caught, raising_handler)
+
+    def inject_terminal(point):
+        nonlocal delivered
+        if critical_target != point or delivered is not None:
+            return
+        delivered = []
+        for catchable in sorted(CATCHABLE_SIGNALS):
+            os.kill(os.getpid(), catchable)
+            assert catchable in signal.sigpending(), (point, catchable)
+            delivered.append(int(catchable))
+
+    def observe_instruction(code, offset):
+        if not terminal_entered:
+            return
+        name = code.co_name
+        if not CATCHABLE_SIGNALS.issubset(sigmask(signal.SIG_BLOCK, set())):
+            violations.add((name, offset))
+        if name == "exit_launcher" and terminal_synced:
+            inject_terminal("after-sync")
+        if name not in traced:
+            inject_terminal(f"{name}:first")
+        traced.add(name)
+        if dis.opname[code.co_code[offset]].startswith("RETURN"):
+            inject_terminal(f"{name}:last")
+
+    if trace_terminal:
+        monitor = sys.monitoring
+        tool_id = monitor.DEBUGGER_ID
+        monitor.use_tool_id(tool_id, "terminal mask fixture")
+        monitor.register_callback(tool_id, monitor.events.INSTRUCTION, observe_instruction)
+
+        def observe_start(code, _offset):
+            if code.co_filename in terminal_code:
+                monitor.set_local_events(tool_id, code, monitor.events.INSTRUCTION)
+
+        monitor.register_callback(tool_id, monitor.events.PY_START, observe_start)
+        monitor.set_events(tool_id, monitor.events.PY_START)
+
+    if mode == "shutdown-gap":
+        def trace(frame, event, _arg):
+            if (frame.f_code.co_name == "exit_launcher" and event == "line"
+                    and pathlib.Path(frame.f_code.co_filename).name == "vm.py"
+                    and (root / "final-sync").exists()):
+                sys.settrace(None)
+                os.kill(os.getpid(), signal.SIGUSR1)
+            return trace
+        sys.settrace(trace)
 
     run_image = image_vm.run_image
 
@@ -78,6 +155,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def fixture_read_bytes(path):
         if mode == "unreadable-exit" and path == directory / "exit.json":
             raise OSError(errno.EIO, "fixture final receipt readback")
+        if path == directory.parent / "exit.json" and trace_terminal:
+            inject_terminal("readback:before")
+            result = read_bytes(path)
+            inject_terminal("readback:after")
+            return result
         return read_bytes(path)
 
     def step_fixture(action):
@@ -131,7 +213,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     native = {fn: fn.__name__ for fn in (
         os.rename, os.replace, os.fsync, os.close, os.unlink, os.kill, os.open,
-        os.write, os.stat, os.lstat, signal.signal, sigmask, signal.sigpending,
+        os.write, os.stat, os.lstat, os.statvfs, signal.signal, sigmask, signal.sigpending,
     )}
 
     def profile(frame, event, arg):
@@ -148,10 +230,16 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 observe(operation, frame)
 
     def mask(how, signals):
+        nonlocal terminal_entered
         if (mode == "mask-restore-error" and how == signal.SIG_SETMASK
                 and (directory / "exit.json").exists()):
+            (root / "restore-attempt").touch()
             raise OSError(errno.EPERM, "fixture final mask restoration")
-        return sigmask(how, signals)
+        previous = sigmask(how, signals)
+        if how == signal.SIG_BLOCK and signals == CATCHABLE_SIGNALS:
+            assert not terminal_entered, "terminal mask was installed twice"
+            terminal_entered = True
+        return previous
 
     def cancel() -> None:
         nonlocal sent
@@ -208,21 +296,37 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         replace_file(source, destination)
         if mode == "raising-handler" and destination == directory / "exit.json":
             os.kill(os.getpid(), signal.SIGUSR1)
+            assert signal.SIGUSR1 in signal.sigpending()
+            (root / "handler-pending").touch()
+        if trace_terminal and destination == directory.parent / "exit.json":
+            inject_terminal("rename:published")
 
     def sync(fd):
-        nonlocal fail_sync
+        nonlocal fail_sync, terminal_synced
         path = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
         if fail_sync and path == directory:
             fail_sync = False
             raise OSError(errno.EIO, "fixture exit directory sync")
-        if mode == "raising-handler" and path == directory and (directory / "exit.json").exists():
-            (root / "final-sync").touch()
         for location, stage in ((root, "parent-sync"), (directory / "stream.partial", "capture-sync"),
                                 (directory / "artifacts/verification.json", "artifact-sync"),
                                 (directory / "artifacts", "artifact-dir-sync")):
             if path == location:
                 fault_at(stage)
-        fsync(fd)
+        final = (terminal_entered and path == directory.parent and pair
+                 and (directory.parent / "exit.json").exists())
+        if final and mask_mutation:
+            previous = sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR2})
+            try:
+                fsync(fd)
+            finally:
+                sigmask(signal.SIG_SETMASK, previous)
+        else:
+            fsync(fd)
+        if final:
+            terminal_synced = True
+        if mode in {"raising-handler", "shutdown-gap", "mask-restore-error"} \
+                and path == directory and (directory / "exit.json").exists():
+            (root / "final-sync").touch()
 
     def remove(path, *args, **kwargs):
         if path == directory / "stream.partial":
@@ -301,10 +405,27 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         finally:
             real_exit(status)
 
+    def terminal_profile(_frame, event, function):
+        if terminal_entered and event == "c_call" and function is fsync:
+            if not CATCHABLE_SIGNALS.issubset(sigmask(signal.SIG_BLOCK, set())):
+                violations.add(("fsync", -1))
+
+    def terminal_exit(status):
+        inject_terminal("exit:direct")
+        try:
+            if not CATCHABLE_SIGNALS.issubset(sigmask(signal.SIG_BLOCK, set())):
+                violations.add(("os._exit", -1))
+            (root / "terminal").write_text(json.dumps({
+                "delivered": delivered, "pending": sorted(map(int, signal.sigpending())),
+                "traced": sorted(traced), "violations": sorted(violations),
+            }))
+        finally:
+            real_exit(status)
+
     writer = image_lifecycle.receipt
     if mode == "audit-mutation":
         namespace = image_lifecycle.__dict__.copy()
-        source = inspect.getsource(writer) + "\n    transaction.path.stat()\n"
+        source = inspect.getsource(writer) + "\n    transaction.path.stat()\n    os.statvfs(transaction.path.parent)\n"
         exec(compile(source, image_lifecycle.__file__, "exec"), namespace)
         writer = namespace["receipt"]
         writer.__globals__["RECEIPT_STEPS"] = table
@@ -315,12 +436,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         atexit.register(shutdown_hook)
         sys.addaudithook(audit)
         sys.setprofile(profile)
+    if trace_terminal:
+        sys.setprofile(terminal_profile)
     with patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)), \
             patch.object(image_lifecycle, "RECEIPT_STEPS", table), \
             patch.object(image_lifecycle, "receipt", writer), \
             patch.object(image_vm, "receipt", writer), \
             patch.object(image_vm, "run_image", image_entry), \
-            patch.object(os, "_exit", audited_exit if audit_receipts else real_exit), \
+            patch.object(os, "_exit", terminal_exit if trace_terminal
+                         else audited_exit if audit_receipts else real_exit), \
             patch.object(os, "replace", publish), \
             patch.object(signal, "pthread_sigmask", mask), \
             patch.object(os, "fsync", sync), \
@@ -466,22 +590,41 @@ while True:
             assert launcher.returncode == 0, stderr.decode()
             audit = json.loads((root / "audit").read_text())
             assert "stat" in audit["outside"], audit
+            assert "statvfs" in audit["outside"], audit
             return
         if mode.startswith("pair:"):
             attempt = directory.parent
             accepted = attempt / "acceptance.json"
             marker = attempt / "exit.json"
             failed = mode == "pair:fail"
-            assert launcher.returncode == int(failed), stderr.decode()
+            point = mode.removeprefix("pair:critical:")
+            cancelled = point in {"begin_finalization:first", "begin_finalization:last",
+                                  "mask_block:first", "mask_block:last", "rename:first"}
+            assert launcher.returncode == int(failed or cancelled), (
+                mode, launcher.returncode, stderr.decode(),
+                (root / "terminal").read_text() if (root / "terminal").exists() else None,
+            )
             sequence = (root / "sequence").read_text().splitlines()
             assert sequence.index("fixture/build/teardown.json") < sequence.index("fixture/verify/teardown.json")
             assert "launcher_exit" not in json.loads((directory / "teardown.json").read_text())
             if failed:
                 assert not accepted.exists() and not marker.exists()
             else:
-                assert sequence[-2:] == ["fixture/acceptance.json", "fixture/exit.json"]
+                assert sequence[-2:] == ["fixture/acceptance.json", "fixture/exit.json"], (mode, sequence, stderr)
                 assert json.loads(marker.read_text())["launcher_exit"] == launcher.returncode
-            assert (image_vm.completed_acceptance(accepted) is not None) == (not failed)
+            assert (image_vm.completed_acceptance(accepted) is not None) == (not failed and not cancelled)
+            if mode.startswith("pair:critical:") or mode == "pair:mask-mutation":
+                audit = json.loads((root / "terminal").read_text())
+                if mode == "pair:mask-mutation":
+                    assert ["fsync", -1] in audit["violations"], audit
+                else:
+                    expected_signals = sorted(map(int, signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}))
+                    assert audit["delivered"] == expected_signals, (point, audit)
+                    # Later job-control stop signals clear pending SIGCONT on Linux.
+                    assert audit["pending"] == [sig for sig in expected_signals if sig != signal.SIGCONT], (point, audit)
+                    assert not audit["violations"], (point, audit)
+                    assert {"begin_finalization", "rename", "dir_sync", "exit_launcher"} <= set(audit["traced"])
+                assert json.loads((root / "leaks").read_text()) == []
             children = (root / "children").read_text().splitlines()
             assert len(children) == 2
             assert all(not pathlib.Path(f"/proc/{pid}").exists() for pid in children)
@@ -537,7 +680,7 @@ while True:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error",
-                                        "raising-handler", "late-exit"} else 1
+                                        "raising-handler", "late-exit", "shutdown-gap"} else 1
         pid = (root / "pid").read_text()
         assert not pathlib.Path(f"/proc/{pid}").exists(), "QEMU was not reaped"
         assert not list(root.glob("job-*"))
@@ -563,12 +706,16 @@ while True:
         if mode == "exit-sync-error":
             assert b"fixture exit directory sync" in stderr
         elif mode == "mask-restore-error":
-            assert b"fixture final mask restoration" in stderr
+            assert not (root / "restore-attempt").exists(), "launcher attempted to restore the terminal mask"
+            assert (root / "final-sync").exists()
         elif mode == "raising-handler":
-            assert (root / "handler-ran").exists(), "SIGUSR1 handler did not run after unmasking"
+            assert (root / "handler-pending").exists() and not (root / "handler-ran").exists()
             assert (root / "final-sync").exists(), "raising handler skipped final directory sync"
         elif mode == "late-exit":
             assert b"kernel runner: 71" in stderr
+        elif mode == "shutdown-gap":
+            assert (root / "final-sync").exists()
+            assert not (root / "handler-ran").exists(), "SIGUSR1 ran before direct exit"
         else:
             assert time.monotonic() - float((root / "sent").read_text()) < seconds
         if mode in {"term", "ignore", "repeat"}:
@@ -605,6 +752,22 @@ def test_mask_restoration_after_rename_cannot_change_launcher_exit() -> None:
 
 def test_raising_signal_handler_during_rename_cannot_change_published_status() -> None:
     cancelled_fixture("raising-handler")
+
+
+def test_pending_handler_cannot_interrupt_exit_receipt_readback() -> None:
+    cancelled_fixture("shutdown-gap")
+
+
+def test_every_catchable_signal_stays_blocked_through_committed_pair_exit() -> None:
+    start = [name.__name__ for name, _ in image_lifecycle.RECEIPT_STEPS]
+    # Trace every production opcode after mask installation. Send real signals
+    # at both edges of each protected step, plus the syscall and CLI boundaries.
+    for boundary in ("begin_finalization:first", "begin_finalization:last", "mask_block:last",
+                     *(f"{step}:{edge}" for step in start[start.index("rename"):]
+                       for edge in ("first", "last")),
+                     "rename:published", "after-sync", "readback:before", "readback:after", "exit:direct"):
+        cancelled_fixture(f"pair:critical:{boundary}")
+    cancelled_fixture("pair:mask-mutation")
 
 
 def test_single_exit_point_uses_readback_after_return_or_exception() -> None:
@@ -746,7 +909,8 @@ def test_pair_publication_failure_and_signal_matrix() -> None:
                                 patch.object(image_vm, "receipt", publish), \
                                 patch.object(os, "open", open_file), patch.object(json, "dump", dump), \
                                 patch.object(os, "fsync", sync), patch.object(os, "replace", replace_file):
-                            status = image_vm.run_image(SimpleNamespace(image_mode="measure"), None, cancellation)
+                            with fixture_signal_mask():
+                                status = image_vm.run_image(SimpleNamespace(image_mode="measure"), None, cancellation)
                     finally:
                         signal.signal(signal.SIGTERM, previous)
 
@@ -854,7 +1018,8 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                             patch.object(os, "open", open_file), patch.object(tarfile.TarFile, "addfile", addfile), \
                             patch.object(pathlib.Path, "read_text", read_text), \
                             patch.object(pathlib.Path, "unlink", unlink):
-                        status = image_vm.run_image(args, None, cancellation)
+                        with fixture_signal_mask():
+                            status = image_vm.run_image(args, None, cancellation)
                 finally:
                     signal.signal(signal.SIGTERM, previous)
                 marker = attempt / "exit.json"

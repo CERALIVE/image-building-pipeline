@@ -19,7 +19,7 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import CATCHABLE_SIGNALS, STOP_SIGNALS, job_disk, report_error
+from image_lifecycle import STOP_SIGNALS, job_disk, report_error
 from vm_process import Cancellation, read_check_script, run, terminate, wait
 
 HERE = Path(__file__).resolve().parent
@@ -281,12 +281,7 @@ def exit_launcher() -> None:
         try:
             if cancellation.exit_receipt is not None:
                 status = 1
-                # No handler should interrupt readback and the direct exit.
-                # The receipt's own mask restoration already delivered pending signals.
-                try:
-                    signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
-                except BaseException as exc:
-                    report_error(exc)
+                # Final receipt publication keeps signals blocked through this exit.
                 try:
                     published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
                     if type(published) is not int or published not in (0, 1):

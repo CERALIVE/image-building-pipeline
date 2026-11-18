@@ -21,7 +21,6 @@ from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import POLL_SECONDS, Cancelled, Cancellation, run, wait
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
-CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 
 
 class ReceiptError(OSError):
@@ -79,7 +78,6 @@ class Receipt:
         self.outcome = outcome
         self.temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
         self.file: TextIO | None = None
-        self.mask: set[signal.Signals] | None = None
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
@@ -112,7 +110,7 @@ class Receipt:
 
     def mask_block(self) -> None:
         if self.outcome is not None:
-            self.mask = signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
+            self.outcome.begin_finalization()
 
     def rename(self) -> None:
         if self.outcome is not None and self.row["stop_reason"] != "cancelled":
@@ -121,10 +119,6 @@ class Receipt:
                 raise Cancelled("runner cancelled")
         os.replace(self.temporary, self.path)
         self.renamed = True
-
-    def mask_restore(self) -> None:
-        if self.mask is not None:
-            signal.pthread_sigmask(signal.SIG_SETMASK, self.mask)
 
     def dir_open(self) -> None:
         if self.renamed:
@@ -148,7 +142,7 @@ RECEIPT_STEPS = (
     (Receipt.temp_open, False), (Receipt.temp_write, False),
     (Receipt.temp_flush, False), (Receipt.file_sync, False),
     (Receipt.file_close, True), (Receipt.mask_block, False), (Receipt.rename, False),
-    (Receipt.mask_restore, True), (Receipt.dir_open, True), (Receipt.dir_sync, True),
+    (Receipt.dir_open, True), (Receipt.dir_sync, True),
     (Receipt.dir_close, True), (Receipt.temp_cleanup, True), (Receipt.log_errors, True),
 )
 
