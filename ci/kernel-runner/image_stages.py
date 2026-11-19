@@ -7,7 +7,7 @@ import time
 from typing import Callable, ParamSpec, TypeVar
 
 CONSOLE = Path("/dev/ttyS0")
-TAIL_LIMIT = 64 * 1024
+TAIL_LIMIT = 4 * 1024
 LINE_LIMIT = 96
 STAGE_LINE = re.compile(
     rb"STAGE ([0-9]{1,20}) (probe_start|capsule_import_(?:begin|end)|"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+from contextlib import ExitStack
 from functools import partial
 import hashlib
 import json
@@ -51,14 +52,14 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
     cancellation = cancellation or (image_job.cancellation if image_job else Cancellation())
     cancellation.check()
     fd = os.memfd_create("ceralive-job", 0)
-    try:
+    with ExitStack() as startup:
+        startup.callback(os.close, fd)
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
         serial = "stdio"
         if image_job:
             console = image_job.console_write
-            serial = ("null" if console < 0 else f"file:/dev/fdset/{console}" if image_job.probe
-                      else f"file:/proc/self/fd/{console}")
+            serial = f"file:/dev/fdset/{console}" if image_job.probe else f"file:/proc/self/fd/{console}"
         args = [
             "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
             "-smp", "4" if image_job or image_base else "16",
@@ -72,7 +73,7 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if image_job:
             from image_vm import image_arguments
             args += image_arguments(image_job)
-            if image_job.probe and console >= 0:
+            if image_job.probe:
                 # Duplicate the inherited nonblocking writer without reopening a
                 # FIFO that might no longer have a reader.
                 args += ["-add-fd", f"fd={console},set={console}"]
@@ -86,17 +87,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         # The gh credential stays in the host's gh process; QEMU gets no host env secrets.
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
         if image_job:
-            descriptors += (image_job.capsule_fd,)
-            if console >= 0:
-                descriptors += (console,)
+            descriptors += (image_job.capsule_fd, console)
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
+        stdout, stderr = subprocess.PIPE, subprocess.PIPE if image_job else subprocess.STDOUT
+        writers = startup.enter_context(ExitStack())
+        if image_job and image_job.probe:
+            stdout, stderr = image_job.prepare_probe_transport(writers)
         check_spawn_signals(cancellation)
         process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
                                    preexec_fn=partial(die_with_parent, os.getpid()),
                                    stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE if image_job else subprocess.STDOUT,
+                                   stdout=stdout,
+                                   stderr=stderr,
                                    restore_signals=True)
         with child_pipes(process):
             lines: list[bytes] = []
@@ -110,6 +113,7 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
 
             reader = None
             try:
+                writers.close()
                 if image_job:
                     image_job.capture(process, seconds)
                 else:
@@ -133,8 +137,6 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if process.returncode or expected not in output.splitlines():
             raise RuntimeError(f"guest failed or timed out ({process.returncode})")
         print(expected.decode())
-    finally:
-        os.close(fd)
 
 
 def main(cancellation: Cancellation) -> int:

@@ -21,8 +21,14 @@ from image_stages import StageTail, optional
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
 
-SIDECAR_WRITE_SECONDS = 0.5
-SIDECAR_REAP_SECONDS = 0.1
+UNAVAILABLE_DIAGNOSTICS = {
+    "last_observed_stage": None,
+    "sequence_complete": False,
+    "capture_lost": True,
+    "console_tail": "",
+    "console_tail_truncated": False,
+    "control_bytes_received": 0,
+}
 
 
 class ReceiptError(OSError):
@@ -151,7 +157,7 @@ RECEIPT_STEPS = (
 
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
-            diagnostic: BaseException | None = None, sync_directory: bool = True) -> None:
+            diagnostic: BaseException | None = None) -> None:
     transaction = Receipt(path, row, outcome, diagnostic)
     failure: BaseException | None = None
     for action, cleanup in RECEIPT_STEPS:
@@ -159,8 +165,6 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             continue
         try:
             action(transaction)
-            if transaction.renamed and not sync_directory:
-                break
         except BaseException as error:
             if failure is None:
                 failure = error
@@ -241,35 +245,25 @@ class ImageJob:
                       "input_descriptor_closed": False, "overlay_descriptor_closed": False}
         self.stage_tail = None
         self.control_bytes = 0
-        if probe:
-            self.state.update(last_observed_stage=None, sequence_complete=False, diagnostics_capture_lost=False)
+        self.capture_lost = False
+        self.observe_stages = True
+        self.probe_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
             inputs.callback(os.close, self.capsule_fd)
-            if not probe:
-                self.console_read, self.console_write = os.pipe()
-                inputs.callback(self.close_console_reader)
-                inputs.callback(self.close_console_writer)
+            self.console_read, self.console_write = os.pipe2(os.O_NONBLOCK) if probe else os.pipe()
+            inputs.callback(self.close_console_reader)
+            inputs.callback(self.close_console_writer)
             self.inputs = inputs.pop_all()
-        if probe and (pipe := optional(self.lose_diagnostics, os.pipe2, os.O_NONBLOCK)) is not None:
-            self.console_read, self.console_write = pipe
 
     def __enter__(self) -> ImageJob:
         return self
 
     def __exit__(self, _type, error, _traceback) -> None:
         # Attempt every descriptor close even if an earlier close or sync fails.
-        try:
-            with self.outputs:
-                self.inputs.close()
-                self.state["input_descriptor_closed"] = True
-        finally:
-            if self.probe:
-                self.close_console_writer()
-                self.close_console_reader()
-        if self.probe:
-            self.state["diagnostics_capture_lost"] |= not self.state["sequence_complete"]
-            self.state["sequence_complete"] = not self.state["diagnostics_capture_lost"]
+        with self.outputs:
+            self.inputs.close()
+            self.state["input_descriptor_closed"] = True
         self.state["ended_at"] = time.time()
         if error:
             self.state["stop_reason"] = type(error).__name__
@@ -280,7 +274,7 @@ class ImageJob:
             sync_directory(self.active.parent)
 
     def lose_diagnostics(self) -> None:
-        self.state["diagnostics_capture_lost"] = True
+        self.capture_lost = True
 
     def _close_console(self, end: str) -> None:
         fd = getattr(self, end)
@@ -315,56 +309,62 @@ class ImageJob:
             os.close(fd)
             raise
 
-    def _snapshot_diagnostics(self, tail: StageTail) -> None:
-        self.state.update(last_observed_stage=tail.last,
-                          sequence_complete=tail.complete and self.control_bytes <= CONTROL_LOG_LIMIT)
-
-    def persist_diagnostics(self) -> None:
-        # The outcome receipt is already committed. A missing or invalid
-        # sidecar reports persistence failure without rewriting exit.json.
+    def diagnostic_summary(self, row: dict) -> dict:
         tail = self.stage_tail
-        receipt(self.directory / "diagnostics.json", {
-            "schema": 1,
-            "truncated": self.control_bytes > CONTROL_LOG_LIMIT or (tail is not None and tail.truncated),
+        over_cap = self.control_bytes > CONTROL_LOG_LIMIT
+        complete = not self.capture_lost and not over_cap and tail is not None and tail.complete
+        return row | {
+            "last_observed_stage": tail.last if tail is not None else None,
+            "sequence_complete": complete,
+            "capture_lost": not complete,
+            "console_tail": tail.text() if tail is not None else "",
+            "console_tail_truncated": over_cap or (tail is not None and tail.truncated),
             "control_bytes_received": self.control_bytes,
-            "console_stage_tail": tail.text() if tail is not None else "",
-        }, sync_directory=False)
+        }
 
-    def finish_diagnostics(self) -> None:
-        """Give the post-commit writer a bounded lifetime outside the launcher."""
-        from vm import die_with_parent
-        from vm_startup import fd_table
-        from vm_process import CATCHABLE_SIGNALS
-
-        deadline = time.monotonic() + SIDECAR_WRITE_SECONDS
-        parent = os.getpid()
-        child = os.fork()
-        if child == 0:
-            status = 1
-            try:
-                die_with_parent(parent)
-                for fd in fd_table():
-                    os.close(fd)
-                for signum in CATCHABLE_SIGNALS:
-                    signal.signal(signum, signal.SIG_DFL)
-                signal.pthread_sigmask(signal.SIG_SETMASK, set())
-                self.persist_diagnostics()
-                status = 0
-            finally:
-                os._exit(status)
-
-        reaped = False
+    def prepare_probe_transport(self, writers: ExitStack) -> tuple[int, int]:
+        """Register all probe channels before Popen can start a guest."""
         try:
-            reaped = reap_sidecar(child, deadline)
-        finally:
-            if not reaped:
-                try:
-                    os.kill(child, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                # Uninterruptible kernel I/O can defer SIGKILL. Never block
-                # the committed exit while the kernel finishes that I/O.
-                reap_sidecar(child, deadline + SIDECAR_REAP_SECONDS)
+            events = self.inputs.enter_context(selectors.DefaultSelector())
+            stream_read, stream_write = os.pipe2(os.O_CLOEXEC)
+            self.inputs.callback(os.close, stream_read)
+            writers.callback(os.close, stream_write)
+            stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
+            self.inputs.callback(optional, self.lose_diagnostics, os.close, stderr_read)
+            writers.callback(optional, self.lose_diagnostics, os.close, stderr_write)
+            os.set_blocking(stderr_read, False)
+            for name, fd in (("stream", stream_read), ("diagnostic", stderr_read),
+                             ("console", self.console_read)):
+                events.register(fd, selectors.EVENT_READ, name)
+            self.probe_events = events
+        except Exception as error:
+            # The pre-commit OSError path cannot publish an outcome for this setup failure.
+            raise OSError("probe transport setup failed: " + str(error)) from error
+        return stream_write, stderr_write
+
+    def record_control(self, name: str, chunk: bytes) -> None:
+        self.control_bytes += len(chunk)
+        tail = self.stage_tail
+        if name == "console" and self.observe_stages and tail is not None:
+            self.observe_stages = bool(optional(self.lose_diagnostics, tail.observe, chunk))
+
+    def drain(self, events: selectors.BaseSelector) -> None:
+        for key in events.get_map().values():
+            if key.data == "stream":
+                continue
+            # Only already-open nonblocking control pipes can remain here.
+            for _ in range(8):
+                chunk = optional(self.lose_diagnostics, os.read, key.fd, 1024 * 1024)
+                if not chunk:
+                    break
+                optional(self.lose_diagnostics, self.record_control, key.data, chunk)
+            else:
+                self.lose_diagnostics()
+
+    def register_measure_transport(self, events: selectors.BaseSelector, process: subprocess.Popen) -> None:
+        for name, pipe in (("stream", process.stdout), ("diagnostic", process.stderr),
+                           ("console", self.console_read)):
+            events.register(pipe, selectors.EVENT_READ, name)
 
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
         """Drain three bounded pipes without echoing guest bytes to a terminal."""
@@ -375,43 +375,27 @@ class ImageJob:
             "attempt": self.identity.attempt, "launcher": self.state["launcher"],
             "qemu": self.state["qemu"], "overlay_inode": self.state["overlay_inode"],
         })
-        self.close_console_writer()
+        lose = self.lose_diagnostics
+        if self.probe:
+            optional(lose, self.close_console_writer)
+        else:
+            self.close_console_writer()
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
-        lose = self.lose_diagnostics
         tail = self.stage_tail = optional(lose, StageTail) if self.probe else None
-        observe = tail is not None
-        with selectors.DefaultSelector() as events:
+        with ExitStack() as local:
+            events = self.probe_events
+            if not self.probe:
+                events = local.enter_context(selectors.DefaultSelector())
+                self.register_measure_transport(events, process)
+            assert events is not None
             files = {}
-            diagnostic_pipes = {}
-            for name, pipe in (("stream", process.stdout), ("diagnostic", process.stderr),
-                               ("console", self.console_read)):
-                if self.probe and name != "stream":
-                    if pipe == -1:
-                        continue
-                    if not optional(lose, register_probe_diagnostic, events, diagnostic_pipes, name, pipe):
-                        optional(lose, diagnostic_pipes.pop, name, None)
-                        self.detach_diagnostic(events, name, pipe)
-                else:
-                    events.register(pipe, selectors.EVENT_READ, name)
-                    output = self.outputs.enter_context(self._open_log(self.directory / (name + ".partial")))
-                    self.outputs.callback(sync_output, output)
-                    files[name] = output
+            for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
+                output = self.outputs.enter_context(self._open_log(self.directory / (name + ".partial")))
+                self.outputs.callback(sync_output, output)
+                files[name] = output
             stream_open = True
-
-            def receive_diagnostic(name, pipe, fd: int) -> bool:
-                nonlocal observe
-                chunk = optional(lose, os.read, fd, 1024 * 1024)
-                if not chunk:
-                    diagnostic_pipes.pop(name, None)
-                    self.detach_diagnostic(events, name, pipe)
-                    return False
-                if name == "console" and observe:
-                    observe = bool(optional(lose, tail.observe, chunk))
-                self.control_bytes += len(chunk)
-                return True
-
             try:
                 while (stream_open if self.probe else events.get_map()) or poll_owned(process) is None:
                     self.cancellation.check()
@@ -435,20 +419,24 @@ class ImageJob:
                     for event, _mask in ready:
                         self.cancellation.check()
                         name = event.data
-                        if self.probe and name != "stream":
-                            # The console transport is already open. This branch
-                            # drains it without acquiring or writing a log sink.
-                            if name in diagnostic_pipes:
-                                optional(lose, receive_diagnostic, name, event.fileobj, event.fd)
-                            continue
-                        try:
-                            chunk = os.read(event.fd, 1024 * 1024)
-                        except InterruptedError:
-                            continue
+                        control = self.probe and name != "stream"
+                        if control:
+                            chunk = optional(lose, os.read, event.fd, 1024 * 1024)
+                        else:
+                            try:
+                                chunk = os.read(event.fd, 1024 * 1024)
+                            except InterruptedError:
+                                continue
                         if not chunk:
                             if name == "stream":
                                 stream_open = False
-                            events.unregister(event.fileobj)
+                            if control:
+                                optional(lose, events.unregister, event.fileobj)
+                            else:
+                                events.unregister(event.fileobj)
+                            continue
+                        if control:
+                            optional(lose, self.record_control, name, chunk)
                             continue
                         counts[name] += len(chunk)
                         if (counts["stream"] > min(CAPS.stream_max, self.state["stream_budget"])
@@ -462,57 +450,9 @@ class ImageJob:
                                    (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
                 wait(process, end, self.cancellation)
                 if self.probe:
-                    def drain() -> None:
-                        for name, pipe in tuple(diagnostic_pipes.items()):
-                            fd = pipe if type(pipe) is int else pipe.fileno()
-                            # The child has exited. Never wait for a diagnostic FD.
-                            for _ in range(8):
-                                if not receive_diagnostic(name, pipe, fd):
-                                    break
-                            else:
-                                lose()
-                    optional(lose, drain)
+                    optional(lose, self.drain, events)
             finally:
                 self.state["stream_bytes"] = counts["stream"]
-                if tail is not None:
-                    optional(lose, self._snapshot_diagnostics, tail)
-
-    def detach_diagnostic(self, events, name: str, pipe) -> None:
-        """Detach an optional FD even if its selector registration failed."""
-        if self.probe:
-            optional(self.lose_diagnostics, self._detach_diagnostic, events, name, pipe)
-
-    def _detach_diagnostic(self, events, name: str, pipe) -> None:
-        try:
-            if pipe in events.get_map():
-                events.unregister(pipe)
-        finally:
-            if name == "console":
-                self.close_console_reader()
-            else:
-                optional(self.lose_diagnostics, pipe.close)
-
-
-def register_probe_diagnostic(events, diagnostic_pipes: dict, name: str, pipe) -> bool:
-    """Set up the inherited console transport and its tracking together."""
-    nonblocking_fd = pipe if type(pipe) is int else pipe.fileno()
-    os.set_blocking(nonblocking_fd, False)
-    events.register(pipe, selectors.EVENT_READ, name)
-    diagnostic_pipes[name] = pipe
-    return True
-
-
-def reap_sidecar(child: int, deadline: float) -> bool:
-    while True:
-        try:
-            if os.waitpid(child, os.WNOHANG)[0] == child:
-                return True
-        except ChildProcessError:
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(0.005, remaining))
 
 
 def sync_output(output) -> None:

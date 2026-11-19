@@ -100,27 +100,24 @@ Stream markers identify member order and separate preparation, header writes,
 body writes, flush and close. Write completion counts are bytes reported by
 the guest writer.
 
-The launcher drains the console into memory and keeps complete, allowlisted
-stage lines in a fixed 64 KiB ring that survives QEMU reaping. The ring evicts
-the oldest records when full. Ordinary console text is discarded. Probe
-`teardown.json` and `exit.json` record `last_observed_stage`, `stream_bytes`
-received by the host, `sequence_complete`, and `diagnostics_capture_lost`.
-Capture is incomplete if it misses a marker, exceeds the 8 MiB control-log
-budget, overwrites records, or encounters a console or parser error. A timeout
-reports the last observed stage even if the sequence is incomplete.
+The launcher registers the console, artifact stream, and stderr pipes before
+starting the probe guest. Transport setup failure aborts before guest launch
+and leaves no `exit.json`. Once running, the launcher drains the console into
+a fixed 4 KiB memory ring. The ring discards ordinary console text and evicts
+the oldest complete stage lines when full.
 
-After `exit.json` is committed, including after cancellation or timeout, the
-launcher gives a forked writer 500 ms to publish the private `diagnostics.json`
-sidecar atomically. The writer starts with default signals and closed inherited
-descriptors. The launcher sends SIGKILL at the deadline and allows up to 100 ms
-for reaping. It exits on schedule even if the kernel defers termination during
-uninterruptible I/O. Consumers ignore any private `.receipt-*` temporary file.
-The sidecar is complete at rename and may be lost after a host crash because
-its directory is not synced again. It holds the bounded `console_stage_tail`
-and a `truncated` flag. Consumers
-must treat diagnostics as lost if `diagnostics_capture_lost` is true or the
-sidecar is absent or invalid. The committed exit outcome and artifact
-validation are independent of sidecar persistence.
+The probe's `exit.json` contains `last_observed_stage`, `sequence_complete`,
+`capture_lost`, the sanitized `console_tail` (at most 4 KiB), and
+`console_tail_truncated`. `control_bytes_received` counts console and stderr
+bytes drained by the host. Missing markers, ring eviction, control traffic
+over 8 MiB, and capture errors set `capture_lost`. A stalled probe can still
+report the last stage and its tail when capture is incomplete. `stream_bytes`
+remains the artifact byte count in both `exit.json` and `teardown.json`.
+
+The launcher builds the summary in memory before the existing atomic receipt
+commit. If summary construction fails, the receipt reports capture loss,
+an unknown last stage, and an empty tail. The launcher uses the same receipt
+commit for the summary and the exit status, with no separate diagnostic file.
 
 The image base embeds the guest helper, stage logger and stream writer at
 `build-base --profile image` time. A newer launcher or source bundle does not

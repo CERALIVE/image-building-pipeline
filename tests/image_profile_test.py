@@ -44,35 +44,17 @@ SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", 
                        "raising-handler", "late-exit", "unreadable-exit", "shutdown-gap")
 STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error", "stages:at-cap",
                "stages:over-cap", "stages:blocked-header", "stages:guest-loss",
-               "stages:flush-error", "stages:priority-timeout", "stages:before-header")
-HOST_DIAGNOSTICS = {
-    "os.pipe2": "pipe2", "os.close": "close", "StageTail": "StageTail",
-    "register_probe_diagnostic": "register_probe_diagnostic", "diagnostic_pipes.pop": "pop",
-    "os.read": "read", "tail.observe": "observe",
-    "receive_diagnostic": "receive_diagnostic", "drain": "drain",
-    "self._snapshot_diagnostics": "_snapshot_diagnostics",
-    "self._detach_diagnostic": "_detach_diagnostic", "pipe.close": "close",
-}
+               "stages:priority-timeout", "stages:before-header")
+DIAGNOSTIC_ERRORS = {"RuntimeError": RuntimeError, "OSError": OSError, "MemoryError": MemoryError}
+PRESTART_MODES = tuple(
+    f"prestart:{step}:{error}"
+    for step in ("pipe", "stream", "stderr", "console", "console-after-register")
+    for error in DIAGNOSTIC_ERRORS)
 ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "isolated:dropped",
-                   *(f"isolated:{step}:{error}" for step in ("pipe", "register", "read")
-                     for error in ("RuntimeError", "OSError", "MemoryError")),
-                   *(f"isolated:wrap-{step}:{error}" for step in
-                     ("close", "StageTail", "register_probe_diagnostic",
-                      "observe", "receive_diagnostic", "drain",
-                      "_snapshot_diagnostics", "_detach_diagnostic")
-                     for error in ("RuntimeError", "OSError", "MemoryError")))
-SIDECAR_MODES = ("sidecar:slow", "sidecar:write-error", "sidecar:rename-error",
-                 "sidecar:render-error", "sidecar:cleanup-guard", "sidecar:slow-4", "sidecar:slow-30",
-                 "sidecar:dir-sync-stall")
-REGISTRATION_FAULTS = {
-    "before-get-fd": "nonblocking_fd =",
-    "before-nonblocking": "os.set_blocking(",
-    "before-register": "events.register(",
-    "before-track": "diagnostic_pipes[name] = pipe",
-    "after-track": "return True",
-}
-ISOLATION_MODES += tuple(f"isolated:{step}:MemoryError" for step in REGISTRATION_FAULTS)
-ISOLATION_MODES += tuple(f"isolated:stderr-{step}:MemoryError" for step in REGISTRATION_FAULTS)
+                   *(f"isolated:{step}:{error}" for step in
+                     ("read", "close", "StageTail", "observe", "drain", "summary", "text")
+                     for error in DIAGNOSTIC_ERRORS),
+                   "isolated:summary-timeout:MemoryError")
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
 STARTUP_STATES = {
@@ -357,24 +339,6 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def publish(source, destination) -> None:
         nonlocal during, fail_sync
-        if mode in SIDECAR_MODES and destination == directory / "diagnostics.json":
-            assert (directory / "exit.json").is_file()
-            assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
-            with (root / "persisted").open("a") as attempts:
-                print("once", file=attempts)
-            (root / "committed").write_bytes((directory / "exit.json").read_bytes())
-            if mode == "sidecar:slow":
-                time.sleep(0.05)
-            if mode in {"sidecar:slow-4", "sidecar:slow-30"}:
-                inherited = vm_startup.fd_table()
-                mask_bits, ignored_bits, caught_bits = signal_status(pathlib.Path("/proc/self/status"))
-                (root / "persist-hold").write_text(json.dumps({
-                    "pid": os.getpid(), "parent": os.getppid(), "start": time.monotonic(),
-                    "fds": sorted(inherited), "signals": [mask_bits, ignored_bits, caught_bits],
-                }))
-                time.sleep(int(mode.rsplit("-", 1)[1]))
-            if mode == "sidecar:rename-error":
-                raise MemoryError("fixture sidecar rename")
         if pair:
             with (root / "sequence").open("a") as log:
                 print(destination.relative_to(root / "returns"), file=log)
@@ -386,6 +350,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             owned = root / "owned-fds"
             if fault and not (root / "ready").exists():
                 held = set()
+            elif mode in PRESTART_MODES:
+                held = set(json.loads((root / "prestart-fds").read_text()))
             else:
                 held = set(json.loads(owned.read_text()))
                 assert held, "started fake QEMU has no inherited descriptor inventory"
@@ -426,13 +392,6 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             os.fstat(fd)
             return
         path = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
-        if mode == "sidecar:dir-sync-stall" and path == directory and (directory / "diagnostics.json").exists():
-            (root / "post-publication-sync").touch()
-            time.sleep(4)
-        if mode == "stages:flush-error" and path.name.startswith(".receipt-"):
-            if '"truncated"' in path.read_text():
-                (root / "sidecar-sync-failed").touch()
-                raise MemoryError("fixture sidecar sync")
         if fail_sync and path == directory:
             fail_sync = False
             raise OSError(errno.EIO, "fixture exit directory sync")
@@ -493,7 +452,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             def poll(self, *args):
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
-                        and mode not in (*SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *SIDECAR_MODES) and not sent):
+                        and mode not in (*SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *PRESTART_MODES) and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
@@ -510,7 +469,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def fixture_return(job, verifier):
         # Only the production build's multi-GiB artifact set is substituted.
         if not pair or verifier:
-            if mode in (*ISOLATION_MODES, *SIDECAR_MODES):
+            if mode in (*ISOLATION_MODES, "stages:at-cap", "stages:over-cap"):
                 assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
             return validate_return(job, verifier)
         job.cancellation.check()
@@ -581,63 +540,52 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
-        if mode in SIDECAR_MODES:
-            capture = ImageJob.capture
-            patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 1)))
-        if mode == "sidecar:cleanup-guard":
-            callback = ExitStack.callback
-            def reject_live_diagnostic_cleanup(stack, function, *args, **kwargs):
-                if function is image_lifecycle.optional:
-                    (root / "cleanup-registration-attempted").touch()
-                    raise MemoryError("fixture diagnostic cleanup registration")
-                return callback(stack, function, *args, **kwargs)
-            patches.enter_context(patch.object(ExitStack, "callback", reject_live_diagnostic_cleanup))
-        if mode == "sidecar:render-error":
-            from image_stages import StageTail
-            def render_failure(_tail):
-                (root / "committed").write_bytes((directory / "exit.json").read_bytes())
-                raise MemoryError("fixture sidecar render")
-            patches.enter_context(patch.object(StageTail, "text", render_failure))
-        if mode == "sidecar:write-error":
-            dump = json.dump
-            def fail_sidecar(row, *args, **kwargs):
-                if "console_stage_tail" in row and "launcher_exit" not in row and "truncated" in row:
-                    (root / "committed").write_bytes((directory / "exit.json").read_bytes())
-                    raise MemoryError("fixture sidecar write")
-                return dump(row, *args, **kwargs)
-            patches.enter_context(patch.object(json, "dump", fail_sidecar))
-        if mode in {"stages:timeout", "stages:before-header", "stages:blocked-header", "isolated:dropped"}:
+        if mode in {"stages:timeout", "stages:before-header", "stages:blocked-header", "isolated:dropped",
+                    "isolated:summary-timeout:MemoryError"}:
             capture = ImageJob.capture
             patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
             from image_stages import StageTail
             patches.enter_context(patch.object(StageTail, "observe", side_effect=OSError("fixture observer failure")))
-        if mode.count(":") == 2 and mode.startswith("isolated:"):
+        if mode.count(":") == 2 and mode.startswith(("isolated:", "prestart:")):
             _, operation, kind = mode.split(":")
-            failure_type = {"RuntimeError": RuntimeError, "OSError": OSError, "MemoryError": MemoryError}[kind]
+            failure_type = DIAGNOSTIC_ERRORS[kind]
             def diagnostic_failure():
                 if not (root / "diag-injected").exists():
                     (root / "diag-injected").touch()
                     raise failure_type("fixture console fault")
-            if operation == "pipe":
-                for name in ("pipe", "pipe2"):
-                    def fail_pipe(*args, original=getattr(os, name)):
-                        frame = sys._getframe(1)
-                        while frame is not None:
-                            if frame.f_code is ImageJob.__init__.__code__:
-                                diagnostic_failure()
-                                break
-                            frame = frame.f_back
-                        return original(*args)
-                    patches.enter_context(patch.object(os, name, fail_pipe))
-            if operation == "register":
+            if mode in PRESTART_MODES:
+                tracked = []
+                pipe2 = os.pipe2
                 register = selectors.EpollSelector.register
+                popen = subprocess.Popen
+
+                def reject_guest_spawn(args, *positional, **kwargs):
+                    assert args[0] != "qemu-system-x86_64", "guest spawn preceded transport setup"
+                    return popen(args, *positional, **kwargs)
+
+                def startup_pipe(flags):
+                    if operation == "pipe":
+                        (root / "prestart-fds").write_text("[]")
+                        diagnostic_failure()
+                    ends = pipe2(flags)
+                    tracked.extend(os.readlink(f"/proc/self/fd/{fd}") for fd in ends)
+                    return ends
+
                 def fail_register(selector, file, events, data=None):
-                    if data == "console":
+                    if data == operation or (data, operation) in {
+                        ("diagnostic", "stderr"), ("console", "console-after-register")
+                    }:
+                        assert not (root / "pid").exists()
+                        (root / "prestart-fds").write_text(json.dumps(tracked))
+                        if operation == "console-after-register":
+                            register(selector, file, events, data)
                         diagnostic_failure()
                     return register(selector, file, events, data)
+                patches.enter_context(patch.object(os, "pipe2", startup_pipe))
                 patches.enter_context(patch.object(selectors.EpollSelector, "register", fail_register))
-            if operation == "read":
+                patches.enter_context(patch.object(subprocess, "Popen", reject_guest_spawn))
+            elif operation == "read":
                 original_read = os.read
                 def fail_read(fd, length):
                     console_fd = root / "console-inode"
@@ -645,30 +593,14 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                         diagnostic_failure()
                     return original_read(fd, length)
                 patches.enter_context(patch.object(os, "read", fail_read))
-            step = operation.removeprefix("stderr-")
-            if step in REGISTRATION_FAULTS:
-                channel = "diagnostic" if operation.startswith("stderr-") else "console"
-                registration = image_lifecycle.register_probe_diagnostic
-                source, first = inspect.getsourcelines(registration)
-                needle = REGISTRATION_FAULTS[step]
-                target = next(first + index for index, text in enumerate(source) if needle in text)
-
-                def inject_line(frame, event, _arg):
-                    if event == "line" and frame.f_lineno == target and frame.f_locals.get("name") == channel:
-                        diagnostic_failure()
-                    return inject_line
-
-                def trace_registration(frame, event, _arg):
-                    if event == "call" and frame.f_code is registration.__code__:
-                        return inject_line
-                    return None
-
-                sys.settrace(trace_registration)
-                patches.callback(sys.settrace, None)
-            if operation.startswith("wrap-"):
+            elif operation in {"summary", "summary-timeout", "text"}:
+                owner, method = ((image_lifecycle.StageTail, "text") if operation == "text"
+                                 else (ImageJob, "diagnostic_summary"))
+                patches.enter_context(patch.object(owner, method, lambda *_: diagnostic_failure()))
+            else:
                 boundary = image_lifecycle.optional
                 def fault_boundary(on_loss, action, *args, **kwargs):
-                    if action.__name__ == operation.removeprefix("wrap-"):
+                    if action.__name__ == operation:
                         original = action
                         def action(*args, **kwargs):
                             # Close through the real syscall before reporting a close error.
@@ -822,7 +754,7 @@ if mode.startswith("pair:"):
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
-if mode in (*{ISOLATION_MODES!r}, *{SIDECAR_MODES!r}):
+if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError":
     serial = sys.argv[sys.argv.index("-serial") + 1]
     if serial != "null":
         console = int(serial.rsplit("/", 1)[1])
@@ -838,7 +770,7 @@ if mode in (*{ISOLATION_MODES!r}, *{SIDECAR_MODES!r}):
     if mode != "isolated:dropped":
         os.write(1, (root / "probe.frame").read_bytes())
         sys.exit(0)
-if mode in {STAGE_MODES!r} or mode == "isolated:dropped":
+if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-timeout:MemoryError"):
     console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
     os.set_blocking(console, True)
     if mode in ("stages:at-cap", "stages:over-cap"):
@@ -890,7 +822,7 @@ if mode in {STAGE_MODES!r} or mode == "isolated:dropped":
         sys.exit(3)
     if mode == "stages:guest-loss":
         os.write(console, b"STAGE 3 diagnostics_lost 0\\n")
-    if mode != "stages:timeout":
+    if mode not in ("stages:timeout", "isolated:summary-timeout:MemoryError"):
         os.write(1, (root / "probe.frame").read_bytes())
         os.write(console, b"STAGE 3 stream_close_end 0\\n")
         sys.exit(0)
@@ -946,10 +878,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             seconds = 27 if mode == "ignore" else 8
             try:
                 _, stderr = launcher.communicate(timeout=seconds)
-                launcher_finished = time.monotonic()
             except subprocess.TimeoutExpired as error:
-                if mode in {"sidecar:slow-4", "sidecar:slow-30"}:
-                    raise AssertionError(f"{mode} held the committed launcher open") from None
                 assert (root / "sent").exists(), "fixture never delivered cancellation"
                 pid = (root / "pid").read_text()
                 assert pathlib.Path(f"/proc/{pid}").exists()
@@ -975,6 +904,17 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode in PRESTART_MODES:
+            assert launcher.returncode == 1, (mode, stderr)
+            assert (root / "diag-injected").is_file() and b"fixture console fault" in stderr
+            assert not (root / "pid").exists() and not (directory / "started.json").exists()
+            assert not (directory / "exit.json").exists() and not (directory / "artifacts").exists()
+            assert not (root / "returns/active.json").exists() and not list(root.glob("job-*"))
+            if (root / "leaks").exists():
+                assert json.loads((root / "leaks").read_text()) == []
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
         if mode.startswith("startup-reject:"):
             baseline = mode.removeprefix("startup-reject:")
             assert launcher.returncode == vm_startup.STARTUP_ERROR, stderr.decode()
@@ -1111,65 +1051,45 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         if mode in ISOLATION_MODES:
-            stalled = mode == "isolated:dropped"
+            operation = mode.split(":")[1]
+            stalled = operation in {"dropped", "summary-timeout"}
             assert (directory / "exit.json").is_file(), (mode, stderr.decode())
-            receipts = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
-            assert receipts[0]["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
-            for row in receipts:
-                assert row["last_observed_stage"] == receipts[0]["last_observed_stage"]
-                assert row["diagnostics_capture_lost"] is (mode != "isolated:complete")
-                assert row["sequence_complete"] is (mode == "isolated:complete")
+            record, teardown = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
+            assert record["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
+            assert record["capture_lost"] is (mode != "isolated:complete")
+            assert record["sequence_complete"] is (mode == "isolated:complete")
+            for row in (record, teardown):
                 assert row["stream_bytes"] == (25 if stalled else (root / "probe.frame").stat().st_size)
-            if stalled:
-                assert receipts[0]["last_observed_stage"] == "member_prepare_end"
+                assert row["qemu_reaped"] and row["input_descriptor_closed"] and row["overlay_descriptor_closed"]
+            if operation == "dropped":
+                assert record["last_observed_stage"] == "member_prepare_end"
                 assert (root / "header-write-entered").exists()
                 assert not (root / "header-write-returned").exists()
                 assert b" member_header_begin " in (root / "header-marker-dropped").read_bytes()
-                sidecar = json.loads((directory / "diagnostics.json").read_text())
-                assert "member_header_begin" not in sidecar["console_stage_tail"]
+                assert "member_header_begin" not in record["console_tail"]
+            if stalled:
                 assert (directory / "stream.partial").read_bytes() == b"CERALIVE_IMAGE_STREAM_V1\n"
             else:
                 expected = json.dumps({"schema": 1, "identity": asdict(identity), "network_denied": True}).encode()
                 assert (directory / "artifacts/verification.json").read_bytes() == expected
             if mode.count(":") == 2:
                 assert (root / "diag-injected").exists(), mode
-            if mode == "isolated:baseline" or mode.split(":")[1].removeprefix("stderr-") in REGISTRATION_FAULTS:
-                assert json.loads((root / "leaks").read_text()) == []
-                assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
-                # Only diagnostics fields and per-launch metadata may differ.
-                excluded = {"last_observed_stage", "sequence_complete", "diagnostics_capture_lost",
-                            "launcher", "qemu", "base", "overlay_directory", "overlay_fd", "overlay_inode",
-                            "acquired_at", "started_at", "ended_at", "qemu_priority"}
-                return {key: value for key, value in receipts[0].items() if key not in excluded}
-            return
-        if mode in SIDECAR_MODES:
-            committed = directory / "exit.json"
-            assert committed.is_file(), (mode, stderr.decode())
-            record = json.loads(committed.read_text())
-            assert record["launcher_exit"] == launcher.returncode == 0, stderr.decode()
-            assert record["stream_bytes"] == (root / "probe.frame").stat().st_size
-            assert record["qemu_reaped"] and record["last_observed_stage"] == "stream_close_end"
-            assert committed.read_bytes() == (root / "committed").read_bytes()
-            assert (directory / "artifacts/verification.json").is_file()
-            assert not (directory / "console.partial").exists() and not (directory / "diagnostic.partial").exists()
-            sidecar = directory / "diagnostics.json"
-            if mode in {"sidecar:slow", "sidecar:cleanup-guard", "sidecar:dir-sync-stall"}:
-                assert sidecar.stat().st_mode & 0o777 == 0o600
-                assert (root / "persisted").read_text() == "once\n"
-                assert "stream_close_end" in json.loads(sidecar.read_text())["console_stage_tail"]
-                assert not (root / "cleanup-registration-attempted").exists()
-                assert not (root / "post-publication-sync").exists()
-            else:
-                assert not sidecar.exists()
-            if mode in {"sidecar:slow-4", "sidecar:slow-30"}:
-                hold = json.loads((root / "persist-hold").read_text())
-                assert launcher_finished - hold["start"] < 0.85, hold
-                assert hold["pid"] != hold["parent"] and not pathlib.Path(f"/proc/{hold['pid']}").exists()
-                assert hold["fds"] == [] and hold["signals"] == [0, 0, 0]
-                assert not (root / "returns/active.json").exists()
-                with (root / "fixture.lock").open("rb") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
+            if operation in {"summary", "summary-timeout", "text"}:
+                assert record["last_observed_stage"] is None and record["console_tail"] == ""
+                assert not record["console_tail_truncated"] and record["control_bytes_received"] == 0
+            assert json.loads((root / "leaks").read_text()) == []
+            assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+            assert not (root / "returns/active.json").exists()
+            assert (directory / "exit.json").stat().st_mode & 0o777 == 0o600
+            assert not any((directory / name).exists() for name in
+                           ("console.partial", "diagnostic.partial", "diagnostics.json"))
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            excluded = {"last_observed_stage", "sequence_complete", "capture_lost", "console_tail",
+                        "console_tail_truncated", "control_bytes_received", "launcher", "qemu", "base",
+                        "overlay_directory", "overlay_fd", "overlay_inode", "acquired_at",
+                        "started_at", "ended_at", "qemu_priority"}
+            return {key: value for key, value in record.items() if key not in excluded}
         if mode in STAGE_MODES:
             stalled = mode in {"stages:timeout", "stages:before-header", "stages:blocked-header"}
             logging_error = mode == "stages:logging-error"
@@ -1183,37 +1103,28 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert launcher.returncode == exit_row["launcher_exit"] == 0, stderr.decode()
                 assert (directory / "artifacts/verification.json").is_file()
                 assert not (directory / "console.partial").exists()
-                sidecar = json.loads((directory / "diagnostics.json").read_text())
-                assert sidecar["control_bytes_received"] == 8 * 1024**2 + (
+                assert exit_row["control_bytes_received"] == 8 * 1024**2 + (
                     len(b"STAGE 2 stream_close_end 0\n") if mode == "stages:over-cap" else 0)
-                assert sidecar["truncated"] is (mode == "stages:over-cap")
+                assert exit_row["console_tail_truncated"] is (mode == "stages:over-cap")
                 for row in (exit_row, teardown):
                     assert row["stream_bytes"] == (root / "probe.frame").stat().st_size
-                    assert row["diagnostics_capture_lost"] and not row["sequence_complete"]
+                assert exit_row["capture_lost"] and not exit_row["sequence_complete"]
                 if mode == "stages:over-cap":
                     assert exit_row["last_observed_stage"] == "stream_close_end"
                 return
             assert launcher.returncode == exit_row["launcher_exit"] == int(stalled), stderr.decode()
-            if mode == "stages:flush-error":
-                assert (root / "sidecar-sync-failed").exists() and not (directory / "diagnostics.json").exists()
-                sidecar = None
-            else:
-                sidecar = json.loads((directory / "diagnostics.json").read_text())
             for row in (exit_row, teardown):
                 assert row["qemu_reaped"] and row["input_descriptor_closed"] and row["overlay_descriptor_closed"]
                 assert row["stream_bytes"] == (25 if stalled else (root / "probe.frame").stat().st_size)
-                expected_stage = "magic_written" if stalled else "stream_close_end"
-                if mode == "stages:blocked-header":
-                    expected_stage = "member_header_begin"
-                if mode == "stages:before-header":
-                    expected_stage = "member_prepare_begin"
-                assert row["last_observed_stage"] == (None if logging_error else expected_stage)
-            if sidecar is not None:
-                tail = sidecar["console_stage_tail"]
-                assert "FIXTURE_NOT_A_REAL_SECRET" not in tail
-                if not logging_error:
-                    assert 63 * 1024 < len(tail.encode()) <= 64 * 1024 and sidecar["truncated"]
-                    assert tail.splitlines()[-1].split()[2] == expected_stage
+            expected_stage = {"stages:blocked-header": "member_header_begin",
+                              "stages:before-header": "member_prepare_begin",
+                              "stages:timeout": "magic_written"}.get(mode, "stream_close_end")
+            assert exit_row["last_observed_stage"] == (None if logging_error else expected_stage)
+            tail = exit_row["console_tail"]
+            assert "FIXTURE_NOT_A_REAL_SECRET" not in tail
+            if not logging_error:
+                assert 4 * 1024 - 96 < len(tail.encode()) <= 4 * 1024 and exit_row["console_tail_truncated"]
+                assert tail.splitlines()[-1].split()[2] == expected_stage
             if stalled:
                 if mode == "stages:blocked-header":
                     assert (root / "header-write-entered").exists()
@@ -1223,12 +1134,12 @@ os.execvp(sys.argv[1], sys.argv[1:])
                     assert (root / "member-prepare-entered").exists()
                     assert not (root / "header-write-entered").exists()
                     assert b"member_prepare_begin" in stderr
-                    assert "member_header_begin" not in sidecar["console_stage_tail"]
+                    assert "member_header_begin" not in tail
                 else:
                     assert b"magic_written" in stderr
                 assert (directory / "stream.partial").read_bytes() == b"CERALIVE_IMAGE_STREAM_V1\n"
             if mode in {"stages:logging-error", "stages:guest-loss"}:
-                assert teardown["diagnostics_capture_lost"] and exit_row["diagnostics_capture_lost"]
+                assert exit_row["capture_lost"]
             assert not (root / "returns/active.json").exists()
             return
         expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error",
@@ -1300,63 +1211,86 @@ def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> N
     baseline = cancelled_fixture("isolated:baseline")
     for mode in ISOLATION_MODES[1:]:
         result = cancelled_fixture(mode)
-        if mode.split(":")[1].removeprefix("stderr-") in REGISTRATION_FAULTS:
+        if mode.split(":")[1] not in {"dropped", "summary-timeout"}:
             assert result is not None and result == baseline, (mode, result, baseline)
 
 
-def test_sidecar_persistence_cannot_change_the_committed_probe() -> None:
-    for mode in SIDECAR_MODES:
+def test_probe_transport_setup_failure_prevents_guest_launch_and_exit_commit() -> None:
+    for mode in PRESTART_MODES:
         cancelled_fixture(mode)
-
-
-def test_diagnostic_boundary_keeps_capture_operations_in_the_fault_table() -> None:
-    tree = ast.parse(pathlib.Path(image_lifecycle.__file__).read_text())
-    calls = [call for call in ast.walk(tree) if isinstance(call, ast.Call)]
-    guarded = {ast.unparse(call.args[1]) for call in calls
-               if isinstance(call.func, ast.Name) and call.func.id == "optional"}
-    guarded.update(ast.unparse(call.args[2]) for call in calls
-                   if ast.unparse(call.func) == "self.outputs.callback" and len(call.args) > 2
-                   and ast.unparse(call.args[0]) == "optional")
-    assert guarded == set(HOST_DIAGNOSTICS)
-    indirect = {"receive_diagnostic", "drain", "_detach_diagnostic", "register_probe_diagnostic"}
-    assert not [call.lineno for call in calls
-                if ast.unparse(call.func) in {"StageTail", "tail.observe", "self._snapshot_diagnostics",
-                                            "nonblocking_fd", "os.pipe2"}
-                or (ast.unparse(call.func) in indirect and ast.unparse(call.func) != "receive_diagnostic")]
 
 
 def test_live_capture_rejects_new_diagnostic_io() -> None:
     from image_stages import StageTail
 
-    def calls_with_io(tree):
-        names = {"open", "fdopen", "pipe", "pipe2", "fstat", "write", "write_bytes", "write_text",
-                 "register", "callback", "fsync", "flush", "_open_log", "persist_diagnostics"}
-        return sorted(ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call)
-                      and ast.unparse(node.func).rsplit(".", 1)[-1] in names)
+    def node_for(owner, name):
+        tree = ast.parse(pathlib.Path(inspect.getfile(owner)).read_text())
+        return next(node for node in ast.walk(tree)
+                    if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == name)
 
-    lifecycle = ast.parse(pathlib.Path(image_lifecycle.__file__).read_text())
-    job = next(node for node in lifecycle.body if isinstance(node, ast.ClassDef) and node.name == "ImageJob")
-    capture = next(node for node in job.body if isinstance(node, ast.FunctionDef) and node.name == "capture")
-    # These sites are the inherited selector plus the artifact/non-probe sink.
-    permitted = sorted([
-        "events.register(pipe, selectors.EVENT_READ, name)",
-        "self._open_log(self.directory / (name + '.partial'))",
-        "self.outputs.callback(sync_output, output)",
-        "files[name].write(chunk)",
-    ])
-    assert calls_with_io(capture) == permitted
-    stages = ast.parse(pathlib.Path(inspect.getfile(StageTail)).read_text())
-    tail = next(node for node in stages.body if isinstance(node, ast.ClassDef) and node.name == "StageTail")
-    assert calls_with_io(tail) == []
-    diagnostic_branch = next(node for node in ast.walk(capture) if isinstance(node, ast.If)
-                             and ast.unparse(node.test) == "self.probe and name != 'stream'"
-                             and any(isinstance(item, ast.Continue) for item in node.body)
-                             and any(isinstance(item, ast.If) for item in node.body)
-                             and any("receive_diagnostic" in ast.unparse(item) for item in node.body))
-    for statement in ("os.fstat(event.fd)", "files[name].write(b'\\n')"):
-        diagnostic_branch.body.insert(0, ast.parse(statement).body[0])
-        assert calls_with_io(capture) != permitted, statement
-        diagnostic_branch.body.pop(0)
+    def unexpected(tree, allowed, wrapped=()):
+        return {ast.unparse(call) for call in ast.walk(tree) if isinstance(call, ast.Call)
+                and (ast.unparse(call) not in wrapped if ast.unparse(call.func) == "optional"
+                     else ast.unparse(call.func) not in allowed)}
+
+    def control_branch(capture):
+        return next(node for node in ast.walk(capture) if isinstance(node, ast.If)
+                    and ast.unparse(node.test) == "control"
+                    and any(isinstance(item, ast.Continue) for item in node.body))
+
+    capture = node_for(ImageJob, "capture")
+    control_calls = {"optional(lose, self.record_control, name, chunk)"}
+    capture_calls = {"ExitStack", "Path", "StreamError", "counts.values", "disk_headroom",
+                     "events.get_map", "events.select", "events.unregister", "files[name].write",
+                     "len", "local.enter_context", "max", "min", "os.read", "overlay.stat",
+                     "poll_owned", "process_identity", "process_priority", "receipt",
+                     "selectors.DefaultSelector", "self._open_log", "self.cancellation.check",
+                     "self.close_console_writer", "self.outputs.callback", "self.outputs.enter_context",
+                     "self.register_measure_transport", "self.state.update", "subprocess.TimeoutExpired",
+                     "sum", "time.monotonic", "time.time", "wait"}
+    capture_wrapped = control_calls | {"optional(lose, os.read, event.fd, 1024 * 1024)",
+                                       "optional(lose, events.unregister, event.fileobj)",
+                                       "optional(lose, StageTail)", "optional(lose, self.drain, events)",
+                                       "optional(lose, self.close_console_writer)"}
+    assert not (bad := unexpected(capture, capture_calls, capture_wrapped)), bad
+    assert not (bad := unexpected(control_branch(capture), set(), control_calls)), bad
+    for name, calls, wrapped in (
+        ("record_control", {"bool", "len"}, {"optional(self.lose_diagnostics, tail.observe, chunk)"}),
+        ("drain", {"events.get_map", "events.get_map().values", "range", "self.lose_diagnostics"},
+         {"optional(self.lose_diagnostics, os.read, key.fd, 1024 * 1024)",
+          "optional(self.lose_diagnostics, self.record_control, key.data, chunk)"}),
+        ("diagnostic_summary", {"tail.text"}, set()),
+        ("lose_diagnostics", set(), set()),
+        ("_close_console", {"getattr", "setattr", "os.close"},
+         {"optional(self.lose_diagnostics, os.close, fd)"}),
+    ):
+        assert not (bad := unexpected(node_for(ImageJob, name), calls, wrapped)), (name, bad)
+    tail = node_for(StageTail, "StageTail")
+    memory_calls = {"bytearray", "chunk.split", "enumerate", "int", "joined.removesuffix",
+                    "len", "match[2].decode", "min", "range", "self._append", "STAGE_LINE.fullmatch",
+                    "(self.ring[self.head:self.head + first] + self.ring[:self.size - first]).decode"}
+    assert not (bad := unexpected(tail, memory_calls)), bad
+    assert not (bad := unexpected(node_for(StageTail, "optional"), {"on_loss", "operation"})), bad
+    run_calls = {"Cancelled", "digest_file", "int", "isinstance", "measure_image",
+                 "receipt", "report_error", "type"}
+    run_wrapped = {"optional(build.lose_diagnostics, build.diagnostic_summary, row)"}
+    assert not (bad := unexpected(node_for(image_vm, "run_image"), run_calls, run_wrapped)), bad
+
+    for statement in (
+        "self.finish_diagnostics()", "self.flush()", "self.persist_diagnostics()",
+        "os.fstat(event.fd)", "open('other', 'w')", "files[name].write(b'\\n')", "os.fork()",
+        "events.register(event.fd, selectors.EVENT_READ, name)",
+        "optional(lose, self.finish_diagnostics)",
+    ):
+        private = node_for(ImageJob, "capture")
+        branch = control_branch(private)
+        branch.body.insert(0, ast.parse(statement).body[0])
+        assert unexpected(branch, set(), control_calls), statement
+        if not statement.startswith("files[name].write"):
+            assert unexpected(private, capture_calls, capture_wrapped), statement
+    private_summary = node_for(ImageJob, "diagnostic_summary")
+    private_summary.body.insert(0, ast.parse("tail.flush()").body[0])
+    assert unexpected(private_summary, {"tail.text"})
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:
