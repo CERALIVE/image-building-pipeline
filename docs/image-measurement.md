@@ -89,24 +89,27 @@ locks. Confirm that any preceding heavy unit has finished teardown or adopted
 the same host lock before queueing a measurement.
 
 If an active journal remains, admission must acquire the recorded overlay
-inode's exclusive `flock` without waiting. The image launcher and QEMU
-share the locked open file description, including when a child inherits it.
-A busy lease, missing inode or unreadable journal refuses admission.
+inode's exclusive `flock` without waiting and check the identities of the
+opened overlay and journal before retirement. The launcher, its short-lived
+`qemu-img create` helper, and QEMU share the locked open file description
+while they hold it. Only `EAGAIN` or `EWOULDBLOCK` proves contention. A busy
+or inconclusive lease, missing inode or unreadable journal refuses admission.
 For a legacy anonymous overlay or missing lease, keep the journal and use
 manual recovery. Under the host-heavy lock, use an operator-verified host
 restart to establish that the anonymous overlay is gone, then archive
 `active.json` outside the attempt store and use a fresh reviewed store.
 Do not retire the journal on the basis of a process listing.
 
-The launcher assumes a single-user workstation or runner. The output store,
-job directories, capsule and journal are private to the invoking user (mode
-0700) and written only by the launcher and its children. A concurrent process
-with the same privileges that replaces files between a check and their use is
-outside this model. Within it, the lease is the only proof of overlay
-ownership: only the launcher and QEMU share the locked open file description,
-so a separately opened description is also outside the model. Every lease
-acquisition first proves that a second open file description cannot take the
-same lock. A filesystem that acknowledges locks without enforcing them, such
+The launcher assumes a single-user workstation or runner. The launcher and
+its children own and write the private directories (mode 0700) and files
+(mode 0600), including the verifier capsule and active journal. A process
+with the same privileges that substitutes files during use or independently
+opens the overlay is outside this model. The lease is the sole proof of
+overlay ownership. After acquiring it, the launcher requires `EAGAIN` or
+`EWOULDBLOCK` from an independent non-blocking lock attempt on the same
+inode. It retries `EINTR` and `EIO` up to three total attempts per lock
+observation. Any other error, or an exhausted retry, leaves the lease
+inconclusive. A filesystem that acknowledges locks without enforcing them, such
 as some NFS or FUSE mounts, refuses admission. After admission the launcher
 resolves every store path through the admitted directory descriptor and hands
 the verifier the capsule descriptor it wrote. Recovery removes the overlay and
@@ -114,8 +117,8 @@ journal by name immediately after checking their identity, so a same-user
 replacement in that interval can still be removed.
 
 On a new store, the public policy is validated before `qemu-img` inspects the
-base. Retries do not nest: each admission observation runs at most three times
-in total.
+base and can be checked again during store admission. Retries do not nest.
+Each outer admission observation permits at most three policy reads.
 
 For an independently prepared and approved base, capsule and public policy,
 the example assumes a shell at nice 0. `nice -n 10` is a relative adjustment.
@@ -135,8 +138,10 @@ systemd-run --user --scope \
 ```
 
 The output store must be launcher-owned and mode 0700. Its filesystem must fit
-both the 144 GiB overlay allocation and the return-store budget. All returned
-files and receipts are mode 0600 and created under a new attempt directory. Run Rock 5B+
+both the 144 GiB overlay allocation and the return-store budget. The launcher
+creates mode-0700 attempt and job directories and mode-0600 overlay, verifier
+capsule, artifact and receipt files. The active journal and reconciliation
+receipts live directly in the output store. Run Rock 5B+
 first, including its independent verifier and teardown, then Orange Pi 5 Plus.
 There is no image matrix or `--all` path. `--image-mode probe` performs a small
 network-denial/artifact-return probe; an actual probe and attended cancellation

@@ -255,27 +255,35 @@ def released_overlay(path: Path, inode: list[int]):
         info = retry_check(os.fstat, overlay.fileno())
         if [info.st_dev, info.st_ino] != inode:
             raise AdmissionError("active image overlay inode does not match its journal")
-        try:
-            retry_check(fcntl.flock, overlay.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,
-                        errors=frozenset((errno.EINTR, errno.EIO)))
-        except BlockingIOError as error:
-            raise AdmissionError(f"previous image overlay is still held: {path}") from error
+        contention = try_overlay_lock(overlay.fileno())
+        if contention is not None:
+            raise AdmissionError(f"previous image overlay is still held: {path}") from contention
         require_lock_contention(overlay.fileno())
         if not os.path.samestat(info, retry_check(path.lstat)):
             raise AdmissionError("active image overlay changed during lease acquisition")
         yield info
 
 
+def try_overlay_lock(fd: int) -> OSError | None:
+    """Return the contention error, or None when the non-blocking lock is acquired."""
+    try:
+        retry_check(fcntl.flock, fd, fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    errors=frozenset((errno.EINTR, errno.EIO)))
+    except OSError as error:
+        if error.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+            raise
+        return error
+    return None
+
+
 def require_lock_contention(fd: int) -> None:
     """Refuse a filesystem whose flock succeeds without excluding a second open file description."""
     probe = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_CLOEXEC)
     try:
-        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return
+        if try_overlay_lock(probe) is None:
+            raise AdmissionError("filesystem does not enforce overlay flock contention; use a local output store")
     finally:
         os.close(probe)
-    raise AdmissionError("filesystem does not enforce overlay flock contention; use a local output store")
 
 
 def unlink_observed(path: Path, info: os.stat_result) -> None:

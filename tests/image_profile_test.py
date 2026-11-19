@@ -2281,6 +2281,55 @@ def test_overlay_lease_faults_preserve_active_ownership_until_proven() -> None:
             assert record.exists() == (expected or site in ("overlay-unlink", "active-unlink")), (site, code)
 
 
+def test_overlay_recovery_requires_exact_contention_errno() -> None:
+    flags = fcntl.LOCK_EX | fcntl.LOCK_NB
+    native_lock = fcntl.flock
+    contention = (errno.EAGAIN, errno.EWOULDBLOCK)
+    errors = (*contention, errno.EINPROGRESS, errno.EALREADY, errno.EINTR, errno.EACCES,
+              errno.EBADF, errno.EIO, errno.ENOLCK)
+    for phase, code in product(("acquire", "probe"), errors):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as held:
+            store = pathlib.Path(temporary)
+            with leased_fixture(store):
+                pass
+            overlay = store / "interrupted/build/overlay.qcow2"
+            journal = store / "active.json"
+            recovery = store / "interrupted.reconciled.json"
+            if phase == "acquire":
+                holder = held.enter_context(overlay.open("r+b"))
+                native_lock(holder, flags)
+            original = journal.read_bytes()
+            attempts = 0
+
+            def observe(fd, operations):
+                nonlocal attempts
+                try:
+                    native_lock(fd, operations)
+                except OSError as error:
+                    # The independent description is really contending in both cases.
+                    assert error.errno in contention
+                    attempts += 1
+                    raise OSError(code, "fixture lock errno") from error
+
+            retires = phase == "probe" and code in contention
+            with patch.object(fcntl, "flock", observe):
+                try:
+                    reconcile(store)
+                except image_resources.AdmissionError as error:
+                    assert not retires, (phase, code, error)
+                    assert str(error).startswith("previous image overlay is still held:") == (
+                        phase == "acquire" and code in contention), (phase, code, error)
+                    assert error.__cause__.errno == code, (phase, code, error)
+                else:
+                    assert retires, (phase, code, "retired without proven contention")
+            assert attempts == (3 if code in (errno.EINTR, errno.EIO) else 1), (phase, code, attempts)
+            if retires:
+                assert not journal.exists() and not overlay.exists()
+                assert json.loads(recovery.read_text())["overlay_descriptors_closed"] is True
+            else:
+                assert journal.read_bytes() == original and overlay.is_file() and not recovery.exists()
+
+
 def test_legacy_overlay_never_uses_a_process_scan_to_certify_closure() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         store = pathlib.Path(temporary)

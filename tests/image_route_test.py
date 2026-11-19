@@ -336,11 +336,9 @@ if mode == 'early':
 if mode == 'partial':
     print('CERALIVE_', end='', flush=True)
     signal.pause()
-print('CERALIVE_SEALED_MIRROR_READY', flush=True)
 if mode == 'closed-control':
-    import os
     os.close(0)
-    signal.pause()
+print('CERALIVE_SEALED_MIRROR_READY', flush=True)
 if mode in ('clean', 'bad'):
     if os.read(sys.stdin.fileno(), 1) != b'S':
         sys.exit(8)
@@ -366,9 +364,12 @@ while True:
                         fd = mirror.stdin.fileno()
                         capacity = fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
                         assert os.write(fd, b"x" * capacity) == capacity
-            except StreamError:
+            except StreamError as error:
                 assert mode in ("legacy", "early", "partial", "full-control", "closed-control", "bad", "foreign-term",
                                 "kill"), mode
+                if mode == "closed-control":
+                    assert isinstance(error.__cause__, BrokenPipeError), error
+                    assert error.__cause__.errno == errno.EPIPE
             else:
                 assert mode == "clean", mode
             finally:
