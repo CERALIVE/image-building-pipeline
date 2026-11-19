@@ -22,7 +22,7 @@ from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_hea
 from image_stages import StageTail, optional
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import (
-    POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, close_transport, poll_owned,
+    POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
     register_close, run, wait,
 )
 
@@ -368,6 +368,9 @@ class ImageJob:
             finally:
                 self.inputs.close()
             self.state["input_descriptor_closed"] = True
+        if isinstance(error, ChildContainmentError):
+            # Retain the unfinished journal and do not publish a terminal receipt.
+            return
         self.state["ended_at"] = time.time()
         if error:
             self.state["stop_reason"] = type(error).__name__
@@ -470,6 +473,7 @@ class ImageJob:
             register_close(self.capture_scope, "measurement-selector", events.close)
             self.probe_events = events
         on_loss = self.lose_diagnostics if self.probe else None
+        self.capture_counts = {"stream": 0, "console": 0, "diagnostic": 0}
         self.capture_files = {}
         for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
             output = self._open_log(self.directory / (name + ".partial"))
@@ -491,7 +495,7 @@ class ImageJob:
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         console_retry_at = None
-        counts = {"stream": 0, "console": 0, "diagnostic": 0}
+        counts = self.capture_counts
         with self.capture_scope:
             events = self.probe_events
             assert events is not None

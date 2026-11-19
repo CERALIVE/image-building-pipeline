@@ -123,14 +123,45 @@ close an unrelated descriptor that later takes the same number. The parent
 releases its artifact writer before capture so it can see EOF, and teardown
 still owns the writer if that release fails.
 
-The host acquires QEMU and helper processes through the same cleanup scope.
-It prepares the cleanup stacks, pipe callbacks, optional pidfd owner and
-helper output selector before spawn. Each child keeps the existing Linux
-parent-death signal. Once a spawn returns a process, setup failure still
-reaps it and closes every parent pipe.
-A helper setup failure during an active image attempt records a failed
-outcome through the same exit receipt transaction, including after artifact
-validation. Admission failures before an attempt still produce no attempt receipt.
+The launcher prepares cleanup stacks, pipe callbacks, capture counters and
+files, the optional pidfd owner, and helper selectors before spawn. Host
+`/usr/bin/setpriv` (util-linux) arms Linux `SIGKILL` on parent death. A shell
+builtin checks that the launcher is still the parent, then execs the command
+in the same new session and PID. There is no Python pre-exec hook or extra
+live wrapper process. Install util-linux on the runner host. The Ubuntu base
+provisioning also installs util-linux. The host wrapper does not depend on the
+guest copy.
+
+The spawning thread checks that it has no other direct child. If `Popen`
+fails to return its child, the launcher reads that thread's child list in
+`/proc`, kills the new session's process group, and waits up to two seconds
+for exit. If the child has not yet entered its session, it signals only that
+direct child. Both terminal receipts wait for this check. They record
+`qemu_reaped=true` and an exit code only if the launcher collected a real
+wait status. If the child is gone and no status is available, they record
+`qemu_reaped=false` and omit the exit code. If absence cannot be confirmed in
+the bound, the launcher fails and retains the active journal without terminal
+receipts. The parent-death signal also covers launcher death once armed. An
+externally stopped child before the native wrapper can arm the signal is
+outside that protection if the launcher itself dies before it can clean up.
+
+Recoverable OS faults such as interrupted calls, unavailable or denied
+pidfd operations and closed or full diagnostic pipes can occur anywhere.
+The launcher retries interrupted operations where safe, falls back for
+optional operations, and preserves the artifact, verdict and exit status.
+A required I/O, validation or publication operation that cannot complete
+still fails closed. Exceptions in diagnostics use pre-encoded unavailable
+fields without affecting the verdict. A one-shot `MemoryError` before the
+probe receipt rename gets one retry of the same outcome after cleanup. After
+rename the committed receipt decides the exit status.
+
+An arbitrary main-path `MemoryError` fails the attempt with a nonzero exit.
+On the tested post-spawn paths the launcher writes teardown, reaps its child,
+closes owned descriptors, and removes the active journal. A failed exit
+receipt may be absent. A success receipt requires both a real successful
+guest exit and independent artifact validation. Persistent allocation
+failure and kernel OOM termination are outside cooperative cleanup. Admission
+failures before an attempt still produce no attempt receipt.
 
 If pidfd registration fails, the launcher keeps the handle until it has
 collected QEMU's wait status. If pidfd signalling is unavailable or fails,

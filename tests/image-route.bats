@@ -68,6 +68,24 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image launcher drains a lost spawn before terminal receipts" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --lost-child
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image launcher fails closed on QEMU main path allocation faults" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --qemu-memory
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image launcher fails closed on disk helper allocation faults" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --disk-memory
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image profile shutdown signals preserve lifecycle guarantees" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --shutdown
   printf '%s\n' "$output"

@@ -272,6 +272,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     unlink = pathlib.Path.unlink
     temporary_file = tempfile.TemporaryFile
     directory = root / "returns/fixture/build"
+    lost_pid_file = root / "lost-child-pid"
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     pair = mode.startswith("pair:")
@@ -299,9 +300,13 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         (root / "status-launcher").write_text(pathlib.Path("/proc/self/status").read_text())
 
     verify_startup = vm_startup.verify_startup
+    initial_fds = None
 
     def fixture_verify(checks):
+        nonlocal initial_fds
         verify_startup(checks)
+        if check_descriptors:
+            initial_fds = descriptor_snapshot()
         if startup or rejected:
             (root / "startup-baseline").write_text(json.dumps(checks))
         if rejected:
@@ -406,13 +411,13 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             kind = receipt_fault[1]
             if kind == "term-before":
                 cancel()
-            if kind in {"exception", "oserror", "systemexit", "interrupt"}:
+            if kind in {"exception", "oserror", "systemexit", "interrupt", "memory"}:
                 # Successful close can also report an error. For rename,
                 # inject before the syscall to model a failed commit.
                 if action.__name__ in {"file_close", "dir_close", "temp_cleanup"}:
                     action(transaction)
                 error = {"exception": Exception, "oserror": OSError,
-                         "systemexit": SystemExit, "interrupt": KeyboardInterrupt}[kind]
+                         "systemexit": SystemExit, "interrupt": KeyboardInterrupt, "memory": MemoryError}[kind]
                 raise error(f"fixture {action.__name__}")
             if kind == "term-during":
                 during = action.__code__
@@ -658,8 +663,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             if event in {"subprocess.Popen", "os.fork", "os.posix_spawn"}:
                 assert not (directory / "started.json").exists(), f"extra child during capture: {event}"
                 assert event == "subprocess.Popen", event
+                argv = child_command(args[1])
                 with (root / "exclusive-spawns").open("a") as output:
-                    print(" ".join(args[1][:2] if args[0] == "qemu-img" else args[1][:1]), file=output)
+                    print(" ".join(argv[:2] if argv[0] == "qemu-img" else argv[:1]), file=output)
 
         sys.addaudithook(no_capture_spawns)
 
@@ -702,7 +708,19 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             real_exit(status)
 
     writer = image_lifecycle.receipt
+    real_receipt = writer
+
+    def check_lost_child_at_receipt(path, row, **kwargs):
+        if path.parent == directory and path.name in {"teardown.json", "exit.json"} and lost_pid_file.exists():
+            pid = lost_pid_file.read_text()
+            assert not pathlib.Path(f"/proc/{pid}").exists(), (path.name, pid)
+            with (root / "lost-child-receipts").open("a") as observed:
+                print(path.name, file=observed)
+        real_receipt(path, row, **kwargs)
+
+    writer = check_lost_child_at_receipt
     if mode == "audit-mutation":
+        writer = real_receipt
         namespace = image_lifecycle.__dict__.copy()
         source = inspect.getsource(writer) + "\n    transaction.path.stat()\n    os.statvfs(transaction.path.parent)\n"
         exec(compile(source, image_lifecycle.__file__, "exec"), namespace)
@@ -730,10 +748,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                              or child_fault or signal_fault
                              or mode in (*BACKUP_SELECTOR_CLOSE_MODES, *READER_CLEANUP_MODES, *PRESTART_MODES))
         if check_descriptors:
-            initial_fds = descriptor_snapshot()
-
             def checked_exit(status):
                 final_fds = descriptor_snapshot()
+                assert initial_fds is not None, "startup did not establish a descriptor baseline"
                 (root / "descriptor-check").write_text(json.dumps([initial_fds, final_fds]))
                 if child_fault or signal_fault:
                     children = pathlib.Path(f"/proc/self/task/{launcher_pid}/children").read_text().split()
@@ -851,7 +868,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                         sys.settrace(prepare_trace)
 
                     def inject_child(args, *positional, **kwargs):
-                        command = args[1] if args[0] == "qemu-img" else args[0]
+                        command_args = child_command(args)
+                        command = command_args[1] if command_args[0] == "qemu-img" else command_args[0]
                         if command != target or (mode == "isolated:validated-helper"
                                                  and not (directory / "transport-validation.json").exists()):
                             process = popen(args, *positional, **kwargs)
@@ -867,12 +885,102 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                             # Every helper uses this owner, including helpers with
                             # inherited output. Exercise all stdio registrations.
                             kwargs.update(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        process = popen(["fixture-helper"] if command in PREPARATION_HELPERS else args,
-                                        *positional, **kwargs)
+                        child_args = [*args[:-len(command_args)], "fixture-helper"] if command in PREPARATION_HELPERS else args
+                        process = popen(child_args, *positional, **kwargs)
                         (root / "fault-pid").write_text(str(process.pid))
                         if command == "qemu-system-x86_64":
                             (root / "spawned-qemu").write_text(str(process.pid))
                             wait_for_guest()
+                        if operation.startswith("sweep"):
+                            # Observe the reached lines on the healthy path, then fail
+                            # each line once on a new launcher with the same input.
+                            watched = {fn.__code__ for fn in (
+                                vm_process.spawn_owned.__wrapped__, vm_process.run,
+                                vm.boot, ImageJob.capture, image_vm.execute,
+                                validate_return, image_vm.measure_image,
+                            )}
+                            if command != "qemu-system-x86_64":
+                                watched &= {vm_process.spawn_owned.__wrapped__.__code__, vm_process.run.__code__}
+                            main_lines = {}
+                            for code in watched:
+                                source, start = inspect.getsourcelines(code)
+                                tree = ast.parse(dedent("".join(source)))
+                                # Line events also fire on compiler scaffolding (try,
+                                # implicit context exits and finally dispatch). Those
+                                # are not executable source statements in the main path.
+                                main_lines[code] = {
+                                    start + statement.lineno - 1
+                                    for statement in ast.walk(tree)
+                                    if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                                                              ast.Delete, ast.Expr, ast.If, ast.While,
+                                                              ast.For, ast.Return))
+                                }
+                            for function, cutoff in ((vm_process.spawn_owned.__wrapped__, "yield process"),
+                                                     (vm_process.run, "if owners is not None:"),
+                                                     (ImageJob.capture, 'self.state["stream_bytes"]')):
+                                if function.__code__ in main_lines:
+                                    source, start = inspect.getsourcelines(function)
+                                    point = start + next(i for i, line in enumerate(source) if cutoff in line)
+                                    if function is vm_process.run:
+                                        main_lines[function.__code__].difference_update({point, point + 1})
+                                    elif function is ImageJob.capture:
+                                        main_lines[function.__code__].discard(point)
+                                    else:
+                                        main_lines[function.__code__] = {
+                                            line for line in main_lines[function.__code__] if line <= point}
+                            capture_src, first = inspect.getsourcelines(ImageJob.capture)
+                            optional_lines = set()
+                            for begin, end in (
+                                ("if self.probe:\n", "raise subprocess.TimeoutExpired("),
+                                ("if console_retry_at is not None", "ready = events.select("),
+                                ('if self.probe and name == "console":', "chunk = os.read("),
+                                ("if self.probe:\n", 'self.state["stream_bytes"]'),
+                            ):
+                                last = max(i for i, line in enumerate(capture_src) if end in line)
+                                start = max(i for i, line in enumerate(capture_src[:last]) if begin in line)
+                                optional_lines.update(range(first + start + 1, first + last))
+                            # The replay targets the main path. The existing ownership
+                            # and diagnostics matrices inject inside optional boundaries.
+                            seen = set()
+
+                            def sweep_trace(frame, event, _arg):
+                                if frame.f_code not in watched:
+                                    return None
+                                if event == "line" and frame.f_lineno in main_lines[frame.f_code] and not (
+                                    frame.f_code is ImageJob.capture.__code__ and frame.f_lineno in optional_lines
+                                    or frame.f_code is vm_process.spawn_owned.__wrapped__.__code__
+                                    and "process" in frame.f_locals and frame.f_locals["process"] is None
+                                ):
+                                    key = f"{frame.f_code.co_qualname}@{frame.f_lineno}"
+                                    if operation == "sweep-baseline" and key not in seen:
+                                        seen.add(key)
+                                        with (root / "sweep-points").open("a") as output:
+                                            print(key, file=output)
+                                    if operation == f"sweep/{key}":
+                                        (root / "child-injected").touch()
+                                        if frame.f_code is vm_process.spawn_owned.__wrapped__.__code__ and (
+                                            "handle.__init__(" in inspect.getsource(frame.f_code).splitlines()[
+                                                frame.f_lineno - frame.f_code.co_firstlineno]
+                                        ):
+                                            (root / "sweep-optional").touch()
+                                        sys.settrace(None)
+                                        raise MemoryError(f"fixture allocation at {key}")
+                                return sweep_trace
+
+                            sys.settrace(sweep_trace)
+                            frame = sys._getframe(1)
+                            while frame is not None:
+                                if frame.f_code in watched:
+                                    frame.f_trace = sweep_trace
+                                frame = frame.f_back
+                            return process
+                        if operation in {"lost-return", "lost-already-collected"}:
+                            if operation == "lost-already-collected":
+                                process.kill()
+                                process.wait(timeout=2)
+                            lost_pid_file.write_text(str(process.pid))
+                            (root / "child-injected").touch()
+                            raise DIAGNOSTIC_ERRORS[kind]("fixture lost Popen result")
                         if operation == "selector-stack":
                             return process
                         function, point = operation.split("/")
@@ -994,7 +1102,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 stream_registrations = 0
 
                 def reject_guest_spawn(args, *positional, **kwargs):
-                    assert args[0] != "qemu-system-x86_64", "guest spawn preceded transport setup"
+                    assert child_command(args)[0] != "qemu-system-x86_64", "guest spawn preceded transport setup"
                     return popen(args, *positional, **kwargs)
 
                 def startup_pipe(slots, flags):
@@ -1206,6 +1314,9 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         root = pathlib.Path(tmp)
         child_target = child_fault.partition(":")[0]
         qemu_fault = child_target == "qemu-system-x86_64"
+        lost_already_collected = ":lost-already-collected:" in child_fault
+        lost_return = ":lost-return:" in child_fault or lost_already_collected
+        sweep = ":sweep" in child_fault
         if waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault:
             os.mkfifo(root / "guest-ready")
         if mode.startswith("isolated:unregister"):
@@ -1320,9 +1431,11 @@ with (root / "children").open("a") as logged:
 (root / "ready").touch()
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
-if {waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault!r}:
+if {(waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault) and not sweep!r}:
     with (root / "guest-ready").open("wb", buffering=0) as ready:
         ready.write(b"1")
+if {lost_return and qemu_fault!r}:
+    time.sleep(60)
 if mode in ("startup:success", "startup:failure", "startup:signal"):
     os.write(1, (root / "probe.frame").read_bytes())
     if mode == "startup:signal":
@@ -1378,6 +1491,9 @@ if mode in (*{ISOLATION_MODES!r}, "isolated:validated-helper") and mode != "isol
         sent = 0
         while sent < len(frame):
             sent += os.write(1, frame[sent:])
+        if {sweep and qemu_fault!r}:
+            with (root / "guest-ready").open("wb", buffering=0) as ready:
+                ready.write(b"1")
         sys.exit(0)
 if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-timeout:MemoryError"):
     console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
@@ -1498,13 +1614,15 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 if not (root / "sent").exists():
                     proc = pathlib.Path("/proc")
                     observed = {}
+                    guest = (root / "pid").read_text() if (root / "pid").exists() else None
                     for entry in proc.iterdir():
                         if not entry.name.isdecimal():
                             continue
                         try:
                             status = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-                            if int(status[2]) == launcher.pid:
-                                observed[entry.name] = (status[:3], (entry / "wchan").read_text())
+                            if int(status[2]) == launcher.pid or entry.name == guest:
+                                observed[entry.name] = (status[:4], (entry / "wchan").read_text(),
+                                                        signal_status(entry / "status"))
                         except (FileNotFoundError, ProcessLookupError):
                             continue
                     raise AssertionError(("fixture timed out before cancellation", mode, child_fault,
@@ -1521,7 +1639,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         try:
                             handle = os.pidfd_open(pid)
                             try:
-                                if os.getpgid(pid) == launcher.pid:
+                                parent = int(pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+                                if parent in {launcher.pid, *map(int, pathlib.Path(
+                                    f"/proc/{launcher.pid}/task/{launcher.pid}/children").read_text().split())}:
                                     signal.pidfd_send_signal(handle, signal.SIGKILL)
                             finally:
                                 os.close(handle)
@@ -1534,6 +1654,29 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if sweep:
+            initial, final = json.loads((root / "descriptor-check").read_text())
+            assert initial == final, (child_fault, initial, final, stderr)
+            assert json.loads((root / "launcher-children").read_text()) == []
+            fault_pid = (root / "fault-pid").read_text()
+            assert not pathlib.Path(f"/proc/{fault_pid}").exists(), (child_fault, fault_pid)
+            assert not (root / "returns/active.json").exists()
+            teardown = json.loads((directory / "teardown.json").read_text())
+            assert teardown["input_descriptor_closed"] and teardown["overlay_descriptor_closed"]
+            if not qemu_fault or ":sweep-baseline:" in child_fault:
+                assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+            if ":sweep-baseline:" in child_fault:
+                assert launcher.returncode == json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
+                return {"points": (root / "sweep-points").read_text().splitlines()}
+            assert (root / "child-injected").exists(), (child_fault, stderr)
+            if (root / "sweep-optional").exists():
+                assert launcher.returncode == json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
+                assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+                return
+            assert launcher.returncode == 1, (child_fault, stderr)
+            if (directory / "exit.json").exists():
+                assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == launcher.returncode
+            return
         if signal_fault or child_fault:
             assert (root / ("signal-injected" if signal_fault else "child-injected")).exists(), stderr
             assert json.loads((root / "launcher-children").read_text()) == [], (mode, signal_fault, child_fault, stderr)
@@ -1542,23 +1685,26 @@ os.execvp(sys.argv[1], sys.argv[1:])
             waits = wait_log.read_text().splitlines() if wait_log.exists() else []
             if child_fault:
                 setup_operation = child_fault.split(":")[1]
-                after_spawn = setup_operation.startswith(("spawn/", "boot/", "helper/"))
+                after_spawn = lost_return or setup_operation.startswith(("spawn/", "boot/", "helper/"))
                 assert (root / "fault-pid").exists() == after_spawn, (child_fault, stderr)
                 if after_spawn:
                     fault_pid = (root / "fault-pid").read_text()
                     assert len([entry for entry in waits if entry.split()[0] == fault_pid]) == 1, waits
                     assert not pathlib.Path(f"/proc/{fault_pid}").exists()
+                if lost_return and (child_target != "info" or mode == "isolated:validated-helper"):
+                    assert (root / "lost-child-receipts").read_text().splitlines() == ["teardown.json", "exit.json"]
             if not child_fault.startswith("info:") or mode == "isolated:validated-helper":
                 exit_row, teardown = [json.loads((directory / name).read_text())
                                       for name in ("exit.json", "teardown.json")]
                 assert exit_row["launcher_exit"] == launcher.returncode == 1
                 pid_file = root / ("spawned-qemu" if child_fault else "pid")
-                if pid_file.exists():
+                if pid_file.exists() and not lost_already_collected:
                     pid = pid_file.read_text()
                     assert exit_row["qemu_reaped"] and teardown["qemu_reaped"]
                     assert [entry for entry in waits if entry.split()[0] == pid] == [f"{pid} {exit_row['qemu_exit']}"]
                 else:
                     assert not exit_row["qemu_reaped"] and not teardown["qemu_reaped"], (child_fault, exit_row)
+                    assert "qemu_exit" not in exit_row and "qemu_exit" not in teardown
         if pipe_fault or registration_fault:
             assert (directory / "exit.json").is_file(), (mode, pipe_fault, registration_fault, stderr)
             exit_row = json.loads((directory / "exit.json").read_text())
@@ -1723,8 +1869,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert not audit["outside"], (mode, audit["outside"])
             if action.startswith("term-"):
                 assert [point, "os.kill"] in audit["events"], (mode, audit)
-            assert launcher.returncode == (0 if after else 1), (mode, stderr)
-            assert marker.exists() == (after or action.startswith("term-")), mode
+            retried = action == "memory" and not after
+            assert launcher.returncode == (0 if after or retried else 1), (mode, stderr)
+            assert marker.exists() == (after or retried or action.startswith("term-")), mode
             if marker.exists():
                 assert json.loads(marker.read_text())["launcher_exit"] == launcher.returncode, mode
             executed = (root / "steps").read_text().splitlines()
@@ -1733,7 +1880,10 @@ os.execvp(sys.argv[1], sys.argv[1:])
             elif not action.startswith("term-"):
                 assert executed[index + 1:] == [
                     step.__name__ for step, cleanup in image_lifecycle.RECEIPT_STEPS[index + 1:]
-                    if cleanup], mode
+                    if cleanup] + (names if retried else []), mode
+            if action == "memory":
+                assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+                assert json.loads(marker.read_text())["qemu_exit"] == 0
             assert not (root / "atexit-ran").exists(), mode
             assert not list(root.rglob(".receipt-*")), mode
             assert not list(root.glob("job-*")), mode
@@ -2073,6 +2223,36 @@ def test_post_spawn_faults_reap_each_child_and_close_its_pipes() -> None:
         for error in ("MemoryError", "OSError"):
             assert cancelled_fixture("isolated:complete",
                                      child_fault=f"qemu-system-x86_64:boot/{point}:{error}") == baseline
+
+
+def test_lost_popen_result_is_reaped_before_terminal_receipts() -> None:
+    for target in ("qemu-system-x86_64", "info", "create"):
+        for error in ("OSError", "MemoryError"):
+            cancelled_fixture("isolated:complete", child_fault=f"{target}:lost-return:{error}")
+    for target in ("info", "create"):
+        cancelled_fixture("isolated:validated-helper", child_fault=f"{target}:lost-return:MemoryError")
+    cancelled_fixture("isolated:complete", child_fault="qemu-system-x86_64:lost-already-collected:OSError")
+
+
+def check_main_path_memory_faults(target: str, mode: str) -> None:
+    baseline = cancelled_fixture(mode, child_fault=f"{target}:sweep-baseline:MemoryError")
+    assert baseline and len(baseline["points"]) > 10, (target, baseline)
+    for point in baseline["points"]:
+        try:
+            cancelled_fixture(mode, child_fault=f"{target}:sweep/{point}:MemoryError")
+        except AssertionError as error:
+            error.add_note(f"{target}: {point}")
+            raise
+    print(f"{target}: {len(baseline['points'])} main-path allocation faults", flush=True)
+
+
+def test_qemu_main_path_memory_faults_fail_closed() -> None:
+    check_main_path_memory_faults("qemu-system-x86_64", "isolated:complete")
+
+
+def test_disk_helper_main_path_memory_faults_fail_closed() -> None:
+    for target in ("info", "create"):
+        check_main_path_memory_faults(target, "isolated:validated-helper")
 
 
 def test_post_spawn_faults_cover_preparation_and_registration_helpers() -> None:
@@ -2523,7 +2703,8 @@ def test_hostile_startup_does_not_change_guest_outcome() -> None:
     assert set(vm_startup.TIMERS) == {signal.ITIMER_REAL, signal.ITIMER_VIRTUAL, signal.ITIMER_PROF}
     for setup in STARTUP_STATES.values():
         for outcome in STARTUP_EXITS:
-            cancelled_fixture(f"startup:{outcome}", entry_setup=setup)
+            ownership = (-1, "", "") if setup == STARTUP_STATES["extra-fds"] else None
+            cancelled_fixture(f"startup:{outcome}", entry_setup=setup, ownership_case=ownership)
 
 
 def test_startup_verification_failure_refuses_before_spawning() -> None:
@@ -2635,7 +2816,7 @@ def test_each_receipt_step_preserves_commit_and_releases_owned_resources() -> No
     scheduled = {step.__name__ for step, _ in image_lifecycle.RECEIPT_STEPS}
     assert scheduled == declared
     for step, _cleanup in image_lifecycle.RECEIPT_STEPS:
-        for action in ("exception", "oserror", "systemexit", "interrupt", "term-before", "term-during"):
+        for action in ("exception", "oserror", "systemexit", "interrupt", "term-before", "term-during", "memory"):
             cancelled_fixture(f"receipt-step:{step.__name__}:{action}")
 
 
@@ -2949,6 +3130,10 @@ def test_term_while_check_waits_for_fifo_releases_its_overlay_and_lock() -> None
                         launcher.communicate()
 
 
+def child_command(args: list[str]) -> list[str]:
+    return args[9:] if args[:4] == ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--"] else args
+
+
 def test_image_has_no_nic_shares_registration_or_credential_environment() -> None:
     real_popen = subprocess.Popen
     envelope = io.BytesIO()
@@ -2969,9 +3154,12 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         assert capsule.startswith("file=/proc/self/fd/")
         assert set(options["env"]) == {"PATH", "LANG"}
         assert options["stdin"] == subprocess.DEVNULL
-        assert options["preexec_fn"].func is vm.die_with_parent
-        assert options["preexec_fn"].args == (os.getpid(),)
-        return real_popen([sys.executable, "-c",
+        assert "preexec_fn" not in options
+        assert options["start_new_session"] is True
+        assert args[:6] == ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c"]
+        assert args[8] == str(os.getpid())
+        assert child_command(args)[0] == "qemu-system-x86_64"
+        return real_popen([*args[:9], sys.executable, "-c",
                           f"import os; os.write(1, {envelope.getvalue()!r})"], **options)
 
     with tempfile.TemporaryDirectory() as temporary:
@@ -3281,6 +3469,9 @@ if __name__ == "__main__":
         "--transport": TransportCases.tests, "--ownership": OwnershipCases.tests,
         "--process": ProcessCases.tests,
         "--helper-process": PreparationHelperCases.tests,
+        "--lost-child": (test_lost_popen_result_is_reaped_before_terminal_receipts,),
+        "--qemu-memory": (test_qemu_main_path_memory_faults_fail_closed,),
+        "--disk-memory": (test_disk_helper_main_path_memory_faults_fail_closed,),
         "--shutdown": ShutdownCases.tests, "--receipts": ReceiptCases.tests,
         "--pair-and-admission": PairAndAdmissionCases.tests,
         "--startup": (test_hostile_startup_does_not_change_guest_outcome,

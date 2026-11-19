@@ -1,4 +1,11 @@
-"""Local image profile admission and independent artifact acceptance."""
+"""Local image profile admission and independent artifact acceptance.
+
+Recoverable OS/pipe faults and diagnostic exceptions cannot change the
+verdict. A required operation that cannot complete fails closed. The exit
+transaction can retry a one-shot commit allocation fault and has pre-encoded
+unavailable diagnostics. Other main-path MemoryError failures are fatal to
+the attempt, with teardown and no successful outcome.
+"""
 
 from __future__ import annotations
 
@@ -14,13 +21,13 @@ import tarfile
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
-from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
+from image_lifecycle import ImageJob, ReceiptError, create_directory, receipt, reconcile, report_error, sync_directory
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
 from vm_process import Cancelled, Cancellation, run
 
-IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
+IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, MemoryError, AdmissionError,
                 StreamError, subprocess.SubprocessError, tarfile.TarError)
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -204,27 +211,34 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     probe = args.image_mode == "probe"
     path = (build.directory if probe else build.directory.parent) / "exit.json"
     cancellation.exit_receipt = path
+    retry_commit = probe
     while True:
-        if cancellation.requested:
-            error = Cancelled("runner cancelled")
-        status = int(error is not None)
-        row = build.state | {"launcher_exit": status} if probe else {
-            "schema": 1, "identity": build.state["identity"], "launcher_exit": status,
-            "stop_reason": jobs[-1].state["stop_reason"],
-        }
-        if error is not None:
-            row["stop_reason"] = "cancelled" if isinstance(error, Cancelled) else type(error).__name__
-        if not probe:
-            row["pair_complete"] = not status
-            if not status:
-                row["acceptance_sha256"] = accepted_sha
         try:
+            if cancellation.requested:
+                error = Cancelled("runner cancelled")
+            status = int(error is not None)
+            row = build.state | {"launcher_exit": status} if probe else {
+                "schema": 1, "identity": build.state["identity"], "launcher_exit": status,
+                "stop_reason": jobs[-1].state["stop_reason"],
+            }
+            if error is not None:
+                row["stop_reason"] = "cancelled" if isinstance(error, Cancelled) else type(error).__name__
+            if not probe:
+                row["pair_complete"] = not status
+                if not status:
+                    row["acceptance_sha256"] = accepted_sha
             # Rename commits the receipt that the CLI will read to determine its status.
             receipt(path, row, outcome=cancellation, diagnostic=error, probe=build if probe else None)
         except Cancelled as exc:
             error = exc
             continue
-        except OSError as exc:
+        except (OSError, MemoryError) as exc:
+            allocation_fault = isinstance(exc, MemoryError) or (
+                isinstance(exc, ReceiptError) and isinstance(exc.__cause__, MemoryError))
+            # The receipt transaction absorbs step failures after its rename.
+            if retry_commit and allocation_fault:
+                retry_commit = False
+                continue
             report_error(exc)
             return 1
         return row["launcher_exit"]

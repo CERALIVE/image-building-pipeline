@@ -21,7 +21,8 @@ import time
 import yaml
 from image_lifecycle import job_disk, report_error
 from vm_process import (
-    STOP_SIGNALS, Cancellation, ChildSetupError, close_transport, die_with_parent, read_check_script, register_close, run,
+    STOP_SIGNALS, Cancellation, ChildContainmentError, ChildSetupError, close_transport, die_with_parent,
+    read_check_script, register_close, run,
     spawn_owned, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
@@ -129,6 +130,8 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                     image_job.capture(process, seconds)
                 else:
                     wait(process, time.monotonic() + seconds, cancellation)
+        except ChildContainmentError:
+            raise
         except (MemoryError, OSError) as error:
             if setup_complete:
                 raise

@@ -12,11 +12,13 @@ from pathlib import Path
 import selectors
 import signal
 import subprocess
+from threading import get_native_id
 import time
 from typing import Callable
 
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
+LOST_CHILD_SECONDS = 2
 CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 CHILD_CWD = "/"
@@ -75,6 +77,10 @@ class ChildSetupError(RuntimeError):
     """A spawned child could not be registered for I/O."""
 
 
+class ChildContainmentError(OSError):
+    """The launcher cannot verify that a child has stopped."""
+
+
 class Cancellation:
     """A one-way flag set by the main thread's signal handler."""
 
@@ -118,13 +124,47 @@ def child_environment(*, registration: bool = False) -> dict[str, str]:
 
 
 def die_with_parent(parent: int) -> None:
-    """Keep the existing launcher and guest parent-death containment."""
+    """Bind the launcher to its lock holder."""
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, signal.SIGKILL, 0, 0, 0):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
     if os.getppid() != parent:
         os.kill(os.getpid(), signal.SIGKILL)
+
+
+def retire_lost_child(children: Path, on_reaped: Callable[[int], None] | None) -> None:
+    """Kill and collect a child created on the previously empty spawning thread."""
+    deadline = time.monotonic() + LOST_CHILD_SECONDS
+    try:
+        for child in children.read_text().split():
+            pid = int(child)
+            try:
+                if os.getsid(pid) == pid and os.getpgid(pid) == pid:
+                    os.killpg(pid, signal.SIGKILL)
+                else:
+                    # The child may have forked but not reached setsid yet.
+                    os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # Still collect a zombie if the wait status is available.
+            while True:
+                try:
+                    waited, status = os.waitpid(pid, os.WNOHANG)
+                except InterruptedError:
+                    waited = 0
+                except ChildProcessError:
+                    if child not in children.read_text().split():
+                        break
+                    raise
+                if waited:
+                    if on_reaped is not None and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+                        on_reaped(os.waitstatus_to_exitcode(status))
+                    break
+                if time.monotonic() >= deadline:
+                    raise ChildContainmentError(f"child {pid} did not stop within {LOST_CHILD_SECONDS}s")
+                time.sleep(0.01)
+    except (OSError, MemoryError) as error:
+        raise ChildContainmentError("cannot verify failed-spawn child is gone") from error
 
 
 @contextmanager
@@ -156,16 +196,34 @@ def spawn_owned(args: list[str], *, cancellation: Cancellation, registration: bo
                     handle_registered = True
                 except (OSError, MemoryError):
                     on_loss()
-            setup = partial(die_with_parent, os.getpid())
+            parent = os.getpid()
+            # The shell checks for parent death before setpriv could arm the
+            # signal. Both exec in place, so there is only one child and PID.
+            command = ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
+                       'test "$PPID" = "$1" || exit 125; shift; exec "$@"',
+                       "runner-child", str(parent), *args]
             environment = child_environment(registration=registration)
+            children = Path(f"/proc/self/task/{get_native_id()}/children")
             check_spawn_signals(cancellation)
-            process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD,
-                                       preexec_fn=setup, env=environment, **options)
+            if children.read_text().strip():
+                raise ChildSetupError("spawning thread already owns a child")
+            try:
+                process = subprocess.Popen(command, restore_signals=True, cwd=CHILD_CWD,
+                                           start_new_session=True, env=environment, **options)
+            except (MemoryError, OSError, subprocess.SubprocessError) as error:
+                try:
+                    retire_lost_child(children, on_reaped)
+                finally:
+                    # Release any parent-side pipes retained by the failed constructor.
+                    error.with_traceback(None)
+                raise
             if handle_registered:
                 try:
                     handle.__init__("/dev/null", "rb", opener=pidfd_opener)
                 except (OSError, MemoryError):
                     on_loss()
+        except ChildContainmentError:
+            raise
         except (MemoryError, OSError, subprocess.SubprocessError) as error:
             raise ChildSetupError(f"cannot start child {args[0]}") from error.with_traceback(None)
         yield process
@@ -173,7 +231,11 @@ def spawn_owned(args: list[str], *, cancellation: Cancellation, registration: bo
         try:
             if process is not None:
                 try:
-                    terminate(process, handle, on_reaped)
+                    try:
+                        terminate(process, handle, on_reaped)
+                    except (OSError, MemoryError, ChildStatusError):
+                        retire_lost_child(children, on_reaped)
+                        raise
                 finally:
                     if after_reap is not None:
                         after_reap()
@@ -313,6 +375,8 @@ def run(args: list[str], *, timeout: int, cancellation: Cancellation,
                 except InterruptedError:
                     continue
             wait(process, deadline, cancellation)
+    except ChildContainmentError:
+        raise
     except (MemoryError, OSError) as error:
         if setup_complete:
             raise
