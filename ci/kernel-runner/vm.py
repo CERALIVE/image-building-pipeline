@@ -19,7 +19,8 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import job_disk, report_error
+from image_lifecycle import job_disk, report_error, retire_journal
+from image_stream import retry_io
 from vm_process import (
     STOP_SIGNALS, Cancellation, ChildContainmentError, ChildSetupError, close_transport, die_with_parent,
     read_check_script, register_close, run,
@@ -318,6 +319,7 @@ def exit_launcher() -> None:
             if cancellation.exit_receipt is not None:
                 committed = cancellation.exit_status
                 status = 1 if committed is None else committed
+                retire_journal(cancellation)
                 # Final receipt publication keeps signals blocked through this exit.
                 if committed is not None:
                     verify_exit_receipt(cancellation.exit_receipt, committed)
@@ -334,10 +336,7 @@ def exit_launcher() -> None:
 def verify_exit_receipt(path: Path, committed: int) -> None:
     """Check the committed receipt without granting the read authority over exit."""
     try:
-        try:
-            raw = path.read_bytes()
-        except InterruptedError:
-            raw = path.read_bytes()
+        raw = retry_io(path.read_bytes)
         published = json.loads(raw)["launcher_exit"]
         if type(published) is not int or published != committed:
             raise ValueError("image receipt disagrees with committed launcher_exit")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import errno
 import hashlib
 import json
 import os
@@ -18,6 +19,8 @@ MANIFEST_LIMIT: Final = 65536
 CONTROL_LOG_LIMIT: Final = 8 * 1024**2
 BUILD_LOG_LIMIT: Final = 1024**3 - 16 * 1024**2
 MAGIC: Final = b"CERALIVE_IMAGE_STREAM_V1\n"
+IO_ATTEMPTS: Final = 3
+RETRYABLE_IO: Final = frozenset((errno.EACCES, errno.EPERM, errno.EBUSY, errno.EIO, errno.ENOSPC, errno.EBADF))
 ARTIFACTS: Final = frozenset((
     "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
     "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -31,6 +34,28 @@ ARTIFACTS: Final = frozenset((
 
 class StreamError(Exception):
     """Untrusted stream violates the fixed artifact contract."""
+
+
+def retry_io(operation, *args, recover: bool = False, **kwargs):
+    """Retry safe filesystem operations at most three times including the first call."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            return operation(*args, **kwargs)
+        except OSError as error:
+            if (attempt + 1 == IO_ATTEMPTS or not (
+                    isinstance(error, InterruptedError) or error.errno == errno.EINTR
+                    or recover and error.errno in RETRYABLE_IO)):
+                raise
+
+
+def write_all(destination: BinaryIO, data: bytes) -> None:
+    """Only retry the unwritten bytes of an unbuffered regular file."""
+    remaining = memoryview(data)
+    while remaining:
+        written = retry_io(destination.write, remaining, recover=True)
+        if not written:
+            raise OSError(errno.EIO, "file write made no progress")
+        remaining = remaining[written:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +84,7 @@ class Member:
 def verify_sidecar(path: Path, member: Member) -> None:
     names = {"rootfs.tar": r"[0-9]{8}T[0-9]{6}Z[.]rootfs[.]tar", "boot.scr": r"boot[.]scr"}
     expected = re.escape(member.sha256) + r" [ *]" + names[member.id] + "\n"
-    if not re.fullmatch(expected, path.read_text()):
+    if not re.fullmatch(expected, retry_io(path.read_text, recover=True)):
         raise StreamError("artifact sidecar disagrees with host digest or canonical name")
 
 
@@ -74,7 +99,7 @@ def unique_object(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
 
 
 def read_header(source: BinaryIO) -> Member:
-    line = source.readline(HEADER_LIMIT + 1)
+    line = retry_io(source.readline, HEADER_LIMIT + 1, recover=True)
     if len(line) > HEADER_LIMIT or not line.endswith(b"\n"):
         raise StreamError("missing or oversized record header")
     try:
@@ -91,7 +116,7 @@ def read_header(source: BinaryIO) -> Member:
 
 
 def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
-             checkpoint: Callable[[], None] | None = None) -> int:
+             checkpoint: Callable[[], None] | None = None, *, decoding: bool = False) -> int:
     """Hash while copying exactly the declared length, with bounded memory."""
     digest = hashlib.sha256()
     remaining = member.length
@@ -99,10 +124,15 @@ def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
     while remaining:
         if checkpoint is not None:
             checkpoint()
-        chunk = source.read(min(1024 * 1024, remaining))
+        size = min(1024 * 1024, remaining)
+        chunk = retry_io(source.read, size, recover=True) if decoding else source.read(size)
         if not chunk:
             raise StreamError("truncated artifact")
-        written += destination.write(chunk) or 0
+        if decoding:
+            write_all(destination, chunk)
+            written += len(chunk)
+        else:
+            written += destination.write(chunk) or 0
         digest.update(chunk)
         remaining -= len(chunk)
     if digest.hexdigest() != member.sha256:
@@ -113,7 +143,7 @@ def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
 def decode(source: BinaryIO, directory: Path, expected: Identity,
            checkpoint: Callable[[], None] | None = None) -> tuple[Member, ...]:
     """Decode only fixed IDs into exclusive private files; never extract an archive."""
-    if source.read(len(MAGIC)) != MAGIC:
+    if retry_io(source.read, len(MAGIC), recover=True) != MAGIC:
         raise StreamError("invalid stream version")
     members: list[Member] = []
     seen = set()
@@ -128,7 +158,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
                 raise StreamError("oversized terminal manifest")
             import io
             manifest_bytes = io.BytesIO()
-            transfer(source, manifest_bytes, member)
+            transfer(source, manifest_bytes, member, decoding=True)
             try:
                 manifest = json.loads(manifest_bytes.getvalue(), object_pairs_hook=unique_object)
             except ValueError as exc:
@@ -136,7 +166,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
             if manifest != {"schema": 1, "identity": asdict(expected),
                             "members": [asdict(item) for item in members]}:
                 raise StreamError("terminal manifest identity or inventory mismatch")
-            if not members or source.read(1):
+            if not members or retry_io(source.read, 1, recover=True):
                 raise StreamError("empty stream or trailing bytes")
             return tuple(members)
         if member.id not in ARTIFACTS or member.id in seen:
@@ -152,11 +182,10 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
         if member.id == "rootfs.tar" and member.length > 3_500_000_000:
             raise StreamError("rootfs tar exceeds unchanged size ceiling")
         seen.add(member.id)
-        fd = os.open(directory / member.id, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as output:
-            transfer(source, output, member, checkpoint)
-            output.flush()
-            os.fsync(output.fileno())
+        with retry_io(open, directory / member.id, "xb", buffering=0,
+                      opener=lambda path, flags: os.open(path, flags, 0o600), recover=True) as output:
+            transfer(source, output, member, checkpoint, decoding=True)
+            retry_io(os.fsync, output.fileno(), recover=True)
         members.append(member)
 
 

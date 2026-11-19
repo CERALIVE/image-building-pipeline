@@ -26,7 +26,7 @@ from image_lifecycle import (
 )
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
-from image_stream import Identity, StreamError, decode, verify_sidecar
+from image_stream import Identity, StreamError, decode, retry_io, verify_sidecar
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, MemoryError, AdmissionError,
@@ -75,13 +75,13 @@ def validate_base(base: Path, expected_sha256: str,
 def completed_acceptance(path: Path) -> dict | None:
     """Validate the final marker before consuming a pair's acceptance candidate."""
     try:
-        marker = json.loads((path.parent / "exit.json").read_text())
+        marker = json.loads(retry_io((path.parent / "exit.json").read_text, recover=True))
     except FileNotFoundError:
         return None
     if (marker["schema"] != 1 or type(marker["launcher_exit"]) is not int
             or marker["launcher_exit"] != 0 or marker.get("pair_complete") is not True):
         return None
-    raw = path.read_bytes()
+    raw = retry_io(path.read_bytes, recover=True)
     row = json.loads(raw)
     if (marker["acceptance_sha256"] != hashlib.sha256(raw).hexdigest()
             or marker["identity"] != row["identity"] or row["schema"] != 1
@@ -115,7 +115,7 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
     target = job.directory / "artifacts"
     create_directory(target)
     envelope = job.directory / "stream.partial"
-    with envelope.open("rb") as source:
+    with retry_io(envelope.open, "rb", recover=True) as source:
         members = decode(source, target, job.identity, job.cancellation.check)
     expected = {"verification.json"} if verifier else {
         "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
@@ -127,7 +127,7 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
     if {member.id for member in members} != expected:
         raise StreamError("returned artifact set is incomplete")
     if not verifier:
-        measurement = json.loads((target / "measurement.json").read_text())
+        measurement = json.loads(retry_io((target / "measurement.json").read_text, recover=True))
         stages = measurement["stages"]
         if (measurement["schema"] != 1 or (measurement["purpose"], measurement["build_mode"], measurement["board"],
              measurement["source_commit"], measurement["source_date_epoch"], measurement["input_sha256"])
@@ -155,7 +155,7 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
             {"schema": 1, "identity": asdict(job.identity),
              "members": [asdict(member) for member in members],
              "transport_valid": True, "content_verified": verifier})
-    envelope.unlink()
+    retry_io(envelope.unlink, recover=True)
 
 def execute(base: Path, directory: Path, request: dict, cancellation: Cancellation,
             jobs: list[ImageJob]) -> Path:
@@ -200,7 +200,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         acceptance = measure_image(args, parser, cancellation, jobs)
         if acceptance is not None:
             receipt(*acceptance)
-            accepted_sha = digest_file(acceptance[0])
+            accepted_sha = hashlib.sha256(retry_io(acceptance[0].read_bytes, recover=True)).hexdigest()
     except OSError as exc:
         report_error(exc)
         return 1
@@ -298,7 +298,7 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     artifacts = execute(base, directory / "build", request, cancellation, jobs)
     cancellation.check()
     if probe_result is not None:
-        result = json.loads(probe_result.read_text())
+        result = json.loads(retry_io(probe_result.read_text, recover=True))
         if result != expected_probe:
             raise StreamError("offline probe receipt mismatch")
         return None
@@ -314,12 +314,12 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
-    result = json.loads((verified / "verification.json").read_text())
+    result = json.loads(retry_io((verified / "verification.json").read_text, recover=True))
     if (result["schema"] != 1 or result["verified"] is not True
             or result["build_identity"] != asdict(identity) or result["artifacts"] != inventory
             or {row["slot"] for row in result["slots"]} != {"rootfs_a", "rootfs_b"}):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
-    capsule.unlink()
+    retry_io(capsule.unlink, recover=True)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),
         "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,

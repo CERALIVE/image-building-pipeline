@@ -155,16 +155,29 @@ fields without affecting the verdict. The launcher prepares the exit receipt
 paths and diagnostic fallback bytes before guest launch. A one-shot
 `MemoryError` in probe finalization before rename gets one retry of the same
 outcome. On successful rename the launcher records the committed exit status
-in its preallocated slot. Verification retries an interrupted read once.
-Verification failure is reported without changing the receipt or exit status.
+in its preallocated slot. Verification uses the same bounded retry for
+interrupted reads and reports failure without changing the receipt or exit status.
+Safe filesystem operations retry an interruption at most twice, without
+sleeping. Required reads and writes also retry transient I/O errors at the
+same bound. An unbuffered receipt write resumes at the first unwritten byte.
+A required operation that exhausts its attempts before commit still fails the
+attempt. A final directory sync error after rename is reported without changing
+the committed outcome.
 
 An arbitrary main-path `MemoryError` fails the attempt with a nonzero exit.
 On the tested post-spawn paths the launcher writes teardown, reaps its child,
 closes owned descriptors, and removes the active journal. Teardown uses a
 null `ended_at` if the timestamp cannot be obtained because of an allocation
-failure. If teardown cannot be written after the child and overlay are safely
-released, the launcher still retires the journal and exits nonzero. A failed exit
-receipt may be absent. A success receipt requires both a real successful
+failure. The launcher attempts teardown and publishes `exit.json` before
+retiring the journal. If required teardown publication fails after safe child
+and overlay release, journal retirement still runs and the launcher exits
+nonzero. A failed exit receipt may be absent. Consumers use `exit.json` to
+determine the verdict. A journal that survives bounded unlink attempts is
+reported as `journal_removed=false` on host stderr and leaves the committed
+receipt and exit code intact. The next run checks the recorded PID start
+times and scans for a remaining reference to the overlay inode under the
+same admission lock before recording reconciliation and removing the stale
+journal. A success receipt requires both a real successful
 guest exit and independent artifact validation. Persistent allocation
 failure and kernel OOM termination are outside cooperative cleanup. Admission
 failures before an attempt still produce no attempt receipt.

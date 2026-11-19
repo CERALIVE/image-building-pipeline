@@ -186,7 +186,8 @@ def descriptor_snapshot() -> dict[int, tuple[str, int, int]]:
 
 
 def waits_for_guest_ready(mode: str) -> bool:
-    return (not mode.startswith(("fault:", "receipt-step:", "pair:", "readback:", "teardown-memory:", "commit-memory:"))
+    return (not mode.startswith(("fault:", "receipt-step:", "pair:", "readback:", "teardown-memory:",
+                                 "commit-memory:", "tail-io:"))
             and mode not in ("audit-mutation", "startup:success", "startup:failure", "startup:signal",
                              "isolated:validated-helper",
                              *SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *PRESTART_MODES))
@@ -271,12 +272,36 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     fsync = os.fsync
     unlink = pathlib.Path.unlink
     temporary_file = tempfile.TemporaryFile
+    native_open, native_close = os.open, os.close
     directory = root / "returns/fixture/build"
     lost_pid_file = root / "lost-child-pid"
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     teardown_fault = mode.removeprefix("teardown-memory:") if mode.startswith("teardown-memory:") else ""
     commit_fault = mode.removeprefix("commit-memory:") if mode.startswith("commit-memory:") else ""
+    tail_case = mode.removeprefix("tail-io:").split("/") if mode.startswith("tail-io:") else []
+    tail_count = 0
+
+    def tail_fault(point):
+        nonlocal tail_count
+        if not tail_case or point != tail_case[0] or tail_count >= int(tail_case[2]):
+            return
+        tail_count += 1
+        (root / "tail-fault-count").write_text(str(tail_count))
+        if tail_case[1] == "MemoryError":
+            raise MemoryError(point)
+        raise OSError(getattr(errno, tail_case[1]), point)
+
+    def receipt_phase(frame):
+        while frame is not None:
+            transaction = frame.f_locals.get("transaction")
+            if isinstance(transaction, image_lifecycle.Receipt):
+                return {"exit.json": "exit", "teardown.json": "teardown",
+                        "transport-validation.json": "validation"}.get(transaction.path.name)
+            if frame.f_code is image_lifecycle.retire_journal.__code__:
+                return "journal"
+            frame = frame.f_back
+        return None
     pair = mode.startswith("pair:")
     inherited = mode == "inherited"
     startup = mode.removeprefix("startup:") if mode.startswith("startup:") else None
@@ -382,6 +407,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return status
 
     def fixture_read_bytes(path):
+        if path == directory / "exit.json":
+            tail_fault("readback")
         if path == directory / "exit.json" and (mode == "unreadable-exit" or mode.startswith("readback:")):
             mark = root / "readback-injected"
             if mode == "unreadable-exit" or not mark.exists():
@@ -498,7 +525,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         os.kill(os.getpid(), signum)
 
     def fault_at(step: str) -> None:
-        if fault is None or fault[1] != step or (root / "injected").exists():
+        if fault is None or fault[1] != step:
+            return
+        if (root / "injected").exists():
+            if fault[0] == "fail" and step != "journal-unlink":
+                raise OSError(errno.EIO, f"fixture {step}")
             return
         (root / "injected").touch()
         if fault[0] == "fail":
@@ -512,6 +543,16 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def publish(source, destination) -> None:
         nonlocal during, fail_sync
+        if tail_case and tail_case[0].endswith("-temp-unlink"):
+            discarded = {"validation": "transport-validation.json", "teardown": "teardown.json", "exit": "exit.json"}
+            if destination.parent == directory and destination.name == discarded[tail_case[0].split("-")[0]]:
+                raise OSError(errno.ENOSPC, "fixture leaves an uncommitted receipt to clean up")
+        if destination == directory / "exit.json":
+            tail_fault("exit-rename")
+        if destination == directory / "teardown.json":
+            tail_fault("teardown-rename")
+        if destination == directory / "transport-validation.json":
+            tail_fault("validation-rename")
         if destination == directory / "teardown.json":
             fault_at("teardown-rename")
         if pair:
@@ -563,6 +604,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             inject_terminal("rename:published")
 
     def sync(fd):
+        phase = receipt_phase(sys._getframe(1)) if tail_case else None
+        if phase:
+            tail_fault(f"{phase}-{'dir' if os.path.isdir(f'/proc/self/fd/{fd}') else 'file'}-fsync")
         nonlocal fail_sync, terminal_synced
         if startup:
             # Keep receipt publication real without timing host disk flushes in the startup matrix.
@@ -594,9 +638,18 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             (root / "final-sync").touch()
 
     def remove(path, *args, **kwargs):
+        if tail_case and path.name.startswith(".receipt-"):
+            phase = receipt_phase(sys._getframe(1))
+            if phase:
+                tail_fault(f"{phase}-temp-unlink")
         if path == directory / "stream.partial":
             fault_at("stream-unlink")
         if path == root / "returns/active.json":
+            if tail_case and tail_case[0] == "journal-unlink":
+                assert (directory / "exit.json").exists(), "journal unlink ran before exit commit"
+                if tail_case[1] == "ENOENT" and tail_count == 0:
+                    unlink(path, *args, **kwargs)
+                tail_fault("journal-unlink")
             teardown_memory("journal-unlink")
             fault_at("journal-unlink")
         return unlink(path, *args, **kwargs)
@@ -616,6 +669,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return Overlay()
 
     def read_result(path, *args, **kwargs):
+        if path == directory / "artifacts/verification.json":
+            tail_fault("verification-read")
         if mode == "validation" and path == directory / "artifacts/verification.json":
             cancel()
         return read_text(path, *args, **kwargs)
@@ -806,7 +861,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         child_fault = (root / "child-fault").read_text() if (root / "child-fault").exists() else ""
         signal_fault = (root / "signal-fault").read_text() if (root / "signal-fault").exists() else ""
         check_descriptors = (ownership_case.exists() or pidfd_case.exists() or pipe_fault or registration_fault
-                             or child_fault or signal_fault or teardown_fault or commit_fault
+                             or child_fault or signal_fault or teardown_fault or commit_fault or tail_case
                              or mode.startswith("readback:") or mode == "unreadable-exit"
                              or mode in (*BACKUP_SELECTOR_CLOSE_MODES, *READER_CLEANUP_MODES, *PRESTART_MODES))
         if check_descriptors:
@@ -814,7 +869,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 final_fds = descriptor_snapshot()
                 assert initial_fds is not None, "startup did not establish a descriptor baseline"
                 (root / "descriptor-check").write_text(json.dumps([initial_fds, final_fds]))
-                if child_fault or signal_fault or teardown_fault or commit_fault:
+                if child_fault or signal_fault or teardown_fault or commit_fault or tail_case:
                     children = pathlib.Path(f"/proc/self/task/{launcher_pid}/children").read_text().split()
                     (root / "launcher-children").write_text(json.dumps(children))
                 real_exit(status)
@@ -1322,6 +1377,57 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                                 return original(*args, **kwargs)
                     return boundary(on_loss, action, *args, **kwargs)
                 patches.enter_context(patch.object(image_lifecycle, "optional", fault_boundary))
+        if tail_case:
+            def tail_open(path, flags, *args, **kwargs):
+                phase = receipt_phase(sys._getframe(1))
+                if phase:
+                    tail_fault(f"{phase}-{'dir' if flags & os.O_DIRECTORY else 'file'}-open")
+                return native_open(path, flags, *args, **kwargs)
+
+            def tail_close(fd):
+                phase = receipt_phase(sys._getframe(1))
+                directory_fd = os.path.isdir(f"/proc/self/fd/{fd}") if phase else False
+                native_close(fd)
+                if phase and directory_fd:
+                    tail_fault(f"{phase}-dir-close")
+
+            def tail_open_receipt(*args, **kwargs):
+                phase = receipt_phase(sys._getframe(1))
+                file = open(*args, **kwargs)
+                if phase is None:
+                    return file
+
+                class TailFile:
+                    def __getattr__(self, name):
+                        return getattr(file, name)
+
+                    def write(self, data):
+                        tail_fault(f"{phase}-write")
+                        return file.write(data)
+
+                    def flush(self):
+                        tail_fault(f"{phase}-flush")
+                        file.flush()
+
+                    def close(self):
+                        file.close()
+                        tail_fault(f"{phase}-file-close")
+
+                return TailFile()
+
+            def tail_partial(fn, *args, **kwargs):
+                if fn is os.close:
+                    fd_target = os.readlink(f"/proc/self/fd/{args[0]}")
+                    if fd_target == str(directory):
+                        tail_fault("exit-close-allocation")
+                    if fd_target == str(root / "returns"):
+                        tail_fault("journal-close-allocation")
+                return partial(fn, *args, **kwargs)
+
+            patches.enter_context(patch.object(image_lifecycle, "partial", tail_partial))
+            patches.enter_context(patch.object(image_lifecycle, "open", tail_open_receipt, create=True))
+            patches.enter_context(patch.object(os, "open", tail_open))
+            patches.enter_context(patch.object(os, "close", tail_close))
         if teardown_fault:
             wall_time = time.time
             directory_sync = image_lifecycle.sync_directory
@@ -1332,7 +1438,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return wall_time()
 
             def teardown_directory_sync(path):
-                if sys._getframe(1).f_code is ImageJob.__exit__.__code__:
+                if sys._getframe(1).f_code is image_lifecycle.retire_journal.__code__:
                     teardown_memory("journal-sync")
                 return directory_sync(path)
 
@@ -1405,6 +1511,7 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         root = pathlib.Path(tmp)
         child_target = child_fault.partition(":")[0]
         qemu_fault = child_target == "qemu-system-x86_64"
+        boot_fault = qemu_fault and ":boot/" in child_fault
         lost_already_collected = ":lost-already-collected:" in child_fault
         lost_return = ":lost-return:" in child_fault or lost_already_collected
         sweep = ":sweep" in child_fault
@@ -1511,7 +1618,7 @@ def term(_signum, _frame):
         sys.exit(0)
 if mode != "slow":
     signal.signal(signal.SIGTERM, term)
-if {priority_failure!r}:
+if {priority_failure or boot_fault!r}:
     signal.pthread_sigmask(signal.SIG_BLOCK, {{signal.SIGTERM}})
 fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
@@ -1539,7 +1646,7 @@ if {priority_failure!r}:
         os.write(console, payload)
         raise AssertionError("undrained serial write unexpectedly completed")
     term(signal.SIGTERM, None)
-if {(waits_for_guest_ready(mode) or mode == "isolated:exclusive" or qemu_fault) and not (sweep or priority_failure)!r}:
+if {(waits_for_guest_ready(mode) or mode == "isolated:exclusive" or qemu_fault) and not (boot_fault or sweep or priority_failure)!r}:
     with (root / "guest-ready").open("wb", buffering=0) as ready:
         ready.write(b"1")
 if {lost_return and qemu_fault!r}:
@@ -1599,9 +1706,12 @@ if mode in (*{ISOLATION_MODES!r}, "isolated:validated-helper") and mode != "isol
         sent = 0
         while sent < len(frame):
             sent += os.write(1, frame[sent:])
-        if {sweep and qemu_fault!r}:
+        if {qemu_fault and (sweep or boot_fault)!r}:
             with (root / "guest-ready").open("wb", buffering=0) as ready:
                 ready.write(b"1")
+        if {boot_fault!r}:
+            assert signal.sigwait({{signal.SIGTERM}}) == signal.SIGTERM
+            term(signal.SIGTERM, None)
         sys.exit(0)
 if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-timeout:MemoryError"):
     console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
@@ -1663,7 +1773,7 @@ if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-tim
         sys.exit(0)
     os.write(1, b"CERALIVE_IMAGE_STREAM_V1\\n")
 if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(
-        ("fault:", "receipt-step:", "readback:", "teardown-memory:", "commit-memory:")):
+        ("fault:", "receipt-step:", "readback:", "teardown-memory:", "commit-memory:", "tail-io:")):
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
 while True:
@@ -1763,6 +1873,40 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode.startswith("tail-io:"):
+            point, error, count = mode.removeprefix("tail-io:").split("/")
+            marker = directory / "exit.json"
+            required_exhaustion = point in {"verification-read", "exit-file-fsync"} and int(count) == 3
+            required_memory_fault = error == "MemoryError" and (
+                point == "verification-read" or point.startswith(("teardown-", "validation-")))
+            failed = required_exhaustion or required_memory_fault or point.endswith("-temp-unlink")
+            assert launcher.returncode == int(failed), (mode, stderr)
+            row = json.loads(marker.read_text()) if marker.exists() else None
+            if row is not None:
+                assert row["launcher_exit"] == launcher.returncode
+                assert row["qemu_reaped"] and row["qemu_exit"] == 0 and row["stream_bytes"] == 836
+            else:
+                assert failed
+            assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+            assert json.loads((root / "launcher-children").read_text()) == []
+            initial, final = json.loads((root / "descriptor-check").read_text())
+            assert initial == final, (mode, initial, final, stderr)
+            assert not list(root.rglob(".receipt-*"))
+            if point.endswith("-allocation") or point == "baseline":
+                assert not (root / "tail-fault-count").exists(), (mode, stderr)
+            else:
+                assert int((root / "tail-fault-count").read_text()) == int(count), (mode, stderr)
+            active = root / "returns/active.json"
+            if point == "journal-unlink" and int(count) == 3:
+                assert active.exists() and b"journal_removed=false" in stderr
+                reconcile(active.parent)
+                assert (active.parent / "fixture.reconciled.json").exists()
+            assert not active.exists()
+            if row is not None:
+                for key in ("acquired_at", "started_at", "ended_at", "base", "launcher", "qemu",
+                            "overlay_directory", "overlay_inode", "overlay_fd"):
+                    row.pop(key, None)
+            return row
         if sweep:
             initial, final = json.loads((root / "descriptor-check").read_text())
             assert initial == final, (child_fault, initial, final, stderr)
@@ -1850,9 +1994,10 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert exit_row["stop_reason"] == "ChildSetupError", (exit_row, stderr)
             assert teardown["input_descriptor_closed"] and teardown["overlay_descriptor_closed"]
             assert json.loads((root / "leaks").read_text()) == []
-            if mode == "isolated:validated-helper" or child_fault.startswith("qemu-system-x86_64:boot/"):
+            if mode == "isolated:validated-helper" or boot_fault:
                 if mode != "isolated:validated-helper":
                     assert (root / "probe.frame").stat().st_size == 836
+                    assert (root / "term").exists() and exit_row["qemu_exit"] == teardown["qemu_exit"] == 0
                     fields = ("launcher_exit", "stop_reason", "qemu_reaped", "qemu_exit",
                               "input_descriptor_closed", "overlay_descriptor_closed")
                     return {key: exit_row[key] for key in fields}
@@ -1941,7 +2086,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert json.loads(teardown_path.read_text())["qemu_reaped"]
                 if mode == "commit-memory:baseline":
                     return {"points": (root / "commit-points").read_text().splitlines()}
-            elif mode in {"teardown-memory:timestamp", "teardown-memory:journal-unlink"}:
+            elif mode in {"teardown-memory:timestamp", "teardown-memory:journal-unlink",
+                          "teardown-memory:journal-sync"}:
                 assert launcher.returncode == json.loads(exit_path.read_text())["launcher_exit"] == 0, (mode, stderr)
                 row = json.loads(teardown_path.read_text())
                 assert row["qemu_reaped"] and row["qemu_exit"] == 0
@@ -1950,7 +2096,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert launcher.returncode == 1, (mode, stderr)
                 if exit_path.exists():
                     assert json.loads(exit_path.read_text())["launcher_exit"] == 1
-                surviving = {"dir_open", "dir_sync", "dir_close", "temp_cleanup", "log_errors", "journal-sync"}
+                surviving = {"dir_open", "dir_sync", "dir_close", "temp_cleanup", "log_errors"}
                 assert teardown_path.exists() == (mode.removeprefix("teardown-memory:") in surviving), (mode, stderr)
             assert (root / "injected").exists(), (mode, stderr)
             if (root / "launcher-children").exists():
@@ -2039,6 +2185,12 @@ os.execvp(sys.argv[1], sys.argv[1:])
         if mode.startswith("fault:"):
             action, boundary = mode.split(":")[1:]
             assert (root / "injected").is_file(), (mode, stderr)
+            if boundary == "journal-unlink":
+                assert launcher.returncode == 0
+                assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
+                assert not (root / "returns/active.json").exists()
+                assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+                return
             assert launcher.returncode == 1, (mode, stderr)
             marker = directory / "exit.json"
             assert marker.exists() == (action == "term" and boundary != "parent-sync"), mode
@@ -2383,8 +2535,9 @@ def test_post_spawn_faults_reap_each_child_and_close_its_pipes() -> None:
     assert baseline is not None and baseline["launcher_exit"] == 1
     for point in points:
         for error in ("MemoryError", "OSError"):
-            assert cancelled_fixture("isolated:complete",
-                                     child_fault=f"qemu-system-x86_64:boot/{point}:{error}") == baseline
+            fault = f"qemu-system-x86_64:boot/{point}:{error}"
+            outcome = cancelled_fixture("isolated:complete", child_fault=fault)
+            assert outcome == baseline, (fault, outcome, baseline)
 
 
 def test_lost_popen_result_is_reaped_before_terminal_receipts() -> None:
@@ -2701,9 +2854,13 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
                     "(self.ring[self.head:self.head + first] + self.ring[:self.size - first]).decode"}
     assert not (bad := unexpected(tail, memory_calls)), bad
     assert not (bad := unexpected(node_for(StageTail, "optional"), {"on_loss", "operation"})), bad
-    run_calls = {"Cancelled", "digest_file", "int", "isinstance", "measure_image",
+    run_calls = {"Cancelled", "int", "isinstance", "measure_image",
                  "receipt", "report_error", "type"}
-    run_exact = set()
+    run_exact = {
+        "hashlib.sha256(retry_io(acceptance[0].read_bytes, recover=True)).hexdigest()",
+        "hashlib.sha256(retry_io(acceptance[0].read_bytes, recover=True))",
+        "retry_io(acceptance[0].read_bytes, recover=True)",
+    }
     assert not (bad := unexpected(node_for(image_vm, "run_image"), run_calls, run_exact)), bad
 
     mutations = (
@@ -2742,6 +2899,10 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             "subprocess.Popen", "tempfile.TemporaryFile", "self._open_log",
         }
         remaining = Counter(acquisitions)
+        raw_close = Counter({
+            "sync_directory": ("os.close(fd)",),
+            "dir_close": ("os.close(self.directory_fd)",),
+        }.get(tree.body[0].name, ()))
         registration_methods = {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}
         bad = set()
         for node in ast.walk(tree):
@@ -2782,6 +2943,9 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             parent = parents[node]
             if isinstance(parent, ast.Call):
                 if ast.unparse(parent) in stack_closes:
+                    continue
+                if raw_close[ast.unparse(parent)] > 0:
+                    raw_close[ast.unparse(parent)] -= 1
                     continue
                 if (ast.unparse(parent.func) == "close_transport" and parent.args[:1] == [node]
                         or ast.unparse(parent.func) == "register_close" and parent.args[2:3] == [node]):
@@ -2999,6 +3163,42 @@ def test_validated_probe_retries_each_commit_preparation_allocation() -> None:
     print(f"{len(baseline['points'])} post-validation commit statements", flush=True)
 
 
+def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
+    baseline = cancelled_fixture("tail-io:baseline/EINTR/0")
+    assert baseline and baseline["launcher_exit"] == 0 and baseline["stream_bytes"] == 836
+    operations = (
+        "verification-read", "readback", "journal-unlink", "journal-dir-open", "journal-dir-fsync",
+        "journal-dir-close",
+        *(f"{phase}-{operation}" for phase in ("validation", "teardown", "exit") for operation in (
+            "file-open", "write", "flush", "file-fsync", "file-close", "rename",
+            "dir-open", "dir-fsync", "dir-close",
+        )),
+    )
+    for point in operations:
+        for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+            assert cancelled_fixture(f"tail-io:{point}/{error}/1") == baseline, (point, error)
+    for phase in ("validation", "teardown", "exit"):
+        for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+            cancelled_fixture(f"tail-io:{phase}-temp-unlink/{error}/1")
+    for point in ("verification-read", "readback", "exit-write", "exit-file-fsync", "exit-rename",
+                  "exit-dir-fsync", "journal-unlink"):
+        assert cancelled_fixture(f"tail-io:{point}/EINTR/2") == baseline, point
+    for point in ("verification-read", "exit-file-fsync", "exit-dir-fsync", "readback", "journal-unlink"):
+        cancelled_fixture(f"tail-io:{point}/EINTR/3")
+    for error in ("EACCES", "ENOENT", "EBUSY"):
+        assert cancelled_fixture(f"tail-io:journal-unlink/{error}/1") == baseline, error
+    assert cancelled_fixture("tail-io:journal-unlink/EPERM/3") == baseline
+    print(f"{len(operations)} tail syscall sites tested with five one-shot errno values", flush=True)
+
+
+def test_tail_directory_fd_ownership_survives_allocation_faults() -> None:
+    for point in ("exit-close-allocation", "journal-close-allocation", "verification-read", "readback"):
+        cancelled_fixture(f"tail-io:{point}/MemoryError/1")
+    for phase in ("validation", "teardown", "exit", "journal"):
+        for operation in ("dir-open", "dir-fsync", "dir-close"):
+            cancelled_fixture(f"tail-io:{phase}-{operation}/MemoryError/1")
+
+
 def test_receipt_audit_detects_executed_work_outside_step_table() -> None:
     cancelled_fixture("audit-mutation")
 
@@ -3071,7 +3271,7 @@ def test_pair_publication_failure_and_signal_matrix() -> None:
 
                     def inject(event):
                         nonlocal injected
-                        if active_name == target and event == step and not injected:
+                        if active_name == target and event == step and (failure or not injected):
                             injected = True
                             if failure:
                                 raise OSError(errno.EIO, f"fixture {target} {step}")
@@ -3180,7 +3380,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
 
                 def inject(point):
                     nonlocal injected
-                    if step != point or injected:
+                    if step != point or (injected and action != "fail"):
                         return
                     injected = True
                     if action == "fail":
@@ -3647,6 +3847,8 @@ if __name__ == "__main__":
         fixture_launcher(pathlib.Path(sys.argv[2]), sys.argv[3], signal.Signals(int(sys.argv[4])))
         raise AssertionError("launcher did not exit")
     selections = {
+        "--tail-syscalls": (test_tail_syscall_faults_preserve_the_validated_probe,
+                            test_tail_directory_fd_ownership_survives_allocation_faults),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,
                            test_validated_probe_retries_each_commit_preparation_allocation),

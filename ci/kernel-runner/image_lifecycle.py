@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
 import ctypes
+import errno
 from functools import partial
-from io import FileIO
+from io import FileIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -15,12 +16,12 @@ import signal
 import subprocess
 import time
 import tempfile
-from typing import BinaryIO, Callable, TextIO
+from typing import BinaryIO, Callable
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
-from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
+from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError, retry_io, write_all
 from vm_process import (
     POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
     register_close, run, wait,
@@ -71,11 +72,16 @@ def process_identity(pid: int) -> str:
 
 
 def sync_directory(path: Path) -> None:
-    fd = os.open(path, os.O_DIRECTORY)
+    fd = None
     try:
-        os.fsync(fd)
+        fd = retry_io(os.open, path, os.O_DIRECTORY, recover=True)
+        retry_io(os.fsync, fd, recover=True)
     finally:
-        close_transport(partial(os.close, fd))
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError as error:
+                report_error(error)  # Linux releases the number even on EINTR.
 
 
 def create_directory(path: Path, *, parents: bool = False) -> None:
@@ -103,23 +109,23 @@ class Receipt:
         self.outcome = outcome
         self.temporary = temporary or receipt_temporary(path)
         self.status = row["launcher_exit"] if outcome is not None else None
-        self.file: TextIO | BinaryIO | None = None
+        self.file: BinaryIO | None = None
         self.probe = probe
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
 
     def temp_open(self) -> None:
-        self.file = open(
-            self.temporary, "xb" if self.probe is not None else "x",
-            encoding=None if self.probe is not None else "utf-8",
-            opener=lambda name, flags: os.open(Path(name), flags, 0o600))
+        self.file = retry_io(open, self.temporary, "xb", buffering=0, recover=True,
+                             opener=lambda name, flags: os.open(Path(name), flags, 0o600))
 
     def temp_write(self) -> None:
         assert self.file is not None
         if self.probe is None:
-            json.dump(self.row, self.file, sort_keys=True, indent=2)
-            self.file.write("\n")
+            with StringIO() as text:
+                json.dump(self.row, text, sort_keys=True, indent=2)
+                text.write("\n")
+                write_all(self.file, text.getvalue().encode("utf-8"))
             return
         # Encode the authoritative fields before trying optional diagnostics.
         # On an encoding fault, both fragments are already available as bytes.
@@ -129,50 +135,61 @@ class Receipt:
             fields = encode_diagnostic_fields(self.probe.diagnostic_summary())
         except Exception:
             pass
-        self.file.write(outcome)
-        self.file.write(fields)
+        write_all(self.file, outcome)
+        write_all(self.file, fields)
 
     def temp_flush(self) -> None:
         assert self.file is not None
-        self.file.flush()
+        retry_io(self.file.flush, recover=True)
 
     def file_sync(self) -> None:
         assert self.file is not None
-        os.fsync(self.file.fileno())
+        retry_io(os.fsync, self.file.fileno(), recover=True)
 
     def file_close(self) -> None:
         if self.file is not None:
-            close_transport(self.file.close)
+            try:
+                close_transport(self.file.close)
+            except OSError as error:
+                report_error(error)  # The file is unbuffered and sync precedes close.
 
     def temp_cleanup(self) -> None:
         if not self.renamed:
-            self.temporary.unlink(missing_ok=True)
+            retry_io(self.temporary.unlink, missing_ok=True, recover=True)
 
     def mask_block(self) -> None:
         if self.outcome is not None:
             self.outcome.begin_finalization()
 
     def rename(self) -> None:
-        if self.outcome is not None and self.row["stop_reason"] != "cancelled":
-            self.outcome.check()
-            if signal.sigpending().intersection(STOP_SIGNALS):
-                raise Cancelled("runner cancelled")
-        os.replace(self.temporary, self.path)
+        def publish() -> None:
+            if self.outcome is not None and self.row["stop_reason"] != "cancelled":
+                self.outcome.check()
+                if signal.sigpending().intersection(STOP_SIGNALS):
+                    raise Cancelled("runner cancelled")
+            os.replace(self.temporary, self.path)
+
+        retry_io(publish, recover=True)
         if self.outcome is not None:
             self.outcome.exit_status = self.status
         self.renamed = True
 
     def dir_open(self) -> None:
         if self.renamed:
-            self.directory_fd = os.open(self.path.parent, os.O_DIRECTORY)
+            self.directory_fd = retry_io(os.open, self.path.parent, os.O_DIRECTORY, recover=self.outcome is None)
 
     def dir_sync(self) -> None:
         if self.directory_fd is not None:
-            os.fsync(self.directory_fd)
+            retry_io(os.fsync, self.directory_fd, recover=self.outcome is None)
 
     def dir_close(self) -> None:
         if self.directory_fd is not None:
-            close_transport(partial(os.close, self.directory_fd))
+            try:
+                os.close(self.directory_fd)
+            except OSError as error:
+                report_error(error)
+            finally:
+                self.directory_fd = None
 
     def log_errors(self) -> None:
         for error in self.errors:
@@ -194,18 +211,22 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             temporary: Path | None = None) -> None:
     transaction = Receipt(path, row, outcome, diagnostic, probe, temporary)
     failure: BaseException | None = None
-    for action, cleanup in RECEIPT_STEPS:
-        if failure is not None and not cleanup and not transaction.renamed:
-            continue
-        try:
-            action(transaction)
-        except BaseException as error:
-            if failure is None:
-                failure = error
-            if action is Receipt.log_errors:
-                report_error(error)
-            elif not isinstance(error, Cancelled):
-                transaction.errors.append(error)
+    try:
+        for action, cleanup in RECEIPT_STEPS:
+            if failure is not None and not cleanup and not transaction.renamed:
+                continue
+            try:
+                action(transaction)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+                if action is Receipt.log_errors:
+                    report_error(error)
+                elif not isinstance(error, Cancelled):
+                    transaction.errors.append(error)
+    finally:
+        if transaction.directory_fd is not None:
+            transaction.dir_close()
     if failure is not None and (outcome is None or not transaction.renamed):
         if isinstance(failure, Cancelled):
             raise failure
@@ -262,8 +283,31 @@ def reconcile(store: Path) -> None:
         **row, "stop_reason": "previous launcher interrupted; guest cleanup unknown",
         "overlay_descriptors_closed": True, "reconciled_at": time.time(),
     })
-    active.unlink()
+    retry_io(active.unlink, missing_ok=True, recover=True)
     sync_directory(store)
+
+
+def retire_journal(cancellation: Cancellation) -> None:
+    """Retire a safely released journal after the attempt outcome is settled."""
+    journal = cancellation.safe_journal
+    if journal is None:
+        return
+    path, directory = journal
+    try:
+        try:
+            retry_io(path.unlink, missing_ok=True, recover=True)
+        except MemoryError:
+            retry_io(path.unlink, missing_ok=True, recover=True)
+        except OSError as error:
+            if error.errno != errno.ENOENT:
+                raise
+    except (OSError, MemoryError) as error:
+        report_error(f"journal_removed=false: {error}")
+        return
+    try:
+        sync_directory(directory)
+    except (OSError, MemoryError) as error:
+        report_error(f"active journal directory sync unconfirmed: {error}")
 
 
 _PIPE_SLOTS = ctypes.c_int * 2
@@ -340,6 +384,7 @@ class ImageJob:
         self.capture_scope = ExitStack()
         self.active_directory = directory.parents[1]
         self.active = self.active_directory / "active.json"
+        self.journal_paths = self.active, self.active_directory
         self.teardown = directory / "teardown.json"
         self.teardown_temporary = receipt_temporary(self.teardown)
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
@@ -395,11 +440,7 @@ class ImageJob:
             if (not containment_unknown and self.state["overlay_descriptor_closed"]
                     and "overlay_inode" in self.state
                     and ("qemu" not in self.state or self.state["qemu_reaped"])):
-                try:
-                    self.active.unlink(missing_ok=True)
-                except (InterruptedError, MemoryError):
-                    self.active.unlink(missing_ok=True)
-                sync_directory(self.active_directory)
+                self.cancellation.safe_journal = self.journal_paths
 
     def lose_diagnostics(self) -> None:
         self.capture_lost = True
@@ -414,6 +455,7 @@ class ImageJob:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
         inode = os.fstat(disk_fd)
         self.state.update(overlay_fd=disk_fd, overlay_inode=[inode.st_dev, inode.st_ino])
+        self.cancellation.safe_journal = None
         receipt(self.active, {
             "attempt": self.identity.attempt, "launcher": self.state["launcher"],
             "overlay_inode": self.state["overlay_inode"],
@@ -606,5 +648,5 @@ class ImageJob:
 
 def sync_output(output) -> None:
     """Sync output only after the child has been stopped and reaped."""
-    output.flush()
-    os.fsync(output.fileno())
+    retry_io(output.flush, recover=True)
+    retry_io(os.fsync, output.fileno(), recover=True)

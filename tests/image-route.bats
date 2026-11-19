@@ -110,6 +110,12 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image launcher retries tail I/O and releases owned directory descriptors" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --tail-syscalls
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image profile pair publication and admission preserve lifecycle guarantees" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --pair-and-admission
   printf '%s\n' "$output"
