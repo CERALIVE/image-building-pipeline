@@ -77,6 +77,10 @@ READER_CLEANUP_MODES = tuple(
 STDERR_FLOOD_MODES = tuple(f"isolated:sink-{size}-{case}"
                           for size in ("small", "large") for case in ("baseline", "flood", "fault"))
 UNREGISTER_MODES = ("isolated:unregister-once:OSError", "isolated:unregister-always:OSError")
+CLOSE_FAULTS = [(phase, error) for phase in ("before", "after") for error in ("MemoryError", "OSError")]
+BACKUP_SELECTOR_CLOSE_MODES = tuple(
+    f"isolated:backup-selector-close-{phase}:{error}" for phase, error in CLOSE_FAULTS
+)
 PRESTART_MODES = tuple(
     f"prestart:{step}:{error}"
     for step in ("pipe", "stream", "console", "console-after-register", "artifact-selector")
@@ -88,6 +92,7 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                    "isolated:summary-timeout:MemoryError", "isolated:fallback:MemoryError",
                    "isolated:read-dispatch:MemoryError", "isolated:unregister:OSError",
                    *UNREGISTER_MODES,
+                   *BACKUP_SELECTOR_CLOSE_MODES,
                    *READER_CLEANUP_MODES,
                    *STDERR_FLOOD_MODES,
                    "isolated:encode-empty:MemoryError", "isolated:encode-tail:MemoryError",
@@ -589,6 +594,43 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
+        ownership_case = root / "ownership-case"
+        if ownership_case.exists():
+            selected, phase, kind = json.loads(ownership_case.read_text())
+            close_transport = image_lifecycle.close_transport
+            inventory = []
+
+            def inspect_release(release, on_loss=None, attempt=None):
+                owner = getattr(release, "__self__", None)
+                try:
+                    fd = owner.fileno() if on_loss is not None and owner is not None else None
+                except ValueError:
+                    fd = None  # This owner was already closed.
+                if fd is None:
+                    return close_transport(release, on_loss, attempt)
+                site = sys._getframe(1).f_code.co_name
+                name = os.readlink(f"/proc/self/fd/{fd}")
+                if name.startswith(("pipe:", "anon_inode:")):
+                    name = name.split(":", 1)[0]
+                else:
+                    name = pathlib.Path(name).name
+                index = len(inventory)
+                inventory.append([site, name])
+                (root / "ownership-inventory").write_text(json.dumps(inventory))
+                if index != selected:
+                    return close_transport(release, on_loss, attempt)
+
+                def fail_close():
+                    if phase == "after":
+                        (attempt or release)()
+                    (root / "diag-injected").touch()
+                    raise DIAGNOSTIC_ERRORS[kind]("fixture transport close")
+
+                close_transport(release, on_loss, fail_close)
+                assert not pathlib.Path(f"/proc/self/fd/{fd}").exists(), (site, name, phase, kind)
+
+            patches.enter_context(patch.object(image_lifecycle, "close_transport", inspect_release))
+            patches.enter_context(patch.object(vm, "close_transport", inspect_release))
         if mode in STDERR_FLOOD_MODES:
             stderr_fd = None
             console_fd = None
@@ -679,6 +721,21 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     return reader.__get__(job, ImageJob)
 
                 patches.enter_context(patch.object(ImageJob, "read_console", property(lookup_reader)))
+            elif operation.startswith("backup-selector-close-"):
+                close = selectors.EpollSelector.close
+
+                def fail_backup_close(selector):
+                    if (directory / "artifacts/verification.json").exists() and {
+                        key.data for key in selector.get_map().values()
+                    } == {"stream"}:
+                        if operation.endswith("-before"):
+                            diagnostic_failure()
+                        close(selector)
+                        diagnostic_failure()
+                        return
+                    close(selector)
+
+                patches.enter_context(patch.object(selectors.EpollSelector, "close", fail_backup_close))
             elif operation.startswith("unregister"):
                 unregister = selectors.EpollSelector.unregister
                 attempts = []
@@ -751,6 +808,17 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 inject = property(lambda _: diagnostic_failure()) if operation == "fallback" else (
                     lambda *_: diagnostic_failure())
                 patches.enter_context(patch.object(owner, method, inject))
+            elif operation == "close":
+                boundary = image_lifecycle.close_transport
+
+                def fail_after_close(release, on_loss=None, attempt=None):
+                    def close_then_fail():
+                        (attempt or release)()
+                        diagnostic_failure()
+
+                    return boundary(release, on_loss, close_then_fail if on_loss else attempt)
+
+                patches.enter_context(patch.object(image_lifecycle, "close_transport", fail_after_close))
             else:
                 boundary = image_lifecycle.optional
                 def fault_boundary(on_loss, action, *args, **kwargs):
@@ -808,9 +876,12 @@ class FixturePolicy:
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
                       blocked: tuple[signal.Signals, ...] = (),
                       ignored: tuple[signal.Signals, ...] = (),
-                      entry_setup: str | None = None, full_stderr: bool = False) -> dict | None:
+                      entry_setup: str | None = None, full_stderr: bool = False,
+                      ownership_case: tuple[int, str, str] | None = None) -> dict | None:
     with tempfile.TemporaryDirectory() as tmp, ExitStack() as launch_io:
         root = pathlib.Path(tmp)
+        if ownership_case is not None:
+            (root / "ownership-case").write_text(json.dumps(ownership_case))
         capsule = root / "capsule"
         if mode.startswith("pair:"):
             with tarfile.open(capsule, "w") as archive:
@@ -1269,7 +1340,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
             )
             record, teardown = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
             assert record["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
-            complete = operation == "complete" or (mode in STDERR_FLOOD_MODES and not mode.endswith("-fault"))
+            close_injected = ownership_case is not None and ownership_case[0] >= 0
+            complete = not close_injected and (
+                operation == "complete" or (mode in STDERR_FLOOD_MODES and not mode.endswith("-fault")))
             assert record["capture_lost"] is (not complete), (mode, record, stderr.decode())
             assert record["sequence_complete"] is complete
             for row in (record, teardown):
@@ -1287,6 +1360,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert (directory / "artifacts/verification.json").read_bytes() == probe_body
             if mode.count(":") == 2:
                 assert (root / "diag-injected").exists(), mode
+            if close_injected:
+                assert (root / "diag-injected").is_file(), ownership_case
             if mode in UNREGISTER_MODES:
                 first, retry = json.loads((root / "unregister-attempts").read_text())
                 assert retry - first >= image_lifecycle.POLL_SECONDS, (first, retry)
@@ -1317,7 +1392,10 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         "console_tail_truncated", "control_bytes_received", "launcher", "qemu", "base",
                         "overlay_directory", "overlay_fd", "overlay_inode", "acquired_at",
                         "started_at", "ended_at", "qemu_priority"}
-            return {key: value for key, value in record.items() if key not in excluded}
+            stable = {key: value for key, value in record.items() if key not in excluded}
+            if ownership_case is not None:
+                stable["close_inventory"] = json.loads((root / "ownership-inventory").read_text())
+            return stable
         if mode in STAGE_MODES:
             stalled = mode in {"stages:timeout", "stages:before-header", "stages:blocked-header"}
             logging_error = mode == "stages:logging-error"
@@ -1438,7 +1516,8 @@ def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_t
 def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> None:
     baseline = cancelled_fixture("isolated:baseline")
     for mode in ISOLATION_MODES[1:]:
-        if mode in (*STDERR_FLOOD_MODES, *READER_CLEANUP_MODES, *UNREGISTER_MODES):
+        if mode in (*STDERR_FLOOD_MODES, *READER_CLEANUP_MODES, *UNREGISTER_MODES,
+                    *BACKUP_SELECTOR_CLOSE_MODES):
             continue
         result = cancelled_fixture(mode)
         if mode.split(":")[1] not in {"dropped", "summary-timeout"}:
@@ -1455,6 +1534,23 @@ def test_failed_console_unregister_does_not_spin_or_change_probe_result() -> Non
     baseline = cancelled_fixture("isolated:complete")
     for mode in UNREGISTER_MODES:
         assert cancelled_fixture(mode) == baseline, mode
+
+
+def test_backup_selector_close_faults_preserve_the_committed_probe() -> None:
+    baseline = cancelled_fixture("isolated:complete")
+    for mode in BACKUP_SELECTOR_CLOSE_MODES:
+        assert cancelled_fixture(mode) == baseline, mode
+
+
+def test_all_probe_transport_owner_close_faults_preserve_the_committed_probe() -> None:
+    baseline = cancelled_fixture("isolated:complete", ownership_case=(-1, "", ""))
+    assert baseline is not None
+    inventory = baseline["close_inventory"]
+    assert len(inventory) == 9, inventory
+    for index, (site, resource) in enumerate(inventory):
+        for phase, error in CLOSE_FAULTS:
+            row = cancelled_fixture("isolated:complete", ownership_case=(index, phase, error))
+            assert row == baseline, (site, resource, phase, error, row)
 
 
 def test_full_host_stderr_does_not_block_exit_after_probe_timeout() -> None:
@@ -1653,14 +1749,14 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         "files[name].write(chunk)", "self.read_console(event.fd)",
         "events.unregister(event.fileobj)", "events.unregister(event.fileobj)",
         "self.probe_events.unregister(self.console_read)",
-        "self.drain(events)", "optional(lose, self.close_console_writer)",
+        "self.drain(events)", "close_transport(self.console_writer.close, on_loss)",
         "os.read(event.fd, 1024 * 1024)",
         "events.select(timeout=min(POLL_SECONDS, end - now))",
-        "local.enter_context(selectors.DefaultSelector())", "selectors.DefaultSelector()",
-        "self.register_measure_transport(events, process)", "self.close_console_writer()",
+        "local.callback(close_transport, events.close)", "selectors.DefaultSelector()",
+        "self.register_measure_transport(events, process)",
         "self.outputs.callback(sync_output, output)", "overlay.stat()",
         "self._open_log(self.directory / (name + '.partial'))",
-        "self.outputs.enter_context(self._open_log(self.directory / (name + '.partial')))",
+        "self.outputs.callback(close_transport, output.close, on_loss)",
         "process_identity(process.pid)", "process_priority(process.pid, self.cancellation)",
         "receipt(self.directory / 'started.json', self.state)",
         "receipt(self.active, {'attempt': self.identity.attempt, 'launcher': self.state['launcher'], "
@@ -1676,9 +1772,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
          {"self.read_console(key.fd)"}),
         ("diagnostic_summary", {"tail.text"}, set()),
         ("lose_diagnostics", set(), set()),
-        ("_close_console", {"getattr", "setattr"},
-         {"optional(self.lose_diagnostics, os.close, fd)", "os.close(fd)"}),
-        ("close_console_reader", set(), {"self.probe_console_reader.close()"}),
+        ("close_console_reader", set(), {"self.release_console_reader()"}),
     )
     for name, calls, exact in helpers:
         assert not (bad := unexpected(node_for(ImageJob, name), calls, exact)), (name, bad)
@@ -1717,6 +1811,57 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
     private_summary = node_for(ImageJob, "diagnostic_summary")
     private_summary.body.insert(0, ast.parse("tail.flush()").body[0])
     assert unexpected(private_summary, {"tail.text"})
+
+
+def test_live_and_teardown_closes_go_through_transport_guard() -> None:
+    def unguarded(tree):
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        stack_closes = {"self.inputs.close()", "job.outputs.close()", "writers.close()"}
+        bad = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr != "close":
+                continue
+            parent = parents[node]
+            if isinstance(parent, ast.Call):
+                if ast.unparse(parent) in stack_closes:
+                    continue
+                if (ast.unparse(parent.func) == "close_transport" and parent.args[:1] == [node]
+                        or ast.unparse(parent.func).endswith(".callback")
+                        and len(parent.args) >= 2
+                        and ast.unparse(parent.args[0]) == "close_transport" and parent.args[1] is node):
+                    continue
+                if ast.unparse(parent.func) == "partial" and ast.unparse(parent) in {
+                    "partial(os.close, fd)", "partial(os.close, self.directory_fd)",
+                    "partial(os.close, reader)", "partial(os.close, writer)",
+                }:
+                    ancestor = parents[parent]
+                    if isinstance(ancestor, ast.IfExp):
+                        ancestor = parents[ancestor]
+                    if isinstance(ancestor, ast.Call) and ast.unparse(ancestor.func) == "close_transport":
+                        continue
+            if isinstance(parent, ast.IfExp):
+                use = parents[parent]
+                if isinstance(use, ast.Call) and ast.unparse(use.func) == "close_transport":
+                    continue
+            if isinstance(parent, ast.Assign) and ast.unparse(parent) == (
+                    "self.release_console_reader = self.console_reader.close"):
+                continue
+            bad.add(ast.unparse(node))
+        return bad
+
+    for fn in (ImageJob.__init__, ImageJob.__exit__, ImageJob.prepare_probe_transport,
+               ImageJob.capture, ImageJob.close_console_reader, image_lifecycle.pipe_files,
+               image_lifecycle.job_disk, image_lifecycle.report_error, image_lifecycle.sync_directory,
+               image_lifecycle.Receipt.file_close, image_lifecycle.Receipt.dir_close,
+               vm.boot, image_vm.execute):
+        source = inspect.getsource(fn)
+        from textwrap import dedent
+        private = ast.parse(dedent(source))
+        assert not (bad := unguarded(private)), (fn.__qualname__, bad)
+        for mutation in ("selector.close()", "os.close(fd)", "file.close()"):
+            private.body[-1].body.insert(0, ast.parse(mutation).body[0])
+            assert unguarded(private), (fn.__qualname__, mutation)
+            private.body[-1].body.pop(0)
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:

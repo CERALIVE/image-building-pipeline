@@ -9,6 +9,7 @@ import ctypes
 from contextlib import ExitStack
 from functools import partial
 import hashlib
+from io import FileIO
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import job_disk, report_error
+from image_lifecycle import close_transport, job_disk, report_error
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
     child_pipes, read_check_script, run, terminate, wait,
@@ -53,7 +54,13 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
     cancellation.check()
     fd = os.memfd_create("ceralive-job", 0)
     with ExitStack() as startup:
-        startup.callback(os.close, fd)
+        try:
+            config = FileIO(fd, "wb")
+        except (OSError, MemoryError):
+            close_transport(partial(os.close, fd))
+            raise
+        on_loss = image_job.lose_diagnostics if image_job and image_job.probe else None
+        startup.callback(close_transport, config.close, on_loss)
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
         serial = "stdio"

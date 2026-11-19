@@ -108,11 +108,11 @@ memory ring, discards ordinary console text and evicts the oldest complete
 stage lines when full. A console read error ends marker capture and marks it
 lost. If serial unregister fails, capture switches to a pre-registered
 artifact-only selector. The launcher can retry serial removal once after at
-least one second while continuing to poll for artifacts. The probe's serial
-cleanup is best effort. A reader callback failure
-marks capture lost and the descriptor owner still closes the reader if the
-callback failed before close. Artifact teardown, active-journal removal,
-and the exit receipt proceed independently of the serial callback.
+least one second while continuing to poll for artifacts. Both probe selectors
+and the live transport files have explicit owners. One guarded close path
+records capture loss if a probe close callback fails and gives the same
+idempotent owner another chance to release the resource. Successful stream
+flush and sync, required validation, and receipt publication remain strict.
 
 The guest flushes and closes the artifact port before attempting
 `CERALIVE_JOB_DONE`. The image wrapper gives that write 250 ms and requests

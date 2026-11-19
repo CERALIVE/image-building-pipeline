@@ -14,7 +14,7 @@ import signal
 import subprocess
 import time
 import tempfile
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, Callable, TextIO
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
@@ -58,7 +58,7 @@ def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = Non
             pass_fds=(disk_fd,), preexec_fn=partial(die_with_parent, os.getpid()), timeout=180)
         yield overlay, disk_fd
     finally:
-        overlay_file.close()
+        close_transport(overlay_file.close)
         if image_job:
             image_job.state["overlay_descriptor_closed"] = True
 
@@ -72,7 +72,7 @@ def sync_directory(path: Path) -> None:
     try:
         os.fsync(fd)
     finally:
-        os.close(fd)
+        close_transport(partial(os.close, fd))
 
 
 def create_directory(path: Path, *, parents: bool = False) -> None:
@@ -133,7 +133,7 @@ class Receipt:
 
     def file_close(self) -> None:
         if self.file is not None:
-            self.file.close()
+            close_transport(self.file.close)
 
     def temp_cleanup(self) -> None:
         if not self.renamed:
@@ -161,7 +161,7 @@ class Receipt:
 
     def dir_close(self) -> None:
         if self.directory_fd is not None:
-            os.close(self.directory_fd)
+            close_transport(partial(os.close, self.directory_fd))
 
     def log_errors(self) -> None:
         for error in self.errors:
@@ -205,11 +205,12 @@ def report_error(error: BaseException | str) -> None:
     try:
         message = f"kernel runner: {error}\n".encode(errors="backslashreplace")
         # Reopen so setting nonblocking doesn't change the caller's descriptor.
-        fd = os.open("/proc/self/fd/2", os.O_WRONLY | os.O_NONBLOCK | os.O_APPEND | os.O_NOCTTY)
+        sink = FileIO("/proc/self/fd/2", "ab",
+                      opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK | os.O_NOCTTY))
         try:
-            os.write(fd, message[:4096])
+            sink.write(message[:4096])
         finally:
-            os.close(fd)
+            close_transport(sink.close)
     except BaseException:
         return
 
@@ -253,6 +254,33 @@ def reconcile(store: Path) -> None:
     sync_directory(store)
 
 
+def close_transport(release: Callable[[], None], on_loss: Callable[[], None] | None = None,
+                    attempt: Callable[[], None] | None = None) -> None:
+    """Isolate optional close failures and give an idempotent owner one chance to release."""
+    try:
+        (attempt or release)()
+    except Exception:
+        if on_loss is None:
+            raise
+        on_loss()
+        optional(on_loss, release)
+
+
+def pipe_files(flags: int) -> tuple[FileIO, FileIO]:
+    """Transfer both raw pipe ends to idempotent owners before registering them."""
+    reader, writer = os.pipe2(flags)
+    source = None
+    try:
+        source = FileIO(reader, "rb")
+        return source, FileIO(writer, "wb")
+    except (OSError, MemoryError):
+        try:
+            close_transport(source.close if source is not None else partial(os.close, reader))
+        finally:
+            close_transport(partial(os.close, writer))
+        raise
+
+
 class ImageJob:
     """Mutable attempt journal and private descriptor ownership for one guest."""
 
@@ -262,7 +290,6 @@ class ImageJob:
         self.identity = identity
         self.cancellation = cancellation or Cancellation()
         self.probe = probe
-        self.console_read = self.console_write = -1
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
@@ -281,22 +308,16 @@ class ImageJob:
         self.probe_events: selectors.BaseSelector | None = None
         self.probe_artifact_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
-            self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
-            inputs.callback(os.close, self.capsule_fd)
-            self.console_read, self.console_write = os.pipe2(os.O_NONBLOCK) if probe else os.pipe()
-            if probe:
-                inputs.callback(optional, self.lose_diagnostics, self.close_console_writer)
-                try:
-                    self.probe_console_reader = FileIO(self.console_read, "rb")
-                except (MemoryError, OSError):
-                    optional(self.lose_diagnostics, os.close, self.console_read)
-                    raise
-                # The same owner closes the fd if the optional callback fails at entry.
-                inputs.callback(optional, self.lose_diagnostics, self.probe_console_reader.close)
-                inputs.callback(optional, self.lose_diagnostics, self.close_console_reader)
-            else:
-                inputs.callback(self._close_console, "console_read")
-                inputs.callback(self.close_console_writer)
+            on_loss = self.lose_diagnostics if probe else None
+            capsule_file = FileIO(capsule, "rb", opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW))
+            inputs.callback(close_transport, capsule_file.close, on_loss)
+            self.capsule_fd = capsule_file.fileno()
+            self.console_reader, self.console_writer = pipe_files(os.O_CLOEXEC | (os.O_NONBLOCK if probe else 0))
+            self.release_console_reader = self.console_reader.close
+            inputs.callback(close_transport, self.release_console_reader, on_loss, self.close_console_reader)
+            inputs.callback(close_transport, self.console_writer.close, on_loss)
+            self.console_read = self.console_reader.fileno()
+            self.console_write = self.console_writer.fileno()
             self.inputs = inputs.pop_all()
 
     def __enter__(self) -> ImageJob:
@@ -319,20 +340,8 @@ class ImageJob:
     def lose_diagnostics(self) -> None:
         self.capture_lost = True
 
-    def _close_console(self, end: str) -> None:
-        fd = getattr(self, end)
-        if fd >= 0:
-            setattr(self, end, -1)
-            if self.probe:
-                optional(self.lose_diagnostics, os.close, fd)
-                return
-            os.close(fd)
-
     def close_console_reader(self) -> None:
-        self.probe_console_reader.close()
-
-    def close_console_writer(self) -> None:
-        self._close_console("console_write")
+        self.release_console_reader()
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
@@ -345,12 +354,7 @@ class ImageJob:
 
     @staticmethod
     def _open_log(path: Path):
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            return os.fdopen(fd, "wb")
-        except Exception:
-            os.close(fd)
-            raise
+        return open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600))
 
     def diagnostic_summary(self) -> dict:
         tail = self.stage_tail
@@ -368,14 +372,17 @@ class ImageJob:
     def prepare_probe_transport(self, writers: ExitStack) -> int:
         """Register the artifact and serial streams before guest startup."""
         try:
-            events = self.inputs.enter_context(selectors.DefaultSelector())
-            stream_read, stream_write = os.pipe2(os.O_CLOEXEC)
-            self.inputs.callback(os.close, stream_read)
-            writers.callback(os.close, stream_write)
+            events = selectors.DefaultSelector()
+            self.inputs.callback(close_transport, events.close, self.lose_diagnostics)
+            stream_reader, stream_writer = pipe_files(os.O_CLOEXEC)
+            self.inputs.callback(close_transport, stream_reader.close, self.lose_diagnostics)
+            writers.callback(close_transport, stream_writer.close, self.lose_diagnostics)
+            stream_read = stream_reader.fileno()
             for name, fd in (("stream", stream_read), ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
             # A stuck serial registration must not wake the artifact poll.
-            artifact_events = self.inputs.enter_context(selectors.DefaultSelector())
+            artifact_events = selectors.DefaultSelector()
+            self.inputs.callback(close_transport, artifact_events.close, self.lose_diagnostics)
             artifact_events.register(stream_read, selectors.EVENT_READ, "stream")
             self.probe_events = events
             self.probe_artifact_events = artifact_events
@@ -383,7 +390,7 @@ class ImageJob:
         except Exception as error:
             # The pre-commit OSError path cannot publish an outcome for this setup failure.
             raise OSError("probe transport setup failed: " + str(error)) from error
-        return stream_write
+        return stream_writer.fileno()
 
     def read_console(self, fd: int) -> bool:
         """Consume one nonblocking serial read and report EOF."""
@@ -423,11 +430,8 @@ class ImageJob:
             "attempt": self.identity.attempt, "launcher": self.state["launcher"],
             "qemu": self.state["qemu"], "overlay_inode": self.state["overlay_inode"],
         })
-        lose = self.lose_diagnostics
-        if self.probe:
-            optional(lose, self.close_console_writer)
-        else:
-            self.close_console_writer()
+        on_loss = self.lose_diagnostics if self.probe else None
+        close_transport(self.console_writer.close, on_loss)
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         console_retry_at = None
@@ -435,12 +439,14 @@ class ImageJob:
         with ExitStack() as local:
             events = self.probe_events
             if not self.probe:
-                events = local.enter_context(selectors.DefaultSelector())
+                events = selectors.DefaultSelector()
+                local.callback(close_transport, events.close)
                 self.register_measure_transport(events, process)
             assert events is not None
             files = {}
             for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
-                output = self.outputs.enter_context(self._open_log(self.directory / (name + ".partial")))
+                output = self._open_log(self.directory / (name + ".partial"))
+                self.outputs.callback(close_transport, output.close, on_loss)
                 self.outputs.callback(sync_output, output)
                 files[name] = output
             stream_open = True
