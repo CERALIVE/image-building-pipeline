@@ -325,11 +325,14 @@ def exit_launcher() -> None:
         try:
             if cancellation.exit_receipt is not None:
                 committed = cancellation.exit_status
-                status = 1 if committed is None else committed
-                retire_journal(cancellation)
-                # Keep terminal signal protection in force through direct exit.
-                if committed is not None:
-                    verify_exit_receipt(cancellation.exit_receipt, committed)
+                result = cancellation.receipt_result
+                try:
+                    retire_journal(cancellation)
+                    if committed is not None:
+                        verify_exit_receipt(cancellation.exit_receipt, committed)
+                except BaseException as exc:
+                    if result.diagnostic is None:
+                        result.diagnostic = exc
             else:
                 for stream in (sys.stdout, sys.stderr):
                     try:
@@ -338,7 +341,8 @@ def exit_launcher() -> None:
                         report_error(exc)
         finally:
             try:
-                os._exit(status)
+                # Keep terminal signal protection and consult only the result slot for image exit.
+                os._exit(cancellation.receipt_result.exit_status if cancellation.exit_receipt is not None else status)
             finally:
                 cancellation.restore_dispositions()
 

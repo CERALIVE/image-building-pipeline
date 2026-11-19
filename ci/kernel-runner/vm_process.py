@@ -89,23 +89,45 @@ class ChildContainmentError(OSError):
     """The launcher cannot verify that a child has stopped."""
 
 
+WRITE, SYNC, VERIFY, RENAME, COMMITTED, FRESH_REWRITE = range(6)
+
+
+class ReceiptResult:
+    """Preallocated commit result and failure storage."""
+
+    __slots__ = ("state", "first_failure_cause", "failure_errno", "failure_code", "exit_status", "diagnostic")
+
+    def __init__(self) -> None:
+        self.state = WRITE
+        self.first_failure_cause: BaseException | None = None
+        self.failure_errno: int | None = None
+        self.failure_code = "receipt publication failed"
+        self.exit_status = 1
+        self.diagnostic: BaseException | None = None
+
+
 class Cancellation:
     """Signal state and the authoritative status of a renamed exit receipt."""
 
-    __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "exit_sync_calls", "finalizing",
+    __slots__ = ("requested", "exit_receipt", "exit_temporary", "receipt_result", "exit_sync_calls", "finalizing",
                  "saved_dispositions", "safe_journal", "_pending", "_pending_ref")
 
     def __init__(self) -> None:
         self.requested = False
         self.exit_receipt: Path | None = None
         self.exit_temporary: Path | None = None
-        self.exit_status: int | None = None
+        self.receipt_result = ReceiptResult()
         self.exit_sync_calls = 0
         self.finalizing = False
         self._pending = _SIGNAL_SET()
         self._pending_ref = ctypes.pointer(self._pending)
         self.saved_dispositions: dict[int, signal.Handlers | Callable] = {}
         self.safe_journal: tuple[Path, Path] | None = None
+
+    @property
+    def exit_status(self) -> int | None:
+        result = self.receipt_result
+        return result.exit_status if result.state == COMMITTED else None
 
     def request(self, _signum: int, _frame) -> None:
         self.requested = True

@@ -233,8 +233,8 @@ def sync_file(fd: int, *, directory: bool = False, recover: bool = True,
         if error.errno not in UNSUPPORTED_SYNC:
             if directory:
                 raise
-            raise FileSyncError(error.errno, f"fsync failed: {error}") from error
-        report_error(f"durability=unsupported ({error})")
+            raise FileSyncError(error.errno, "fsync failed") from error
+        report_error("durability=unsupported")
 
 
 def can_rewrite(error: FileSyncError) -> bool:

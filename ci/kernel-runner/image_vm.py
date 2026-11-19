@@ -27,7 +27,7 @@ from image_lifecycle import (
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import (
-    FileSyncError, Identity, StreamError, decode, list_directory, listed_entry, positioned_open,
+    Identity, StreamError, decode, list_directory, listed_entry, positioned_open,
     read_check, retry_check, retry_io, verify_sidecar,
 )
 from vm_process import Cancelled, Cancellation, run
@@ -281,7 +281,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                     row["acceptance_sha256"] = accepted_sha
             receipt(path, row, outcome=cancellation, diagnostic=error, probe=build if probe else None,
                     temporary=cancellation.exit_temporary if retry_commit or not probe else None)
-            return status
+            return cancellation.receipt_result.exit_status
         except Cancelled as exc:
             error = exc
             continue
@@ -294,10 +294,11 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             if retry_commit and allocation_fault:
                 retry_commit = False
                 continue
-            if isinstance(build, ImageJob) and isinstance(exc.__cause__, FileSyncError):
+            result = cancellation.receipt_result
+            if isinstance(build, ImageJob) and result.failure_code == "receipt fsync failed":
                 try:
-                    receipt(build.teardown, build.state | {"stop_reason": "receipt fsync failed",
-                                                           "storage_errno": exc.__cause__.errno},
+                    receipt(build.teardown, build.state | {"stop_reason": result.failure_code,
+                                                           "storage_errno": result.failure_errno},
                             temporary=build.teardown_temporary)
                 except (OSError, MemoryError) as teardown_error:
                     report_error(teardown_error)

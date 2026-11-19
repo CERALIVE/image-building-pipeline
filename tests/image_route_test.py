@@ -667,6 +667,29 @@ print('CERALIVE_SEALED_MIRROR_STOPPED', flush=True)
                 pass
             assert injected and received == ready + ack and mirror.returncode == 0, (error, position)
 
+    selector = image_guest.selectors.DefaultSelector
+    for error, position in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM, errno.ENOSYS), range(4)):
+        calls = 0
+        injected = False
+
+        class DelayedReadiness(selector):
+            def select(self, timeout=None):
+                nonlocal calls, injected
+                events = super().select(timeout)
+                if events:
+                    if not injected and calls == position:
+                        injected = True
+                        raise OSError(error, "fixture readable or writable descriptor")
+                    calls += 1
+                return events
+
+        with subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE) as mirror:
+            with patch.object(image_guest.selectors, "DefaultSelector", DelayedReadiness):
+                with image_guest.ready_mirror(mirror):
+                    pass
+            assert injected and calls == 4 and mirror.returncode == 0, (error, position)
+
 
 def test_full_mirror_control_pipe_respects_shutdown_deadline() -> None:
     child = "import signal; print('CERALIVE_SEALED_MIRROR_READY', flush=True); signal.pause()"
@@ -776,6 +799,18 @@ class Listener:
 objects = [{'urls': [url], 'sha256': digest}] if hit else []
 serve.__globals__.update(HTTPServer=Listener, inventory=lambda _: {'objects': objects},
                          mirror_validities=lambda _: [])
+if mode.startswith('control-read-'):
+    import errno
+    read = os.read
+    injected = False
+    def read_stop(fd, size):
+        global injected
+        if fd == 0 and not injected:
+            injected = True
+            (work / 'stop-errno').touch()
+            raise OSError(getattr(errno, mode.removeprefix('control-read-')), 'fixture stop pipe read')
+        return read(fd, size)
+    os.read = read_stop
 serve(work, managed=True)
 """
     with tempfile.TemporaryDirectory() as tmp:
@@ -792,7 +827,7 @@ serve(work, managed=True)
                                       stderr=subprocess.DEVNULL, pass_fds=(read_end, write_end)) as mirror:
                     try:
                         with image_guest.ready_mirror(mirror):
-                            if mode != "healthy":
+                            if mode != "healthy" and not mode.startswith("control-read-"):
                                 os.write(write_end, b"R")
                     except (StreamError, BrokenPipeError):
                         assert not expected, (mode, fault)
@@ -808,6 +843,11 @@ serve(work, managed=True)
 
         for mode in ("healthy", "miss", "marker-error", "foreign", "unclassified", "short-object", "short-send"):
             replay(mode, mode == "healthy")
+        for error in ("EINTR", "EAGAIN", "EIO", "EPERM", "ENOSYS"):
+            observed = marker.with_name("stop-errno")
+            observed.unlink(missing_ok=True)
+            replay(f"control-read-{error}", True)
+            assert observed.exists(), error
         for mode in ("hit", "miss"):
             baseline = set(replay(mode, mode == "hit"))
             assert baseline

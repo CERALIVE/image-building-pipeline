@@ -818,11 +818,19 @@ With the disposition fallback installed, the kernel discards a newly arriving
 stop during the protected window, including immediately before the checkpoint.
 In that case the validated attempt can commit success. In both modes the
 committed receipt and the launcher exit report the same verdict.
-The receipt step table independently attempts directory open, sync and close,
-temporary-file cleanup when applicable, and diagnostics. A step failure
-cannot skip the remaining cleanup or change the published result. A final
-directory-sync failure leaves the file visible at runtime, but a crash may
-lose the rename.
+The receipt result has explicit write, sync, verify, rename and committed
+states. A required sync or readback fault can use one fresh inode under the
+existing sync limit. An allocation failure after verification resumes with
+the same inode. The launcher arms the preallocated result before rename.
+If rename raises, it checks both names for the verified inode. Only an
+observed temporary owner permits replay. The first failure that prevents
+publication is retained with its errno and a fixed diagnostic code.
+
+Directory open, sync and close, temporary-file cleanup and diagnostics are
+attempted independently after the publication decision. A consumed temporary
+is never removed or renamed again. Cleanup cannot change a committed terminal
+result. A final directory-sync failure leaves the file visible at runtime,
+but a crash may lose the rename.
 
 After teardown and publication, the CLI verifies `launcher_exit` against
 the status recorded at rename. A missing or unreadable marker is a
@@ -869,8 +877,11 @@ prevents acknowledgement. The guest requires
 the acknowledgement, a collected zero exit status and control pipe EOF. It
 separately checks for the missing-object marker. TERM and KILL are cleanup
 signals after failure. Control reads and the shutdown request use nonblocking
-I/O. A transient zero-progress error gets a new readiness check within the
-original deadline.
+I/O. A transient zero-progress error in either the readiness wait or the I/O
+operation gets a new readiness check within the original deadline. The
+base-owned mirror also retries transient stop-byte reads before deciding
+whether to acknowledge. The historical source selection uses the same
+base-owned control path.
 The offline probe requires an empty JSON list of default routes
 and ENETUNREACH or EHOSTUNREACH for every selected TCP endpoint. ECONNREFUSED
 indicates a reachable endpoint, and ETIMEDOUT supplies no conclusive evidence.

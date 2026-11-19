@@ -100,10 +100,10 @@ def resolve(source: Path, board: str, env: dict[str, str]) -> dict[str, str]:
 def mirror_io(events: selectors.BaseSelector, deadline: float, operation, *args):
     """Retry a zero-progress control operation only after fresh readiness."""
     for attempt in range(IO_ATTEMPTS):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not events.select(remaining):
-            raise StreamError("sealed mirror control operation timed out")
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not events.select(remaining):
+                raise StreamError("sealed mirror control operation timed out")
             return operation(*args)
         except OSError as error:
             if error.errno not in MIRROR_RETRY or attempt + 1 == IO_ATTEMPTS:

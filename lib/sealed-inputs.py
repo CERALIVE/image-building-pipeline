@@ -7,6 +7,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import errno
 import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -30,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner")
 from image_urls import InputURLError, canonical_url
 
 INDEX_LIMIT = 256 * 1024**2
+CONTROL_ATTEMPTS = 3
+CONTROL_RETRY = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM, errno.ENOSYS))
 
 
 class SealedError(Exception):
@@ -344,10 +347,18 @@ def serve(directory: Path, *, managed: bool = False) -> None:
                             server.handle_request()
                             if missing or handler_error or not request_complete or served != started:
                                 raise SealedError("sealed mirror request did not complete")
-                        elif os.read(control, 1) == b"S":
-                            break
                         else:
-                            raise SealedError("invalid mirror shutdown request")
+                            for attempt in range(CONTROL_ATTEMPTS):
+                                try:
+                                    stop_byte = os.read(control, 1)
+                                except OSError as error:
+                                    if error.errno not in CONTROL_RETRY or attempt + 1 == CONTROL_ATTEMPTS:
+                                        raise
+                                else:
+                                    break
+                            if stop_byte != b"S":
+                                raise SealedError("invalid mirror shutdown request")
+                            break
             else:
                 print("CERALIVE_SEALED_MIRROR_READY", flush=True)
                 while not missing:
