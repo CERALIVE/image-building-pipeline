@@ -217,18 +217,13 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         }
         if error is not None:
             row["stop_reason"] = "cancelled" if isinstance(error, Cancelled) else type(error).__name__
-        if probe:
-            try:
-                row = build.diagnostic_summary(row)
-            except Exception:
-                pass  # The outcome already contains the pre-start loss fields.
-        else:
+        if not probe:
             row["pair_complete"] = not status
             if not status:
                 row["acceptance_sha256"] = accepted_sha
         try:
             # Rename commits the receipt that the CLI will read to determine its status.
-            receipt(path, row, outcome=cancellation, diagnostic=error)
+            receipt(path, row, outcome=cancellation, diagnostic=error, probe=build if probe else None)
         except Cancelled as exc:
             error = exc
             continue

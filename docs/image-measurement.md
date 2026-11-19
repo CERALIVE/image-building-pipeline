@@ -107,7 +107,9 @@ a fixed 4 KiB memory ring. The ring discards ordinary console text and evicts
 the oldest complete stage lines when full.
 A control read error marks capture lost and leaves the pipe registered.
 After three consecutive errors, the launcher drains that pipe into a
-preallocated buffer and discards its contents until EOF.
+preallocated buffer and discards its contents. After six consecutive errors
+or 100 ms of unsuccessful retries, it closes the failed reader so a blocked
+diagnostic writer can return. The artifact stream uses a separate pipe.
 
 The probe's `exit.json` contains `last_observed_stage`, `sequence_complete`,
 `capture_lost`, the sanitized `console_tail` (at most 4 KiB), and
@@ -117,9 +119,10 @@ over 8 MiB, and capture errors set `capture_lost`. A stalled probe can still
 report the last stage and its tail when capture is incomplete. `stream_bytes`
 remains the artifact byte count in both `exit.json` and `teardown.json`.
 
-The launcher seeds the loss fields before starting the guest and builds the
-summary in memory before the existing atomic receipt commit. If summary
-construction fails, the receipt reports capture loss,
+The launcher encodes the default loss fields before starting the guest. It
+serializes the authoritative outcome before trying to build and encode the
+optional summary. If that fails, it writes the already encoded loss fields
+in the same atomic receipt. These fields report capture loss,
 an unknown last stage, and an empty tail. The launcher uses the same receipt
 commit for the summary and the exit status, with no separate diagnostic file.
 

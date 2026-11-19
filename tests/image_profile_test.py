@@ -56,6 +56,11 @@ SUMMARY_ALLOCATION_SITES = {
     for instruction in dis.get_instructions(function)
     if instruction.opname.startswith(("BUILD_", "BINARY_", "CALL"))
 }
+ENCODE_SITES = {
+    instruction.offset
+    for instruction in dis.get_instructions(image_lifecycle.encode_diagnostic_fields)
+    if instruction.starts_line and instruction.opname != "RESUME"
+}
 PRESTART_MODES = tuple(
     f"prestart:{step}:{error}"
     for step in ("pipe", "stream", "stderr", "console", "console-after-register")
@@ -67,7 +72,10 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                    "isolated:summary-timeout:MemoryError", "isolated:fallback:MemoryError",
                    "isolated:read-dispatch:MemoryError", "isolated:unregister:OSError",
                    "isolated:stderr-baseline", "isolated:stderr-first", "isolated:stderr-second",
-                   "isolated:stderr-discard",
+                   "isolated:stderr-discard", "isolated:stderr-terminal",
+                   "isolated:encode-empty:MemoryError", "isolated:encode-tail:MemoryError",
+                   *(f"isolated:encode-{tail}-{site}:MemoryError"
+                     for tail in ("empty", "tail") for site in sorted(ENCODE_SITES)),
                    *(f"isolated:alloc-{site}:MemoryError" for site in SUMMARY_ALLOCATION_SITES))
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
@@ -563,13 +571,27 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
-        if mode in {"isolated:stderr-first", "isolated:stderr-second", "isolated:stderr-discard"}:
+        if mode in {"isolated:stderr-first", "isolated:stderr-second", "isolated:stderr-discard",
+                    "isolated:stderr-terminal"}:
             stderr_fd = -1
             reads = 0
+            discard_reads = 0
             discard_read_failed = False
             register = selectors.EpollSelector.register
             read = os.read
             readv = os.readv
+            popen = subprocess.Popen
+
+            def verify_writer_signal(args, *positional, **kwargs):
+                if args[0] == "qemu-system-x86_64":
+                    preexec = kwargs["preexec_fn"]
+
+                    def check_sigpipe():
+                        preexec()
+                        assert signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN
+
+                    kwargs["preexec_fn"] = check_sigpipe
+                return popen(args, *positional, **kwargs)
 
             def track_stderr(selector, file, events, data=None):
                 nonlocal stderr_fd
@@ -581,7 +603,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 nonlocal reads
                 if fd == stderr_fd:
                     reads += 1
-                    if mode == "isolated:stderr-discard" or reads == (
+                    if mode in {"isolated:stderr-discard", "isolated:stderr-terminal"} or reads == (
                         1 if mode == "isolated:stderr-first" else 2
                     ):
                         (root / "diag-injected").write_text(str(reads))
@@ -589,7 +611,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return read(fd, count)
 
             def watch_discard(fd, buffers):
-                nonlocal discard_read_failed
+                nonlocal discard_read_failed, discard_reads
+                if fd == stderr_fd and mode == "isolated:stderr-terminal":
+                    discard_reads += 1
+                    assert discard_reads <= 3, "unbounded discard reads"
+                    (root / "discard-retries").write_text(str(discard_reads))
+                    raise OSError(errno.EIO, "fixture persistent discard read")
                 if fd == stderr_fd and not discard_read_failed:
                     discard_read_failed = True
                     (root / "discard-read-failed").touch()
@@ -602,9 +629,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(selectors.EpollSelector, "register", track_stderr))
             patches.enter_context(patch.object(os, "read", fault_stderr))
             patches.enter_context(patch.object(os, "readv", watch_discard))
+            if mode == "isolated:stderr-terminal":
+                patches.enter_context(patch.object(subprocess, "Popen", verify_writer_signal))
         if mode in {"stages:timeout", "stages:before-header", "stages:blocked-header", "isolated:dropped",
                     "isolated:summary-timeout:MemoryError", "isolated:stderr-first", "isolated:stderr-second",
-                    "isolated:stderr-discard"}:
+                    "isolated:stderr-discard", "isolated:stderr-terminal"}:
             capture = ImageJob.capture
             patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
@@ -685,6 +714,32 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
                 monitor.register_callback(tool_id, monitor.events.INSTRUCTION, inject_allocation)
                 monitor.set_local_events(tool_id, target_code, monitor.events.INSTRUCTION)
+            elif operation in {"encode-empty", "encode-tail"}:
+                iterencode = json.JSONEncoder.iterencode
+
+                def fail_encode(encoder, row, *args, **kwargs):
+                    if (root / "pid").exists() and "console_tail" in row:
+                        if (root / "diag-injected").exists():
+                            (root / "late-fallback-encoding").touch()
+                            raise MemoryError("fixture tried to re-encode diagnostic defaults")
+                        if bool(row["console_tail"]) == (operation == "encode-tail"):
+                            diagnostic_failure()
+                    return iterencode(encoder, row, *args, **kwargs)
+
+                patches.enter_context(patch.object(json.JSONEncoder, "iterencode", fail_encode))
+            elif operation.startswith("encode-"):
+                target_offset = int(operation.rsplit("-", 1)[1])
+                monitor = sys.monitoring
+                tool_id = monitor.DEBUGGER_ID
+                monitor.use_tool_id(tool_id, "probe encode statement fault")
+
+                def inject_encode(_code, offset):
+                    if offset == target_offset and (root / "pid").exists():
+                        diagnostic_failure()
+
+                monitor.register_callback(tool_id, monitor.events.INSTRUCTION, inject_encode)
+                monitor.set_local_events(tool_id, image_lifecycle.encode_diagnostic_fields.__code__,
+                                         monitor.events.INSTRUCTION)
             elif operation in {"summary", "summary-timeout", "fallback", "text", "drain"}:
                 owner, method = {
                     "text": (image_lifecycle.StageTail, "text"), "drain": (ImageJob, "drain"),
@@ -859,7 +914,7 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
                 os.write(console, data)
             except OSError:
                 pass
-        if mode != "isolated:baseline":
+        if mode != "isolated:baseline" and not mode.startswith("isolated:encode-empty"):
             serial_write(b"STAGE 1 probe_start 0 1\\n")
             serial_write(b"STAGE 2 stream_close_end 0 " + (b"3" if mode == "isolated:gap" else b"2") + b"\\n")
         if mode == "isolated:unregister:OSError":
@@ -872,8 +927,20 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
         capacity = fcntl.fcntl(2, fcntl.F_GETPIPE_SZ)
         if capacity > 65536:
             fcntl.fcntl(2, fcntl.F_SETPIPE_SZ, 65536)
-        assert os.write(2, b"x" * 65537) == 65537
-        (root / "stderr-written").touch()
+        if mode == "isolated:stderr-terminal":
+            # The first blocking write may report partial progress when
+            # the reader closes. The next write must get EPIPE.
+            sent = 0
+            try:
+                while sent < 65537:
+                    sent += os.write(2, b"x" * (65537 - sent))
+            except BrokenPipeError:
+                (root / "stderr-epipe").touch()
+            else:
+                raise AssertionError("stderr unexpectedly drained")
+        else:
+            assert os.write(2, b"x" * 65537) == 65537
+            (root / "stderr-written").touch()
     if mode != "isolated:dropped":
         os.write(1, (root / "probe.frame").read_bytes())
         sys.exit(0)
@@ -1182,10 +1249,17 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert (directory / "artifacts/verification.json").read_bytes() == expected
             if mode.count(":") == 2:
                 assert (root / "diag-injected").exists(), mode
-            if operation in {"summary", "summary-timeout", "fallback", "text"} or operation.startswith("alloc-"):
+            if operation in {"summary", "summary-timeout", "fallback", "text"} or operation.startswith(
+                ("alloc-", "encode-")
+            ):
                 assert record["last_observed_stage"] is None and record["console_tail"] == ""
                 assert not record["console_tail_truncated"] and record["control_bytes_received"] == 0
-            if operation.startswith("stderr-"):
+                assert not (root / "late-fallback-encoding").exists()
+            if operation == "stderr-terminal":
+                assert record["stream_bytes"] == 836 and (root / "stderr-epipe").is_file()
+                assert (root / "diag-injected").read_text() == "3"
+                assert 1 <= int((root / "discard-retries").read_text()) <= 3
+            elif operation.startswith("stderr-"):
                 assert (root / "stderr-written").exists() and record["stream_bytes"] == 836
                 assert record["control_bytes_received"] == 65537 + len(record["console_tail"])
                 if operation != "stderr-baseline":
@@ -1386,16 +1460,21 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
     helpers = (
         ("record_control", {"bool", "len"}, {"optional(self.lose_diagnostics, tail.observe, chunk)"}),
         ("read_control", {"self.record_control"},
-         {"os.readv(fd, self.discard_buffer)", "os.read(fd, 1024 * 1024)"}),
+         {"os.readv(fd, self.discard_buffer)", "os.read(fd, 1024 * 1024)", "time.monotonic()",
+          "self.close_console_reader()", "self.close_stderr_reader()"}),
         ("drain", {"events.get_map", "events.get_map().values", "range", "self.lose_diagnostics"},
          {"self.read_control(key.data, key.fd)"}),
         ("diagnostic_summary", {"tail.text"}, set()),
         ("lose_diagnostics", set(), set()),
         ("_close_console", {"getattr", "setattr", "os.close"},
          {"optional(self.lose_diagnostics, os.close, fd)"}),
+        ("close_console_reader", set(), {"self._close_console('console_read')"}),
+        ("close_stderr_reader", set(), {"self._close_console('stderr_read')"}),
     )
     for name, calls, exact in helpers:
         assert not (bad := unexpected(node_for(ImageJob, name), calls, exact)), (name, bad)
+    encode_calls = {"json.dumps(fields, sort_keys=True, indent=2)", "suffix.encode('ascii')"}
+    assert not (bad := unexpected(node_for(image_lifecycle, "encode_diagnostic_fields"), set(), encode_calls)), bad
     tail = node_for(StageTail, "StageTail")
     memory_calls = {"bytearray", "chunk.split", "enumerate", "int", "joined.removesuffix",
                     "len", "match[2].decode", "min", "range", "self._append", "STAGE_LINE.fullmatch",
@@ -1404,7 +1483,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
     assert not (bad := unexpected(node_for(StageTail, "optional"), {"on_loss", "operation"})), bad
     run_calls = {"Cancelled", "digest_file", "int", "isinstance", "measure_image",
                  "receipt", "report_error", "type"}
-    run_exact = {"build.diagnostic_summary(row)"}
+    run_exact = set()
     assert not (bad := unexpected(node_for(image_vm, "run_image"), run_calls, run_exact)), bad
 
     mutations = (

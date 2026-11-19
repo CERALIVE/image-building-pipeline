@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 import tempfile
-from typing import TextIO
+from typing import BinaryIO, TextIO
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
@@ -30,6 +30,15 @@ UNAVAILABLE_DIAGNOSTICS = {
     "control_bytes_received": 0,
 }
 CONTROL_READ_FAILURE_LIMIT = 3
+CONTROL_RETIRE_LIMIT = 2 * CONTROL_READ_FAILURE_LIMIT
+CONTROL_RETRY_SECONDS = 0.1
+
+
+def encode_diagnostic_fields(fields: dict) -> bytes:
+    # Append members to an already encoded outcome object.
+    text = json.dumps(fields, sort_keys=True, indent=2)
+    suffix = ",\n" + text[2:] + "\n"
+    return suffix.encode("ascii")
 
 
 class ReceiptError(OSError):
@@ -82,25 +91,39 @@ class Receipt:
     """Own the receipt's temporary file, rename and cleanup as a single transaction."""
 
     def __init__(self, path: Path, row: dict, outcome: Cancellation | None,
-                 diagnostic: BaseException | None) -> None:
+                 diagnostic: BaseException | None, probe: ImageJob | None = None) -> None:
         self.path = path
         self.row = row
         self.outcome = outcome
         self.temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
-        self.file: TextIO | None = None
+        self.file: TextIO | BinaryIO | None = None
+        self.probe = probe
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
 
     def temp_open(self) -> None:
         self.file = open(
-            self.temporary, "x", encoding="utf-8",
+            self.temporary, "xb" if self.probe is not None else "x",
+            encoding=None if self.probe is not None else "utf-8",
             opener=lambda name, flags: os.open(Path(name), flags, 0o600))
 
     def temp_write(self) -> None:
         assert self.file is not None
-        json.dump(self.row, self.file, sort_keys=True, indent=2)
-        self.file.write("\n")
+        if self.probe is None:
+            json.dump(self.row, self.file, sort_keys=True, indent=2)
+            self.file.write("\n")
+            return
+        # Encode the authoritative fields before trying optional diagnostics.
+        # On an encoding fault, both fragments are already available as bytes.
+        outcome = json.dumps(self.row, sort_keys=True, indent=2)[:-2].encode("ascii")
+        fields = self.probe.fallback_fields
+        try:
+            fields = encode_diagnostic_fields(self.probe.diagnostic_summary())
+        except Exception:
+            pass
+        self.file.write(outcome)
+        self.file.write(fields)
 
     def temp_flush(self) -> None:
         assert self.file is not None
@@ -158,8 +181,8 @@ RECEIPT_STEPS = (
 
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
-            diagnostic: BaseException | None = None) -> None:
-    transaction = Receipt(path, row, outcome, diagnostic)
+            diagnostic: BaseException | None = None, probe: ImageJob | None = None) -> None:
+    transaction = Receipt(path, row, outcome, diagnostic, probe)
     failure: BaseException | None = None
     for action, cleanup in RECEIPT_STEPS:
         if failure is not None and not cleanup and not transaction.renamed:
@@ -236,6 +259,7 @@ class ImageJob:
         self.cancellation = cancellation or Cancellation()
         self.probe = probe
         self.console_read = self.console_write = -1
+        self.stderr_read = -1
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
@@ -245,12 +269,14 @@ class ImageJob:
                       "stream_budget": CAPS.stream_max,
                       "input_descriptor_closed": False, "overlay_descriptor_closed": False}
         if probe:
-            self.state.update(UNAVAILABLE_DIAGNOSTICS)
+            self.fallback_fields = encode_diagnostic_fields(UNAVAILABLE_DIAGNOSTICS)
         self.stage_tail = None
         self.control_bytes = 0
         self.capture_lost = False
         self.observe_stages = True
         self.control_failures = {"diagnostic": 0, "console": 0}
+        self.control_failure_since = {"diagnostic": 0.0, "console": 0.0}
+        self.discarding_control = {"diagnostic": False, "console": False}
         self.probe_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
@@ -295,6 +321,9 @@ class ImageJob:
     def close_console_writer(self) -> None:
         self._close_console("console_write")
 
+    def close_stderr_reader(self) -> None:
+        self._close_console("stderr_read")
+
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
         inode = os.fstat(disk_fd)
@@ -313,11 +342,11 @@ class ImageJob:
             os.close(fd)
             raise
 
-    def diagnostic_summary(self, row: dict) -> dict:
+    def diagnostic_summary(self) -> dict:
         tail = self.stage_tail
         over_cap = self.control_bytes > CONTROL_LOG_LIMIT
         complete = not self.capture_lost and not over_cap and tail is not None and tail.complete
-        return row | {
+        return {
             "last_observed_stage": tail.last if tail is not None else None,
             "sequence_complete": complete,
             "capture_lost": not complete,
@@ -333,11 +362,11 @@ class ImageJob:
             stream_read, stream_write = os.pipe2(os.O_CLOEXEC)
             self.inputs.callback(os.close, stream_read)
             writers.callback(os.close, stream_write)
-            stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
-            self.inputs.callback(optional, self.lose_diagnostics, os.close, stderr_read)
+            self.stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
+            self.inputs.callback(self.close_stderr_reader)
             writers.callback(optional, self.lose_diagnostics, os.close, stderr_write)
-            os.set_blocking(stderr_read, False)
-            for name, fd in (("stream", stream_read), ("diagnostic", stderr_read),
+            os.set_blocking(self.stderr_read, False)
+            for name, fd in (("stream", stream_read), ("diagnostic", self.stderr_read),
                              ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
             self.probe_events = events
@@ -355,18 +384,33 @@ class ImageJob:
             self.observe_stages = bool(optional(self.lose_diagnostics, tail.observe, chunk))
 
     def read_control(self, name: str, fd: int) -> bool:
-        """Report EOF only when a read returns zero. Keep errors drainable."""
+        """Return true for EOF or a permanently closed control reader."""
         failures = self.control_failures[name]
+        if failures == CONTROL_RETIRE_LIMIT:
+            return True
         try:
-            if failures == CONTROL_READ_FAILURE_LIMIT:
+            if self.discarding_control[name]:
                 size = os.readv(fd, self.discard_buffer)
                 self.control_bytes += size
+                self.control_failures[name] = 0
                 return size == 0
             chunk = os.read(fd, 1024 * 1024)
         except Exception:
             self.capture_lost = True
-            if failures < CONTROL_READ_FAILURE_LIMIT:
-                self.control_failures[name] = failures + 1
+            now = time.monotonic()
+            if failures == 0:
+                self.control_failure_since[name] = now
+            if failures + 1 == CONTROL_RETIRE_LIMIT or now - self.control_failure_since[name] >= CONTROL_RETRY_SECONDS:
+                self.control_failures[name] = CONTROL_RETIRE_LIMIT
+                # Closing the only reader releases a blocked diagnostic writer.
+                if name == "console":
+                    self.close_console_reader()
+                else:
+                    self.close_stderr_reader()
+                return True
+            self.control_failures[name] = failures + 1
+            if failures + 1 == CONTROL_READ_FAILURE_LIMIT:
+                self.discarding_control[name] = True
             return False
         self.control_failures[name] = 0
         if chunk:
