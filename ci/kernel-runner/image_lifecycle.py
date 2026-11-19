@@ -272,6 +272,29 @@ class ImageJob:
             "overlay_inode": self.state["overlay_inode"],
         })
 
+    @contextmanager
+    def probe_log(self, path: Path):
+        """Record an optional raw log without making it part of acceptance."""
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                output = os.fdopen(fd, "wb")
+            except Exception:
+                os.close(fd)
+                raise
+        except Exception:
+            self.state["diagnostics_lost"] = True
+            yield None
+            return
+        try:
+            yield output
+        finally:
+            try:
+                with output:
+                    sync_output(output)
+            except Exception:
+                self.state["diagnostics_lost"] = True
+
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
         """Drain three bounded pipes without echoing guest bytes to a terminal."""
         self.state.update(qemu=process_identity(process.pid), started_at=time.time(),
@@ -287,27 +310,33 @@ class ImageJob:
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
         tail = None
         if self.probe:
-            self.state.update(last_stage=None, console_stage_tail="")
+            self.state.update(last_stage=None, console_stage_tail="",
+                              diagnostics_lost=False, diagnostics_truncated=False)
             try:
                 tail = StageTail()
-            except MemoryError:
-                pass
+            except Exception:
+                self.state["diagnostics_lost"] = True
         with selectors.DefaultSelector() as events:
             files = {}
             for name, pipe in (("stream", process.stdout), ("diagnostic", process.stderr),
                                ("console", self.console_read)):
                 events.register(pipe, selectors.EVENT_READ, name)
-                fd = os.open(self.directory / (name + ".partial"),
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                output = self.outputs.enter_context(os.fdopen(fd, "wb"))
-                self.outputs.callback(sync_output, output)
-                files[name] = output
+                path = self.directory / (name + ".partial")
+                if self.probe and name != "stream":
+                    files[name] = self.outputs.enter_context(self.probe_log(path))
+                else:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    output = self.outputs.enter_context(os.fdopen(fd, "wb"))
+                    self.outputs.callback(sync_output, output)
+                    files[name] = output
             try:
                 while events.get_map() or poll_owned(process) is None:
                     self.cancellation.check()
                     now = time.monotonic()
                     if now >= end:
-                        raise subprocess.TimeoutExpired("image guest", seconds)
+                        stage = (tail.last if tail is not None else None) or "none seen"
+                        command = f"image guest (last stage: {stage})" if self.probe else "image guest"
+                        raise subprocess.TimeoutExpired(command, seconds)
                     if now >= next_priority_check and poll_owned(process) is None:
                         try:
                             self.state["qemu_priority"] = process_priority(process.pid, self.cancellation)
@@ -331,36 +360,46 @@ class ImageJob:
                         if not chunk:
                             events.unregister(event.fileobj)
                             continue
-                        counts[name] += len(chunk)
-                        if (counts["stream"] > min(CAPS.stream_max, self.state["stream_budget"])
-                                or counts["console"] + counts["diagnostic"] > CONTROL_LOG_LIMIT):
-                            raise StreamError("image return stream or log budget exceeded")
-                        files[name].write(chunk)
                         if name == "console" and tail is not None:
-                            # A broken diagnostic observer must never affect the probe.
                             try:
                                 tail.observe(chunk)
-                            except (OSError, ValueError, MemoryError):
+                            except Exception:
+                                self.state["diagnostics_lost"] = True
                                 tail = None
+                        if self.probe and name != "stream":
+                            remaining = CONTROL_LOG_LIMIT - counts["console"] - counts["diagnostic"]
+                            if len(chunk) > remaining:
+                                self.state["diagnostics_truncated"] = True
+                            if remaining and (output := files[name]) is not None:
+                                try:
+                                    kept = chunk[:remaining]
+                                    counts[name] += len(kept)
+                                    if output.write(kept) != len(kept):
+                                        raise OSError("short diagnostic write")
+                                except Exception:
+                                    self.state["diagnostics_lost"] = True
+                                    files[name] = None
+                        else:
+                            counts[name] += len(chunk)
+                            if (counts["stream"] > min(CAPS.stream_max, self.state["stream_budget"])
+                                    or counts["console"] + counts["diagnostic"] > CONTROL_LOG_LIMIT):
+                                raise StreamError("image return stream or log budget exceeded")
+                            files[name].write(chunk)
                     # Fixed caps bound growth between these observations.
                     overlay = Path(f"/proc/self/fd/{self.state['overlay_fd']}")
                     remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
                     disk_headroom(((Path(self.state["overlay_directory"]), remaining_overlay),
                                    (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
                 wait(process, end, self.cancellation)
-            except subprocess.TimeoutExpired as error:
-                if self.probe:
-                    stage = (tail.last if tail is not None else None) or "none seen"
-                    raise subprocess.TimeoutExpired(f"image guest (last stage: {stage})", error.timeout) from None
-                raise
             finally:
                 self.state["stream_bytes"] = counts["stream"]
                 if tail is not None:
                     self.state["last_stage"] = tail.last
+                    self.state["diagnostics_lost"] |= tail.lost or tail.last is None
                     try:
                         self.state["console_stage_tail"] = tail.text()
-                    except (OSError, ValueError, MemoryError):
-                        pass
+                    except Exception:
+                        self.state["diagnostics_lost"] = True
 
 
 def sync_output(output) -> None:

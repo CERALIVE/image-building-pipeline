@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Unprivileged image transport regressions; never start QEMU or read credentials."""
 
+from contextlib import ExitStack
+import fcntl
 import hashlib
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -50,7 +53,11 @@ def test_artifacts_return_with_private_fixed_names() -> None:
 
 
 def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> None:
-    for logging_available, route_present in ((True, False), (False, False), (False, True)):
+    baseline = None
+    for logging_available, route_present, fault in (
+        (True, False, None), (False, False, None), (False, True, None),
+        (True, False, "fstat"), (True, False, "write"), (True, False, "close"),
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             guest_home, console, stage_log = (root / name for name in ("guest", "console", "stages"))
@@ -81,13 +88,30 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                 socket_factory.return_value.__enter__.return_value = no_connection
                 from image_stages import StageLog
                 with (patch("image_stages.CONSOLE", console), patch("image_stages.GUEST_LOG", stage_log)):
-                    try:
-                        image_guest.main()
-                    except StreamError:
-                        assert route_present
-                    else:
-                        assert not route_present
-                    if logging_available:
+                    with ExitStack() as faults:
+                        if fault:
+                            operation = getattr(os, fault)
+                            injected = False
+
+                            def fail_once(fd, *args):
+                                nonlocal injected
+                                if not injected and os.readlink(f"/proc/self/fd/{fd}") == str(stage_log):
+                                    injected = True
+                                    if fault == "close":
+                                        operation(fd, *args)
+                                    raise MemoryError(f"fixture stage {fault}")
+                                return operation(fd, *args)
+
+                            faults.enter_context(patch.object(os, fault, side_effect=fail_once))
+                        try:
+                            image_guest.main()
+                        except StreamError:
+                            assert route_present
+                        else:
+                            assert not route_present
+                        if fault:
+                            assert injected
+                    if logging_available and not fault:
                         # Exercise the real bounded sink past its normal probe workload.
                         with patch("image_stages.CONSOLE", root / "no-console"):
                             for _ in range(1000):
@@ -100,7 +124,14 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                 assert json.loads((artifacts / "failure.json").read_text())["failure"] == "StreamError"
             else:
                 assert json.loads((artifacts / "verification.json").read_text())["network_denied"] is True
-            if logging_available:
+                if baseline is None:
+                    baseline = wire.read_bytes()
+                else:
+                    assert wire.read_bytes() == baseline
+            if fault:
+                assert any(line.split()[2:3] == ["diagnostics_lost"]
+                           for line in console.read_text().splitlines())
+            if logging_available and not fault:
                 lines = console.read_text().splitlines()
                 records = [line.split() for line in lines]
                 assert [event for _, _, event, _ in records] == [
@@ -126,6 +157,28 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                 assert log.startswith(console.read_bytes()) and log.endswith(b"\n")
                 assert 15 * 1024 < len(log) <= 16 * 1024 and b"CLIENT_KEY_PATH" not in log
                 assert stage_log.stat().st_mode & 0o777 == 0o600
+
+
+def test_stage_logger_returns_when_the_console_pipe_is_full() -> None:
+    from image_stages import StageLog
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        fifo = root / "serial"
+        os.mkfifo(fifo)
+        with (os.fdopen(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK), "rb", buffering=0) as reader,
+              os.fdopen(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK), "wb", buffering=0) as writer,
+              patch("image_stages.CONSOLE", fifo), patch("image_stages.GUEST_LOG", root / "log")):
+            capacity = fcntl.fcntl(writer.fileno(), fcntl.F_GETPIPE_SZ)
+            assert writer.write(b"x" * capacity) == capacity
+            stages = StageLog()
+            stages.emit("probe_start")
+            assert (root / "log").read_bytes().split()[2] == b"probe_start"
+            assert reader.read(capacity) == b"x" * capacity
+            stages.emit("capsule_import_begin")
+            assert [line.split()[2] for line in reader.read(capacity).splitlines() if line] == [
+                b"diagnostics_lost", b"capsule_import_begin",
+            ]
 
 
 def test_identity_is_selected_by_host() -> None:

@@ -41,7 +41,9 @@ IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
 SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error",
                        "raising-handler", "late-exit", "unreadable-exit", "shutdown-gap")
-STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error")
+STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error", "stages:at-cap",
+               "stages:over-cap", "stages:blocked-header", "stages:guest-loss",
+               "stages:flush-error", "stages:priority-timeout")
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
 STARTUP_STATES = {
@@ -376,6 +378,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             os.fstat(fd)
             return
         path = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if mode == "stages:flush-error" and path == directory / "console.partial":
+            raise MemoryError("fixture console sync")
         if fail_sync and path == directory:
             fail_sync = False
             raise OSError(errno.EIO, "fixture exit directory sync")
@@ -459,6 +463,13 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         target.mkdir()
         (target / "fixture").write_bytes(b"public artifact")
 
+    def priority_timeout(_pid, _cancellation):
+        until = time.monotonic() + 5
+        while not (root / "ready").exists():
+            assert time.monotonic() < until, "fake QEMU never reached startup"
+            time.sleep(0.01)
+        raise subprocess.TimeoutExpired("ionice fixture", 1)
+
     capsule = root / "capsule"
     base = root / "base"
     sys.argv = [str(ROOT / "ci/kernel-runner/vm.py"), "image", "--base", str(base),
@@ -515,9 +526,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
-        if mode == "stages:timeout":
+        if mode in {"stages:timeout", "stages:blocked-header"}:
             capture = ImageJob.capture
-            patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 1)))
+            patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
             from image_stages import StageTail
             patches.enter_context(patch.object(StageTail, "observe", side_effect=OSError("fixture observer failure")))
@@ -545,7 +556,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
             patch.object(image_lifecycle, "disk_headroom"),
             patch.object(image_lifecycle, "process_priority",
-                         side_effect=image_resources.process_priority if inherited else None,
+                         side_effect=(priority_timeout
+                                      if mode == "stages:priority-timeout"
+                                      else image_resources.process_priority if inherited else None),
                          return_value=FIXTURE_PRIORITY),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
             patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
@@ -603,7 +616,7 @@ else:
         qemu_img.chmod(0o700)
         qemu = root / "qemu-system-x86_64"
         qemu.write_text(f"""#!{sys.executable}
-import json, os, pathlib, signal, sys, time
+import fcntl, json, os, pathlib, signal, sys, time
 root = pathlib.Path({tmp!r})
 mode = {mode!r}
 (root / "status-qemu").write_text(pathlib.Path(f"/proc/{{os.getpid()}}/status").read_text())
@@ -663,10 +676,50 @@ if mode.startswith("pair:"):
     sys.exit(0)
 if mode in {STAGE_MODES!r}:
     console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
+    if mode in ("stages:at-cap", "stages:over-cap"):
+        os.write(1, (root / "probe.frame").read_bytes())
+        for _ in range(128):
+            os.write(console, b"x" * (64 * 1024 - 1) + b"\\n")
+        if mode == "stages:over-cap":
+            os.write(console, b"STAGE 2 stream_close_end 0\\n")
+        sys.exit(0)
     os.write(console, b"STAGE 1 probe_start 0\\r\\n" * 4000)
     os.write(console, b"Bearer FIXTURE_NOT_A_REAL_SECRET\\n" + b"x" * (70 * 1024) + b"\\n")
     os.write(console, b"STAGE 2 magic_writ")
     os.write(console, b"ten 25\\r\\n")
+    if mode == "stages:blocked-header":
+        sys.path.insert(0, {str(ROOT / 'ci/kernel-runner')!r})
+        from image_stages import StageLog
+        from image_stream import Identity, MAGIC, encode
+        reader, writer = os.pipe()
+        capacity = fcntl.fcntl(writer, fcntl.F_GETPIPE_SZ)
+        assert os.write(writer, b"x" * capacity) == capacity
+
+        class BlockedHeader:
+            def write(self, data):
+                if data == MAGIC:
+                    return os.write(1, data)
+                (root / "header-write-entered").touch()
+                count = os.write(writer, data)
+                (root / "header-write-returned").touch()
+                return count
+
+        import image_stages
+        image_stages.CONSOLE = pathlib.Path(f"/proc/self/fd/{{console}}")
+        image_stages.GUEST_LOG = root / "guest-stage.log"
+        # Use the real emitted records. Forward them to the serial pipe without
+        # opening a procfs symlink, which the guest logger deliberately refuses.
+        class ConsoleStages(StageLog):
+            def emit(self, stage, count=0):
+                super().emit(stage, count)
+                last = image_stages.GUEST_LOG.read_bytes().splitlines()[-1]
+                os.write(console, last + b"\\n")
+
+        encode(BlockedHeader(), [("verification.json", b"{{}}")],
+               Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64), ConsoleStages())
+        sys.exit(3)
+    if mode == "stages:guest-loss":
+        os.write(console, b"STAGE 3 diagnostics_lost 0\\n")
     if mode != "stages:timeout":
         os.write(1, (root / "probe.frame").read_bytes())
         os.write(console, b"STAGE 3 stream_close_end 0\\n")
@@ -885,15 +938,31 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         if mode in STAGE_MODES:
-            stalled = mode == "stages:timeout"
+            stalled = mode in {"stages:timeout", "stages:blocked-header"}
             logging_error = mode == "stages:logging-error"
             exit_row = json.loads((directory / "exit.json").read_text())
             teardown = json.loads((directory / "teardown.json").read_text())
+            if mode == "stages:priority-timeout":
+                assert launcher.returncode == exit_row["launcher_exit"] == 1
+                assert b"ionice fixture" in stderr and b"image guest (last stage" not in stderr
+                return
+            if mode in {"stages:at-cap", "stages:over-cap"}:
+                assert launcher.returncode == exit_row["launcher_exit"] == 0, stderr.decode()
+                assert (directory / "artifacts/verification.json").is_file()
+                assert (directory / "console.partial").stat().st_size == 8 * 1024**2
+                for row in (exit_row, teardown):
+                    assert row["stream_bytes"] == (root / "probe.frame").stat().st_size
+                    assert row["diagnostics_truncated"] is (mode == "stages:over-cap")
+                if mode == "stages:over-cap":
+                    assert exit_row["last_stage"] == "stream_close_end"
+                return
             assert launcher.returncode == exit_row["launcher_exit"] == int(stalled), stderr.decode()
             for row in (exit_row, teardown):
                 assert row["qemu_reaped"] and row["input_descriptor_closed"] and row["overlay_descriptor_closed"]
                 assert row["stream_bytes"] == (25 if stalled else (root / "probe.frame").stat().st_size)
                 expected_stage = "magic_written" if stalled else "stream_close_end"
+                if mode == "stages:blocked-header":
+                    expected_stage = "member_header_begin"
                 assert row["last_stage"] == (None if logging_error else expected_stage)
                 tail = row["console_stage_tail"]
                 assert "FIXTURE_NOT_A_REAL_SECRET" not in tail
@@ -901,8 +970,15 @@ os.execvp(sys.argv[1], sys.argv[1:])
                     assert 63 * 1024 < len(tail.encode()) <= 64 * 1024
                     assert tail.splitlines()[-1].split()[2] == expected_stage
             if stalled:
-                assert b"magic_written" in stderr
+                if mode == "stages:blocked-header":
+                    assert (root / "header-write-entered").exists()
+                    assert not (root / "header-write-returned").exists()
+                    assert b"member_header_begin" in stderr
+                else:
+                    assert b"magic_written" in stderr
                 assert (directory / "stream.partial").read_bytes() == b"CERALIVE_IMAGE_STREAM_V1\n"
+            if mode in {"stages:logging-error", "stages:flush-error", "stages:guest-loss"}:
+                assert teardown["diagnostics_lost"] and exit_row["diagnostics_lost"]
             assert not (root / "returns/active.json").exists()
             return
         expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error",

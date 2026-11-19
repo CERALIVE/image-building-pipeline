@@ -178,6 +178,8 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
         cancellation.check()
         disk_headroom(((directory, 16 * GIB),))
         validate_return(job, request["payload"]["operation"] != "measure")
+        if job.probe and job.state["last_stage"] != "stream_close_end":
+            job.state["diagnostics_lost"] = True
         job.state["stop_reason"] = "guest exited; transport validated"
     return directory / "artifacts"
 

@@ -103,10 +103,14 @@ the guest writer.
 
 Probe `teardown.json` and `exit.json` include `last_stage`, `stream_bytes`
 received by the host, and `console_stage_tail`, up to 64 KiB of complete
-allowlisted stage lines. The receipt omits other console text. The independent
-guest deadline error names the last observed stage. An external supervisor
-that ends the probe with TERM still produces a cancellation receipt, with the
-same diagnostics. Stage logging is best effort and does not affect acceptance.
+allowlisted stage lines. The receipt omits other console text. Raw probe logs
+share an 8 MiB cap. The launcher keeps draining and checking stage lines after
+that cap and records `diagnostics_truncated` if raw output was dropped.
+`diagnostics_lost` reports sink or capture errors, including loss reported by
+the guest, or missing stages on an otherwise successful return. An image guest
+deadline error names the last observed stage. A host helper timeout still
+names the helper. TERM from a supervisor produces a cancellation receipt with
+the same diagnostic fields. Diagnostics do not determine probe acceptance.
 
 The image base embeds the guest helper, stage logger and stream writer at
 `build-base --profile image` time. A newer launcher or source bundle does not

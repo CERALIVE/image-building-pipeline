@@ -1,7 +1,6 @@
 """Payload-free diagnostics for the isolated image probe."""
 
 from collections import deque
-from contextlib import suppress
 import os
 from pathlib import Path
 import re
@@ -19,33 +18,52 @@ STAGE_LINE = re.compile(
     rb"tcp_check_[1-4]_(?:begin|end)|verdict_computed|stream_open_(?:begin|end)|"
     rb"magic_write_begin|magic_written|member_prepare_(?:begin|end)|"
     rb"member_header_(?:begin|end)|member_body_(?:begin|written)|"
-    rb"flush_(?:begin|end)|stream_close_(?:begin|end)) ([0-9]{1,20})"
+    rb"flush_(?:begin|end)|stream_close_(?:begin|end)|diagnostics_lost) ([0-9]{1,20})"
 )
 
 
 class StageLog:
     """Write best-effort stage markers with no diagnostic I/O on the artifact port."""
 
+    def __init__(self) -> None:
+        self.pending_loss = False
+        self.reported_loss = False
+
     def emit(self, stage: str, count: int = 0) -> None:
         try:
-            line = f"STAGE {time.monotonic_ns()} {stage} {count}".encode("ascii")
+            timestamp = time.monotonic_ns()
+            line = f"STAGE {timestamp} {stage} {count}".encode("ascii")
             if not STAGE_LINE.fullmatch(line):
                 return
             line += b"\n"
-        except (OSError, ValueError, MemoryError):
+        except Exception:
+            self.pending_loss = True
             return
         flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
-        for path, guest_file in ((GUEST_LOG, True), (CONSOLE, False)):
-            with suppress(OSError):
-                fd = os.open(path, flags | (os.O_CREAT if guest_file else 0), 0o600)
-                try:
-                    if guest_file:
-                        info = os.fstat(fd)
-                        if not stat.S_ISREG(info.st_mode) or info.st_size + len(line) > GUEST_LIMIT:
-                            continue
-                    os.write(fd, line)
-                finally:
-                    os.close(fd)
+        try:
+            fd = os.open(GUEST_LOG, flags | os.O_CREAT, 0o600)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_size + len(line) > GUEST_LIMIT
+                        or os.write(fd, line) != len(line)):
+                    self.pending_loss = True
+            finally:
+                os.close(fd)
+        except Exception:
+            self.pending_loss = True
+        try:
+            fd = os.open(CONSOLE, flags)
+            try:
+                if self.pending_loss and not self.reported_loss:
+                    # Start on a fresh line even if an earlier write was short.
+                    marker = f"\nSTAGE {timestamp} diagnostics_lost 0\n".encode("ascii")
+                    self.reported_loss = os.write(fd, marker) == len(marker)
+                if os.write(fd, line) != len(line):
+                    self.pending_loss = True
+            finally:
+                os.close(fd)
+        except Exception:
+            self.pending_loss = True
 
 
 class StageTail:
@@ -56,6 +74,7 @@ class StageTail:
         self.lines: deque[bytes] = deque()
         self.size = 0
         self.last: str | None = None
+        self.lost = False
 
     def observe(self, chunk: bytes) -> None:
         parts = chunk.split(b"\n")
@@ -70,7 +89,10 @@ class StageTail:
                 continue
             line = joined.removesuffix(b"\r")
             if match := STAGE_LINE.fullmatch(line):
-                self.last = match[2].decode("ascii")
+                if match[2] == b"diagnostics_lost":
+                    self.lost = True
+                else:
+                    self.last = match[2].decode("ascii")
                 line += b"\n"
                 self.lines.append(line)
                 self.size += len(line)
