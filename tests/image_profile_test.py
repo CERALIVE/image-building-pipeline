@@ -37,7 +37,7 @@ import image_vm
 import vm_process
 import vm_startup
 from image_lifecycle import ImageJob, reconcile
-from image_stream import Identity, StreamError, encode
+from image_stream import Identity, StreamError, decode, encode
 import vm
 from image_vm import retained_outputs, validate_base
 from vm_process import CATCHABLE_SIGNALS, Cancellation, run
@@ -76,9 +76,10 @@ READER_CLEANUP_MODES = tuple(
 )
 STDERR_FLOOD_MODES = tuple(f"isolated:sink-{size}-{case}"
                           for size in ("small", "large") for case in ("baseline", "flood", "fault"))
+UNREGISTER_MODES = ("isolated:unregister-once:OSError", "isolated:unregister-always:OSError")
 PRESTART_MODES = tuple(
     f"prestart:{step}:{error}"
-    for step in ("pipe", "stream", "console", "console-after-register")
+    for step in ("pipe", "stream", "console", "console-after-register", "artifact-selector")
     for error in DIAGNOSTIC_ERRORS)
 ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "isolated:dropped",
                    *(f"isolated:{step}:{error}" for step in
@@ -86,6 +87,7 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                      for error in DIAGNOSTIC_ERRORS),
                    "isolated:summary-timeout:MemoryError", "isolated:fallback:MemoryError",
                    "isolated:read-dispatch:MemoryError", "isolated:unregister:OSError",
+                   *UNREGISTER_MODES,
                    *READER_CLEANUP_MODES,
                    *STDERR_FLOOD_MODES,
                    "isolated:encode-empty:MemoryError", "isolated:encode-tail:MemoryError",
@@ -632,6 +634,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 pipe2 = os.pipe2
                 register = selectors.EpollSelector.register
                 popen = subprocess.Popen
+                stream_registrations = 0
 
                 def reject_guest_spawn(args, *positional, **kwargs):
                     assert args[0] != "qemu-system-x86_64", "guest spawn preceded transport setup"
@@ -646,7 +649,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     return ends
 
                 def fail_register(selector, file, events, data=None):
-                    if data == operation or (data, operation) == ("console", "console-after-register"):
+                    nonlocal stream_registrations
+                    if data == "stream":
+                        stream_registrations += 1
+                    if (data == operation or (data, operation) == ("console", "console-after-register")
+                            or (data, operation, stream_registrations) == ("stream", "artifact-selector", 2)):
                         assert not (root / "pid").exists()
                         (root / "prestart-fds").write_text(json.dumps(tracked))
                         if operation == "console-after-register":
@@ -672,15 +679,30 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     return reader.__get__(job, ImageJob)
 
                 patches.enter_context(patch.object(ImageJob, "read_console", property(lookup_reader)))
-            elif operation == "unregister":
+            elif operation.startswith("unregister"):
                 unregister = selectors.EpollSelector.unregister
+                attempts = []
+                checks = 0
 
                 def fail_console_eof(selector, file):
                     if selector.get_key(file).data == "console":
+                        attempts.append(time.monotonic())
+                        if mode in UNREGISTER_MODES:
+                            (root / "unregister-attempts").write_text(json.dumps(attempts))
+                        if operation == "unregister-always" and len(attempts) > 1:
+                            raise OSError("fixture persistent unregister failure")
                         diagnostic_failure()
                     return unregister(selector, file)
 
+                def observe_disk_checks(*_args):
+                    nonlocal checks
+                    checks += 1
+                    if checks > 16:
+                        raise AssertionError(f"console EOF spun through {checks} disk checks")
+
                 patches.enter_context(patch.object(selectors.EpollSelector, "unregister", fail_console_eof))
+                if mode in UNREGISTER_MODES:
+                    patches.enter_context(patch.object(image_lifecycle, "disk_headroom", observe_disk_checks))
             elif operation.startswith(("alloc-", "reader-cleanup-")):
                 if operation.startswith("reader-cleanup-"):
                     target_code, target_offset = READER_CLEANUP, int(operation.rsplit("-", 1)[1])
@@ -765,7 +787,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
-            patch.object(image_lifecycle, "disk_headroom"),
+            *(() if mode in UNREGISTER_MODES else (patch.object(image_lifecycle, "disk_headroom"),)),
             patch.object(image_lifecycle, "process_priority",
                          side_effect=(priority_timeout
                                       if mode == "stages:priority-timeout"
@@ -786,8 +808,8 @@ class FixturePolicy:
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
                       blocked: tuple[signal.Signals, ...] = (),
                       ignored: tuple[signal.Signals, ...] = (),
-                      entry_setup: str | None = None) -> dict | None:
-    with tempfile.TemporaryDirectory() as tmp:
+                      entry_setup: str | None = None, full_stderr: bool = False) -> dict | None:
+    with tempfile.TemporaryDirectory() as tmp, ExitStack() as launch_io:
         root = pathlib.Path(tmp)
         capsule = root / "capsule"
         if mode.startswith("pair:"):
@@ -911,12 +933,14 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
         if mode != "isolated:baseline" and not mode.startswith("isolated:encode-empty"):
             serial_write(b"STAGE 1 probe_start 0 1\\n")
             serial_write(b"STAGE 2 stream_close_end 0 " + (b"3" if mode == "isolated:gap" else b"2") + b"\\n")
-        if mode == "isolated:unregister:OSError":
+        if mode.startswith("isolated:unregister"):
             os.close(console)
             until = time.monotonic() + 2
             while not (root / "diag-injected").exists():
                 assert time.monotonic() < until
                 time.sleep(0.01)
+            if mode in {UNREGISTER_MODES!r}:
+                time.sleep(1.2)
     if mode in {STDERR_FLOOD_MODES!r}:
         assert not os.get_blocking(console)
         if mode.endswith("-fault"):
@@ -1041,15 +1065,27 @@ signal.pthread_sigmask(signal.SIG_BLOCK, {tuple(map(int, blocked))!r})
 os.execvp(sys.argv[1], sys.argv[1:])
 """
             command = [sys.executable, "-c", setup, *command]
+        stderr_target = subprocess.PIPE
+        if full_stderr:
+            read_end, stderr_target = os.pipe()
+            launch_io.callback(os.close, read_end)
+            launch_io.callback(os.close, stderr_target)
+            capacity = fcntl.fcntl(stderr_target, fcntl.F_GETPIPE_SZ)
+            assert os.write(stderr_target, b"x" * capacity) == capacity
         with subprocess.Popen(
             command,
             env={"PATH": f"{root}:/usr/bin:/bin", "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1"},
-            start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, stdout=subprocess.PIPE, stderr=stderr_target,
         ) as launcher:
-            seconds = 27 if mode == "ignore" else 8
+            seconds = 27 if mode == "ignore" else 5 if full_stderr else 8
             try:
                 _, stderr = launcher.communicate(timeout=seconds)
+                stderr = stderr or b""
             except subprocess.TimeoutExpired as error:
+                if full_stderr:
+                    marker = root / "returns/fixture/build/exit.json"
+                    assert marker.exists(), "timeout occurred before receipt publication"
+                    raise AssertionError("launcher blocked on full stderr after committing exit.json") from error
                 assert (root / "sent").exists(), "fixture never delivered cancellation"
                 pid = (root / "pid").read_text()
                 assert pathlib.Path(f"/proc/{pid}").exists()
@@ -1075,6 +1111,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if full_stderr:
+            assert os.get_blocking(stderr_target)
         if mode in PRESTART_MODES:
             assert launcher.returncode == 1, (mode, stderr)
             assert (root / "diag-injected").is_file() and b"fixture console fault" in stderr
@@ -1249,6 +1287,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert (directory / "artifacts/verification.json").read_bytes() == probe_body
             if mode.count(":") == 2:
                 assert (root / "diag-injected").exists(), mode
+            if mode in UNREGISTER_MODES:
+                first, retry = json.loads((root / "unregister-attempts").read_text())
+                assert retry - first >= image_lifecycle.POLL_SECONDS, (first, retry)
             if operation in {"summary", "summary-timeout", "fallback", "text"} or operation.startswith(
                 ("alloc-", "encode-")
             ):
@@ -1397,7 +1438,7 @@ def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_t
 def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> None:
     baseline = cancelled_fixture("isolated:baseline")
     for mode in ISOLATION_MODES[1:]:
-        if mode in STDERR_FLOOD_MODES or mode in READER_CLEANUP_MODES:
+        if mode in (*STDERR_FLOOD_MODES, *READER_CLEANUP_MODES, *UNREGISTER_MODES):
             continue
         result = cancelled_fixture(mode)
         if mode.split(":")[1] not in {"dropped", "summary-timeout"}:
@@ -1408,6 +1449,17 @@ def test_serial_reader_cleanup_faults_preserve_the_committed_probe() -> None:
     baseline = cancelled_fixture("isolated:complete")
     for mode in READER_CLEANUP_MODES:
         assert cancelled_fixture(mode) == baseline, mode
+
+
+def test_failed_console_unregister_does_not_spin_or_change_probe_result() -> None:
+    baseline = cancelled_fixture("isolated:complete")
+    for mode in UNREGISTER_MODES:
+        assert cancelled_fixture(mode) == baseline, mode
+
+
+def test_full_host_stderr_does_not_block_exit_after_probe_timeout() -> None:
+    mode = "isolated:summary-timeout:MemoryError"
+    assert cancelled_fixture(mode, full_stderr=True) == cancelled_fixture(mode)
 
 
 def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
@@ -1421,7 +1473,7 @@ def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
         wire = root / "wire"
         wire.write_bytes(frame.getvalue())
         helper = root / "image_guest.py"
-        helper.write_text(f"import sys\nsys.stdout.buffer.write(open({str(wire)!r}, 'rb').read())\n"
+        helper.write_text(f"import sys\nopen({str(root / 'returned')!r}, 'wb').write(open({str(wire)!r}, 'rb').read())\n"
                           "raise SystemExit(int(sys.argv[1]))\n")
         observed = root / "poweroff"
         for tool, command in (
@@ -1439,14 +1491,15 @@ def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
         failures = []
         try:
             termios.tcflow(slave, termios.TCOOFF)
-            for status in (0, 1):
+            for status in (0, 1, 37):
                 for sink in ("healthy", "stopped", "write-error"):
                     observed.unlink(missing_ok=True)
                     serial = {"healthy": str(root / "serial"), "stopped": os.ttyname(slave),
                               "write-error": "/dev/full"}[sink]
-                    with (root / "returned").open("wb") as received, subprocess.Popen(
+                    (root / "returned").unlink(missing_ok=True)
+                    with subprocess.Popen(
                         ["/bin/bash", "-c", wrapper.replace("/dev/ttyS0", serial), "fixture", str(status)],
-                        env={"PATH": f"{root}:/usr/bin:/bin"}, start_new_session=True, stdout=received,
+                        env={"PATH": f"{root}:/usr/bin:/bin"}, start_new_session=True, stdout=subprocess.DEVNULL,
                         stderr=subprocess.PIPE,
                     ) as guest:
                         try:
@@ -1460,11 +1513,100 @@ def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
                                 failures.append((sink, status, observed.is_file(), guest.returncode, stderr))
                     assert (root / "returned").read_bytes() == frame.getvalue()
                     if sink == "healthy":
-                        assert (root / "serial").read_bytes() == f"\nCERALIVE_JOB_DONE={status}\n".encode()
+                        marker = (root / "serial").read_bytes()
+                        assert marker == f"\nCERALIVE_JOB_DONE={status}\n".encode(), (status, marker, failures)
         finally:
             os.close(slave)
             os.close(master)
         assert not failures, failures
+
+
+def test_guest_failure_frame_and_poweroff_survive_full_standard_streams() -> None:
+    with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
+        root = pathlib.Path(tmp)
+        (root / "image").mkdir()
+        request = root / "image/raw"
+        request.write_text(json.dumps({"schema": 1, "identity": asdict(IDENTITY),
+                                       "operation": "probe", "trust": {}}))
+        wire = root / "wire"
+        helper = root / "fixture.py"
+        helper.write_text(f"""
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.path.insert(0, {str(ROOT / 'ci/kernel-runner')!r})
+import image_guest
+import image_stages
+
+def unpack(_capsule, destination, _identity):
+    destination.mkdir()
+    return SimpleNamespace(objects=())
+
+with patch.object(image_guest, 'HOME', Path({str(root / 'guest')!r})), \\
+     patch.object(image_guest, 'Path', side_effect=lambda path: {{
+         '/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw': Path({str(request)!r}),
+         '/dev/virtio-ports/ceralive-artifacts': Path({str(wire)!r}),
+     }}.get(path, Path(path))), \\
+     patch.object(image_guest, 'unpack', unpack), \\
+     patch.object(image_guest, 'source_checkout'), \\
+     patch.object(image_guest, 'command', return_value='[{{}}]'), \\
+     patch.object(image_stages, 'CONSOLE', Path('/dev/null')):
+    result = image_guest.main()
+    if 'wrapper' in sys.argv:
+        import atexit
+        import os
+        atexit.register(os.write, 1, b'late stdout\\n')
+        atexit.register(os.write, 2, b'late stderr\\n')
+    raise SystemExit(result)
+""")
+        observed = root / "poweroff"
+        for name, command in (
+            ("modprobe", "exit 0"),
+            ("systemctl", f'[[ $* = poweroff && -s "{wire}" ]] && : >"{observed}"'),
+        ):
+            stub = root / name
+            stub.write_text(f"#!/bin/bash\n{command}\n")
+            stub.chmod(0o700)
+        wrapper = (ROOT / "ci/kernel-runner/guest-job.sh").read_text()
+        wrapper = wrapper.replace("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive", str(root))
+        wrapper = wrapper.replace("/usr/local/lib/ceralive-kernel-runner/image_guest.py", f'"{helper}" wrapper')
+        wrapper = wrapper.replace("/dev/ttyS0", "/dev/null")
+        pipes = []
+        for _ in range(2):
+            reader, writer = os.pipe()
+            resources.callback(os.close, reader)
+            resources.callback(os.close, writer)
+            size = fcntl.fcntl(writer, fcntl.F_GETPIPE_SZ)
+            assert os.write(writer, b"x" * size) == size
+            pipes.append(writer)
+
+        failures = []
+        for mode, argv in (
+            ("helper", [sys.executable, str(helper)]),
+            ("wrapper", ["/bin/bash", "-c", wrapper]),
+        ):
+            wire.unlink(missing_ok=True)
+            if (root / "guest").exists():
+                (root / "guest").rename(root / "previous-guest")
+            with subprocess.Popen(argv, env={"PATH": f"{root}:/usr/bin:/bin"}, start_new_session=True,
+                                  stdout=pipes[0], stderr=pipes[1]) as process:
+                try:
+                    assert process.wait(timeout=2) == 1
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                    failures.append(f"{mode} blocked after closing the failure frame")
+            target = root / mode
+            target.mkdir()
+            with wire.open("rb") as source:
+                members = decode(source, target, IDENTITY)
+            assert [member.id for member in members] == ["failure.json"]
+            assert json.loads((target / "failure.json").read_text()) == {
+                "schema": 1, "identity": asdict(IDENTITY), "failure": "StreamError", "exit": None,
+            }
+            assert wire.stat().st_size == 843
+        assert observed.is_file() and not failures, failures
 
 
 def test_probe_stderr_flood_does_not_depend_on_host_reads() -> None:
@@ -1510,6 +1652,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
     capture_exact = (
         "files[name].write(chunk)", "self.read_console(event.fd)",
         "events.unregister(event.fileobj)", "events.unregister(event.fileobj)",
+        "self.probe_events.unregister(self.console_read)",
         "self.drain(events)", "optional(lose, self.close_console_writer)",
         "os.read(event.fd, 1024 * 1024)",
         "events.select(timeout=min(POLL_SECONDS, end - now))",

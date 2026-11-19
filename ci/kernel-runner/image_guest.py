@@ -187,7 +187,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     return records
 
 
-def main() -> None:
+def main() -> int:
     raw = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw")
     with raw.open("rb") as payload:
         data = payload.read(1024 * 1024 + 1)
@@ -273,9 +273,9 @@ def main() -> None:
                 stages("stream_close_begin")
     if stages:
         stages("stream_close_end")
-    if failure is not None:
-        raise failure
+    # The frame already describes the failure. Exiting must not print a traceback.
+    return int(failure is not None)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -108,12 +108,7 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                                 return operation(target, *args)
 
                             faults.enter_context(patch.object(os, fault, side_effect=fail_once))
-                        try:
-                            image_guest.main()
-                        except StreamError:
-                            assert route_present
-                        else:
-                            assert not route_present
+                        assert image_guest.main() == int(route_present)
                         if fault and fault.startswith("init:"):
                             failed_init.assert_called_once()
                         elif fault:

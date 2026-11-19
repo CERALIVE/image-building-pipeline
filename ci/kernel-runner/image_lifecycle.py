@@ -201,11 +201,17 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
 
 
 def report_error(error: BaseException | str) -> None:
-    """Diagnostics must not affect an already committed exit code."""
+    """Keep stderr backpressure out of receipt publication and launcher exit."""
     try:
-        os.write(2, f"kernel runner: {error}\n".encode(errors="backslashreplace"))
+        message = f"kernel runner: {error}\n".encode(errors="backslashreplace")
+        # Reopen so setting nonblocking doesn't change the caller's descriptor.
+        fd = os.open("/proc/self/fd/2", os.O_WRONLY | os.O_NONBLOCK | os.O_APPEND | os.O_NOCTTY)
+        try:
+            os.write(fd, message[:4096])
+        finally:
+            os.close(fd)
     except BaseException:
-        return  # There may be no stderr reader.
+        return
 
 
 def reconcile(store: Path) -> None:
@@ -273,6 +279,7 @@ class ImageJob:
         self.observe_stages = True
         self.console_open = True
         self.probe_events: selectors.BaseSelector | None = None
+        self.probe_artifact_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
             inputs.callback(os.close, self.capsule_fd)
@@ -367,7 +374,11 @@ class ImageJob:
             writers.callback(os.close, stream_write)
             for name, fd in (("stream", stream_read), ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
+            # A stuck serial registration must not wake the artifact poll.
+            artifact_events = self.inputs.enter_context(selectors.DefaultSelector())
+            artifact_events.register(stream_read, selectors.EVENT_READ, "stream")
             self.probe_events = events
+            self.probe_artifact_events = artifact_events
             self.stage_tail = optional(self.lose_diagnostics, StageTail)
         except Exception as error:
             # The pre-commit OSError path cannot publish an outcome for this setup failure.
@@ -419,6 +430,7 @@ class ImageJob:
             self.close_console_writer()
         end = time.monotonic() + seconds
         next_priority_check = 0.0
+        console_retry_at = None
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
         with ExitStack() as local:
             events = self.probe_events
@@ -452,6 +464,13 @@ class ImageJob:
                             if poll_owned(process) is None:
                                 raise
                         next_priority_check = now + 5
+                    if console_retry_at is not None and now >= console_retry_at:
+                        console_retry_at = None
+                        assert self.probe_events is not None
+                        try:
+                            self.probe_events.unregister(self.console_read)
+                        except Exception:
+                            self.capture_lost = True
                     try:
                         ready = events.select(timeout=min(POLL_SECONDS, end - now))
                     except InterruptedError:
@@ -472,6 +491,9 @@ class ImageJob:
                                         events.unregister(event.fileobj)
                                     except Exception:
                                         self.capture_lost = True
+                                        assert self.probe_artifact_events is not None
+                                        events = self.probe_artifact_events
+                                        console_retry_at = time.monotonic() + POLL_SECONDS
                             continue
                         try:
                             chunk = os.read(event.fd, 1024 * 1024)

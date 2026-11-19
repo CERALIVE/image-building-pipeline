@@ -106,14 +106,20 @@ aborts before guest launch and leaves no `exit.json`. QEMU stderr goes to
 `/dev/null` for probes. The launcher reads serial markers into a fixed 4 KiB
 memory ring, discards ordinary console text and evicts the oldest complete
 stage lines when full. A console read error ends marker capture and marks it
-lost. The probe's serial cleanup is best effort. A reader callback failure
+lost. If serial unregister fails, capture switches to a pre-registered
+artifact-only selector. The launcher can retry serial removal once after at
+least one second while continuing to poll for artifacts. The probe's serial
+cleanup is best effort. A reader callback failure
 marks capture lost and the descriptor owner still closes the reader if the
 callback failed before close. Artifact teardown, active-journal removal,
 and the exit receipt proceed independently of the serial callback.
 
 The guest flushes and closes the artifact port before attempting
 `CERALIVE_JOB_DONE`. The image wrapper gives that write 250 ms and requests
-poweroff even if the write times out or fails. The image host uses QEMU's
+poweroff even if the write times out or fails. The wrapper preserves the image
+helper's exit status and sends stdout and stderr to `/dev/null`. A helper
+failure that has already been serialized into `failure.json` exits silently
+with status 1. The image host uses QEMU's
 exit status and independently validates the artifact stream. It does not
 require the wrapper marker or any `STAGE` marker for the verdict. The
 separate kernel check and JIT runner still require `CERALIVE_JOB_DONE=0`.
@@ -135,6 +141,9 @@ optional summary. If that fails, it writes the already encoded loss fields
 in the same atomic receipt. These fields report capture loss,
 an unknown last stage, and an empty tail. The launcher uses the same receipt
 commit for the summary and the exit status, with no separate diagnostic file.
+Host error text is best effort. Reporting attempts one bounded-size
+nonblocking write via a separately opened stderr descriptor. A full pipe
+can drop the message without delaying the authoritative receipt or exit.
 
 The image base embeds the guest wrapper, helper, stage logger and stream writer at
 `build-base --profile image` time. A newer launcher or source bundle does not
