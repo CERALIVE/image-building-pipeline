@@ -159,7 +159,10 @@ in its preallocated slot. Verification uses the same bounded retry for
 interrupted reads and reports failure without changing the receipt or exit status.
 Safe filesystem operations retry an interruption at most twice, without
 sleeping. Required reads and writes also retry transient I/O errors at the
-same bound. An unbuffered receipt write resumes at the first unwritten byte.
+same bound. Receipt temporaries use exclusive, close-on-exec creation in one
+open call. A name collision tries a fresh name without touching the existing
+file. Writes resume at the first unwritten byte. The transaction closes and
+removes its own temporary if publication fails.
 A required operation that exhausts its attempts before commit still fails the
 attempt. A final directory sync error after rename is reported without changing
 the committed outcome.
@@ -779,9 +782,14 @@ cannot skip the remaining cleanup or change the published result. A final
 directory-sync failure leaves the file visible at runtime, but a crash may
 lose the rename.
 
-After teardown and publication, the CLI reads `launcher_exit` from the
-published marker. A missing or unreadable marker, or an invalid status,
-returns a nonzero exit. The CLI uses a direct process exit so Python
+After teardown and publication, the CLI verifies `launcher_exit` against
+the status recorded at rename. A missing or unreadable marker is a
+verification error for consumers and does not change the CLI's committed
+status. Before rename, the launcher retries the terminal signal mask at
+most three times in total. Once established, the mask stays blocked through
+direct exit. If the mask cannot be established, the launcher reports
+`finalization signal mask unverified` on stderr and still attempts to commit
+the prepared outcome. The CLI uses a direct process exit so Python
 shutdown hooks cannot replace the result. The external flock releases its
 lock when the launcher exits. The launcher has already reaped QEMU and
 closed the guest descriptors and anonymous overlay before committing success.

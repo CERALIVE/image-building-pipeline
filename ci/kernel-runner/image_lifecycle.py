@@ -21,7 +21,7 @@ import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
-from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError, retry_io, write_all
+from image_stream import CONTROL_LOG_LIMIT, IO_ATTEMPTS, Identity, StreamError, retry_io, write_all
 from vm_process import (
     POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
     register_close, run, wait,
@@ -109,23 +109,31 @@ class Receipt:
         self.outcome = outcome
         self.temporary = temporary or receipt_temporary(path)
         self.status = row["launcher_exit"] if outcome is not None else None
-        self.file: BinaryIO | None = None
+        self.file_fd: int | None = None  # -1 means the temporary is ours and closed.
         self.probe = probe
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
 
     def temp_open(self) -> None:
-        self.file = retry_io(open, self.temporary, "xb", buffering=0, recover=True,
-                             opener=lambda name, flags: os.open(Path(name), flags, 0o600))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        for attempt in range(IO_ATTEMPTS):
+            try:
+                self.file_fd = retry_io(os.open, self.temporary, flags, 0o600, recover=True)
+                return
+            except FileExistsError:
+                if attempt + 1 == IO_ATTEMPTS:
+                    raise
+                self.temporary = receipt_temporary(self.path)
 
     def temp_write(self) -> None:
-        assert self.file is not None
+        fd = self.file_fd
+        assert fd is not None and fd >= 0
         if self.probe is None:
             with StringIO() as text:
                 json.dump(self.row, text, sort_keys=True, indent=2)
                 text.write("\n")
-                write_all(self.file, text.getvalue().encode("utf-8"))
+                write_all(fd, text.getvalue().encode("utf-8"))
             return
         # Encode the authoritative fields before trying optional diagnostics.
         # On an encoding fault, both fragments are already available as bytes.
@@ -135,37 +143,38 @@ class Receipt:
             fields = encode_diagnostic_fields(self.probe.diagnostic_summary())
         except Exception:
             pass
-        write_all(self.file, outcome)
-        write_all(self.file, fields)
-
-    def temp_flush(self) -> None:
-        assert self.file is not None
-        retry_io(self.file.flush, recover=True)
+        write_all(fd, outcome)
+        write_all(fd, fields)
 
     def file_sync(self) -> None:
-        assert self.file is not None
-        retry_io(os.fsync, self.file.fileno(), recover=True)
+        assert self.file_fd is not None and self.file_fd >= 0
+        retry_io(os.fsync, self.file_fd, recover=True)
 
     def file_close(self) -> None:
-        if self.file is not None:
+        fd = self.file_fd
+        if fd is not None and fd >= 0:
             try:
-                close_transport(self.file.close)
+                os.close(fd)
             except OSError as error:
-                report_error(error)  # The file is unbuffered and sync precedes close.
+                self.file_fd = -1
+                report_error(error)  # Linux has already released the descriptor.
+            else:
+                self.file_fd = -1
 
     def temp_cleanup(self) -> None:
-        if not self.renamed:
+        if self.file_fd is not None and not self.renamed:
             retry_io(self.temporary.unlink, missing_ok=True, recover=True)
 
     def mask_block(self) -> None:
         if self.outcome is not None:
-            self.outcome.begin_finalization()
+            if not self.outcome.begin_finalization():
+                report_error("finalization signal mask unverified")
 
     def rename(self) -> None:
         def publish() -> None:
             if self.outcome is not None and self.row["stop_reason"] != "cancelled":
                 self.outcome.check()
-                if signal.sigpending().intersection(STOP_SIGNALS):
+                if retry_io(signal.sigpending, recover=True).intersection(STOP_SIGNALS):
                     raise Cancelled("runner cancelled")
             os.replace(self.temporary, self.path)
 
@@ -199,7 +208,7 @@ class Receipt:
 # The order and failure policy here also drive the complete fault matrix.
 RECEIPT_STEPS = (
     (Receipt.temp_open, False), (Receipt.temp_write, False),
-    (Receipt.temp_flush, False), (Receipt.file_sync, False),
+    (Receipt.file_sync, False),
     (Receipt.file_close, True), (Receipt.mask_block, False), (Receipt.rename, False),
     (Receipt.dir_open, True), (Receipt.dir_sync, True),
     (Receipt.dir_close, True), (Receipt.temp_cleanup, True), (Receipt.log_errors, True),
@@ -225,8 +234,12 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
                 elif not isinstance(error, Cancelled):
                     transaction.errors.append(error)
     finally:
-        if transaction.directory_fd is not None:
-            transaction.dir_close()
+        try:
+            if transaction.file_fd is not None and transaction.file_fd >= 0:
+                transaction.file_close()
+        finally:
+            if transaction.directory_fd is not None:
+                transaction.dir_close()
     if failure is not None and (outcome is None or not transaction.renamed):
         if isinstance(failure, Cancelled):
             raise failure

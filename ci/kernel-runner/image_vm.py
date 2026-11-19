@@ -232,7 +232,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                 if not status:
                     row["acceptance_sha256"] = accepted_sha
             receipt(path, row, outcome=cancellation, diagnostic=error, probe=build if probe else None,
-                    temporary=cancellation.exit_temporary)
+                    temporary=cancellation.exit_temporary if retry_commit or not probe else None)
             return status
         except Cancelled as exc:
             error = exc

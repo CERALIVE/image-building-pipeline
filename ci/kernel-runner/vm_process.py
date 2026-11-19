@@ -16,6 +16,8 @@ from threading import get_native_id
 import time
 from typing import Callable
 
+from image_stream import retry_io
+
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
 LOST_CHILD_SECONDS = 2
@@ -84,7 +86,8 @@ class ChildContainmentError(OSError):
 class Cancellation:
     """Signal state and the authoritative status of a renamed exit receipt."""
 
-    __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "finalizing", "safe_journal")
+    __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "finalizing",
+                 "mask_verified", "safe_journal")
 
     def __init__(self) -> None:
         self.requested = False
@@ -92,6 +95,7 @@ class Cancellation:
         self.exit_temporary: Path | None = None
         self.exit_status: int | None = None
         self.finalizing = False
+        self.mask_verified = False
         self.safe_journal: tuple[Path, Path] | None = None
 
     def request(self, _signum: int, _frame) -> None:
@@ -101,11 +105,17 @@ class Cancellation:
         if self.requested:
             raise Cancelled("runner cancelled")
 
-    def begin_finalization(self) -> None:
+    def begin_finalization(self) -> bool:
         """Enter the single-threaded image CLI's terminal section until os._exit."""
         if not self.finalizing:
-            signal.pthread_sigmask(signal.SIG_BLOCK, CATCHABLE_SIGNALS)
+            try:
+                retry_io(signal.pthread_sigmask, signal.SIG_BLOCK, CATCHABLE_SIGNALS, recover=True)
+            except OSError:
+                self.finalizing = True
+                return False
+            self.mask_verified = True
             self.finalizing = True
+        return self.mask_verified
 
 
 def check_spawn_signals(cancellation: Cancellation) -> None:

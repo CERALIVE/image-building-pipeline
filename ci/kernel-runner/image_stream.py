@@ -37,7 +37,7 @@ class StreamError(Exception):
 
 
 def retry_io(operation, *args, recover: bool = False, **kwargs):
-    """Retry safe filesystem operations at most three times including the first call."""
+    """Retry safe operations at most three times including the first call."""
     for attempt in range(IO_ATTEMPTS):
         try:
             return operation(*args, **kwargs)
@@ -48,11 +48,14 @@ def retry_io(operation, *args, recover: bool = False, **kwargs):
                 raise
 
 
-def write_all(destination: BinaryIO, data: bytes) -> None:
+def write_all(destination: BinaryIO | int, data: bytes) -> None:
     """Only retry the unwritten bytes of an unbuffered regular file."""
     remaining = memoryview(data)
     while remaining:
-        written = retry_io(destination.write, remaining, recover=True)
+        if isinstance(destination, int):
+            written = retry_io(os.write, destination, remaining, recover=True)
+        else:
+            written = retry_io(destination.write, remaining, recover=True)
         if not written:
             raise OSError(errno.EIO, "file write made no progress")
         remaining = remaining[written:]
