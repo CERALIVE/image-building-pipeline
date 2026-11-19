@@ -87,7 +87,7 @@ class Cancellation:
     """Signal state and the authoritative status of a renamed exit receipt."""
 
     __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "finalizing",
-                 "mask_verified", "safe_journal")
+                 "saved_dispositions", "safe_journal")
 
     def __init__(self) -> None:
         self.requested = False
@@ -95,7 +95,7 @@ class Cancellation:
         self.exit_temporary: Path | None = None
         self.exit_status: int | None = None
         self.finalizing = False
-        self.mask_verified = False
+        self.saved_dispositions: dict[int, signal.Handlers | Callable] = {}
         self.safe_journal: tuple[Path, Path] | None = None
 
     def request(self, _signum: int, _frame) -> None:
@@ -106,16 +106,29 @@ class Cancellation:
             raise Cancelled("runner cancelled")
 
     def begin_finalization(self) -> bool:
-        """Enter the single-threaded image CLI's terminal section until os._exit."""
+        """Protect the terminal section from all catchable signals until os._exit."""
         if not self.finalizing:
             try:
                 retry_io(signal.pthread_sigmask, signal.SIG_BLOCK, CATCHABLE_SIGNALS, recover=True)
             except OSError:
-                self.finalizing = True
-                return False
-            self.mask_verified = True
+                try:
+                    for signum in sorted(CATCHABLE_SIGNALS):
+                        previous = signal.getsignal(signum)
+                        if previous is None:
+                            raise OSError(errno.EIO, "cannot restore previous signal disposition")
+                        self.saved_dispositions[signum] = previous
+                        retry_io(signal.signal, signum, signal.SIG_IGN, recover=True)
+                except (OSError, ValueError, MemoryError):
+                    self.restore_dispositions()
+                    raise
             self.finalizing = True
-        return self.mask_verified
+        return not self.saved_dispositions
+
+    def restore_dispositions(self) -> None:
+        """Restore the sigaction fallback if control returns without process exit."""
+        for signum, previous in self.saved_dispositions.items():
+            retry_io(signal.signal, signum, previous, recover=True)
+        self.saved_dispositions.clear()
 
 
 def check_spawn_signals(cancellation: Cancellation) -> None:

@@ -196,7 +196,7 @@ def main(cancellation: Cancellation) -> int:
     if args.operation == "build-base":
         if base.exists():
             parser.error("base already exists; select a new base path")
-        base.parent.mkdir(parents=True, exist_ok=True)
+        retry_io(base.parent.mkdir, parents=True, exist_ok=True, recover=True)
         if args.profile == "image":
             from image_resources import cgroup_admission, disk_headroom, require_host_lock
             require_host_lock()
@@ -320,7 +320,7 @@ def exit_launcher() -> None:
                 committed = cancellation.exit_status
                 status = 1 if committed is None else committed
                 retire_journal(cancellation)
-                # Final receipt publication keeps signals blocked through this exit.
+                # Keep terminal signal protection in force through direct exit.
                 if committed is not None:
                     verify_exit_receipt(cancellation.exit_receipt, committed)
             else:
@@ -330,7 +330,10 @@ def exit_launcher() -> None:
                     except BaseException as exc:
                         report_error(exc)
         finally:
-            os._exit(status)
+            try:
+                os._exit(status)
+            finally:
+                cancellation.restore_dispositions()
 
 
 def verify_exit_receipt(path: Path, committed: int) -> None:

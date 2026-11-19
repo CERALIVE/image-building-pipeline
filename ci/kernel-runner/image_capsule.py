@@ -12,7 +12,7 @@ import re
 import tarfile
 from typing import BinaryIO, Callable, Final
 
-from image_stream import Identity, StreamError, unique_object
+from image_stream import ExclusiveFile, Identity, StreamError, retry_io, unique_object
 from image_urls import InputURLError, canonical_url
 
 INPUT_LIMIT: Final = 32 * 1024**3
@@ -68,7 +68,7 @@ def unpack(capsule: Path, directory: Path, expected: Identity) -> Capsule:
     """Guest-only import; paths and archive link semantics never cross this boundary."""
     if capsule.stat().st_size > INPUT_LIMIT or digest_file(capsule) != expected.input_sha256:
         raise StreamError("input capsule length or transport digest mismatch")
-    directory.mkdir(mode=0o700)
+    retry_io(directory.mkdir, mode=0o700, recover=True)
     with tarfile.open(capsule, "r:") as archive:
         entries = archive.getmembers()
         if (len(entries) > 20000 or len({entry.name for entry in entries}) != len(entries)
@@ -124,13 +124,13 @@ def unpack(capsule: Path, directory: Path, expected: Identity) -> Capsule:
             if stream is None:
                 raise StreamError("unreadable capsule object")
             digest = hashlib.sha256()
-            fd = os.open(directory / item.sha256, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
-            with stream, os.fdopen(fd, "wb") as destination:
+            with stream, ExclusiveFile(directory / item.sha256, 0o400) as destination:
+                destination.open()
                 while chunk := stream.read(1024 * 1024):
                     digest.update(chunk)
                     destination.write(chunk)
-            if digest.hexdigest() != item.sha256:
-                raise StreamError("capsule object hash mismatch")
+                if digest.hexdigest() != item.sha256:
+                    raise StreamError("capsule object hash mismatch")
     # Public repository trust is selected independently in the host job payload.
     # This document only describes deliveries; fetch/sealed.sh rechecks signatures.
     config = directory / "inventory.json"
@@ -167,26 +167,26 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
         row["objects"] = list(objects.values())
         if sum(item["length"] for item in objects.values()) + 16 * 1024**2 > INPUT_LIMIT:
             raise StreamError("verification capsule exceeds the unchanged 32 GiB budget")
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as output, tarfile.open(
-                fileobj=output, mode="w:", copybufsize=1024 * 1024) as target:
-            import io
-            data = json.dumps(row, separators=(",", ":")).encode()
-            header = tarfile.TarInfo("inventory.json")
-            header.size = len(data)
-            target.addfile(header, io.BytesIO(data))
-            for digest, item in objects.items():
-                header = tarfile.TarInfo("objects/" + digest)
-                header.size = item["length"]
-                if digest in files:
-                    with files[digest].open("rb") as member:
-                        target.addfile(header, CheckedReader(member, checkpoint))
-                else:
-                    member = source.extractfile("objects/" + digest)
-                    if member is None:
-                        raise StreamError("missing verifier public input")
-                    with member:
-                        target.addfile(header, CheckedReader(member, checkpoint))
+        with ExclusiveFile(destination) as output:
+            output.open()
+            with tarfile.open(fileobj=output, mode="w:", copybufsize=1024 * 1024) as target:
+                import io
+                data = json.dumps(row, separators=(",", ":")).encode()
+                header = tarfile.TarInfo("inventory.json")
+                header.size = len(data)
+                target.addfile(header, io.BytesIO(data))
+                for digest, item in objects.items():
+                    header = tarfile.TarInfo("objects/" + digest)
+                    header.size = item["length"]
+                    if digest in files:
+                        with files[digest].open("rb") as member:
+                            target.addfile(header, CheckedReader(member, checkpoint))
+                    else:
+                        member = source.extractfile("objects/" + digest)
+                        if member is None:
+                            raise StreamError("missing verifier public input")
+                        with member:
+                            target.addfile(header, CheckedReader(member, checkpoint))
     return selected
 
 

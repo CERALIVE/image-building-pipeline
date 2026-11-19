@@ -22,7 +22,7 @@ from urllib.parse import urljoin, urlsplit
 
 from image_capsule import original_url
 from image_policy import ArchivePolicy, require_client_origin
-from image_stream import StreamError, unique_object
+from image_stream import ExclusiveFile, StreamError, unique_object
 
 ROOT = Path(__file__).resolve().parents[2]
 SEALED = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
@@ -259,7 +259,8 @@ def copy_local(source: Path, target: Path, length: int) -> None:
     """Snapshot only the reviewed number of bytes from a regular local input."""
     if source.is_symlink() or not source.is_file() or source.stat().st_size != length:
         raise StreamError("local input is not a regular file of the approved size")
-    with source.open("rb") as stream, target.open("xb") as output:
+    with source.open("rb") as stream, ExclusiveFile(target, 0o666) as output:
+        output.open()
         remaining = length
         while remaining:
             chunk = stream.read(min(1024 * 1024, remaining))

@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import selectors
 import signal
+import stat
 import subprocess
 import time
 import tempfile
@@ -21,7 +22,9 @@ import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
-from image_stream import CONTROL_LOG_LIMIT, IO_ATTEMPTS, Identity, StreamError, retry_io, write_all
+from image_stream import (
+    CONTROL_LOG_LIMIT, IO_ATTEMPTS, ExclusiveFile, Identity, StreamError, create_file, retry_io, write_all,
+)
 from vm_process import (
     POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
     register_close, run, wait,
@@ -86,16 +89,19 @@ def sync_directory(path: Path) -> None:
 
 def create_directory(path: Path, *, parents: bool = False) -> None:
     """Make each new directory entry durable before relying on its children."""
-    if parents and path.is_dir():
-        return
     if parents:
+        try:
+            if stat.S_ISDIR(retry_io(path.stat, recover=True).st_mode):
+                return
+        except FileNotFoundError:
+            pass
         create_directory(path.parent, parents=True)
-    path.mkdir(mode=0o700)
+    retry_io(path.mkdir, mode=0o700, recover=True)
     sync_directory(path.parent)
 
 
 def receipt_temporary(path: Path) -> Path:
-    return path.parent / (".receipt-" + uuid.uuid4().hex)
+    return path.parent / (".receipt-" + retry_io(uuid.uuid4, recover=True).hex)
 
 
 class Receipt:
@@ -116,10 +122,9 @@ class Receipt:
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
 
     def temp_open(self) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
         for attempt in range(IO_ATTEMPTS):
             try:
-                self.file_fd = retry_io(os.open, self.temporary, flags, 0o600, recover=True)
+                self.file_fd = create_file(self.temporary)
                 return
             except FileExistsError:
                 if attempt + 1 == IO_ATTEMPTS:
@@ -168,7 +173,7 @@ class Receipt:
     def mask_block(self) -> None:
         if self.outcome is not None:
             if not self.outcome.begin_finalization():
-                report_error("finalization signal mask unverified")
+                report_error("finalization signal mask unverified; catchable signals ignored")
 
     def rename(self) -> None:
         def publish() -> None:
@@ -389,6 +394,7 @@ class ImageJob:
     def __init__(self, directory: Path, identity: Identity, capsule: Path,
                  cancellation: Cancellation | None = None, *, probe: bool = False) -> None:
         self.directory = directory
+        self.artifacts = directory / "artifacts"
         self.identity = identity
         self.cancellation = cancellation or Cancellation()
         self.probe = probe
@@ -400,6 +406,8 @@ class ImageJob:
         self.journal_paths = self.active, self.active_directory
         self.teardown = directory / "teardown.json"
         self.teardown_temporary = receipt_temporary(self.teardown)
+        self.validation = directory / "transport-validation.json"
+        self.validation_temporary = receipt_temporary(self.validation)
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
                       "launcher": process_identity(os.getpid()), "acquired_at": time.time(),
                       "stop_reason": "not started", "qemu_reaped": False,
@@ -476,7 +484,7 @@ class ImageJob:
 
     @staticmethod
     def _open_log(path: Path):
-        return open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600))
+        return ExclusiveFile(path)
 
     def diagnostic_summary(self) -> dict:
         tail = self.stage_tail
@@ -555,6 +563,7 @@ class ImageJob:
             output = self._open_log(self.directory / (name + ".partial"))
             register_close(self.outputs, name + "-capture", output.close, on_loss,
                            before_close=partial(sync_output, output))
+            output.open()
             self.capture_files[name] = output
 
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
@@ -661,5 +670,7 @@ class ImageJob:
 
 def sync_output(output) -> None:
     """Sync output only after the child has been stopped and reaped."""
+    if output.fileno() < 0:
+        return
     retry_io(output.flush, recover=True)
     retry_io(os.fsync, output.fileno(), recover=True)

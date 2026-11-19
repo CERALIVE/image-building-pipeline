@@ -61,6 +61,61 @@ def write_all(destination: BinaryIO | int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
+def create_file(path: Path, mode: int = 0o600) -> int:
+    """Atomically acquire a new descriptor and name, without another constructor syscall."""
+    return retry_io(os.open, path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode, recover=True)
+
+
+class ExclusiveFile:
+    """Preallocated owner for a raw exclusive output, with failure-only unlink."""
+
+    def __init__(self, path: Path, mode: int = 0o600) -> None:
+        self.path = path
+        self.mode = mode
+        self.fd: int | None = None
+
+    def open(self) -> None:
+        self.fd = create_file(self.path, self.mode)
+
+    def __enter__(self) -> ExclusiveFile:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            self.close()
+        except OSError:
+            # The kernel has already released the unbuffered file descriptor.
+            pass
+        finally:
+            if exc_type is not None and self.fd is not None:
+                retry_io(self.path.unlink, missing_ok=True, recover=True)
+
+    def fileno(self) -> int:
+        return self.fd if self.fd is not None else -1
+
+    def write(self, data: bytes) -> int:
+        write_all(self.fileno(), data)
+        return len(data)
+
+    def tell(self) -> int:
+        return retry_io(os.lseek, self.fileno(), 0, os.SEEK_CUR, recover=True)
+
+    def flush(self) -> None:
+        """Unbuffered writes have nothing to flush."""
+
+    def close(self) -> None:
+        fd = self.fd
+        if fd is not None and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                # A Linux close error still releases the FD.
+                self.fd = -1
+                raise
+            else:
+                self.fd = -1
+
+
 @dataclass(frozen=True, slots=True)
 class Identity:
     attempt: str
@@ -118,7 +173,7 @@ def read_header(source: BinaryIO) -> Member:
         raise StreamError("invalid artifact JSON") from exc
 
 
-def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
+def transfer(source: BinaryIO, destination: BinaryIO | int, member: Member,
              checkpoint: Callable[[], None] | None = None, *, decoding: bool = False) -> int:
     """Hash while copying exactly the declared length, with bounded memory."""
     digest = hashlib.sha256()
@@ -185,10 +240,11 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
         if member.id == "rootfs.tar" and member.length > 3_500_000_000:
             raise StreamError("rootfs tar exceeds unchanged size ceiling")
         seen.add(member.id)
-        with retry_io(open, directory / member.id, "xb", buffering=0,
-                      opener=lambda path, flags: os.open(path, flags, 0o600), recover=True) as output:
-            transfer(source, output, member, checkpoint, decoding=True)
-            retry_io(os.fsync, output.fileno(), recover=True)
+        with ExclusiveFile(directory / member.id) as output:
+            output.open()
+            fd = output.fileno()
+            transfer(source, fd, member, checkpoint, decoding=True)
+            retry_io(os.fsync, fd, recover=True)
         members.append(member)
 
 

@@ -17,7 +17,7 @@ import time
 
 from image_capsule import Capsule, unpack
 from image_stages import StageLog, stage_marker
-from image_stream import BUILD_LOG_LIMIT, Identity, StreamError, encode
+from image_stream import BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode
 
 HOME = Path("/opt/ceralive-image-job")
 
@@ -115,7 +115,8 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     subprocess.run(["bash", str(source / "ci/check-builder-resources.sh")],
                    check=True, env=env, cwd=source, timeout=60)
     log = HOME / "build.log"
-    with log.open("xb") as output:
+    with ExclusiveFile(log, 0o666) as output:
+        output.open()
         with subprocess.Popen(["python3", str(source / "lib/sealed-inputs.py"), "serve"],
                               env=env | {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
                               stdout=subprocess.PIPE, stderr=output) as mirror:

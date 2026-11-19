@@ -279,7 +279,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     teardown_fault = mode.removeprefix("teardown-memory:") if mode.startswith("teardown-memory:") else ""
     commit_fault = mode.removeprefix("commit-memory:") if mode.startswith("commit-memory:") else ""
-    tail_case = mode.removeprefix("tail-io:").split("/") if mode.startswith("tail-io:") else []
+    tail_case = (mode.split("tail-io:", 1)[1].split("/")
+                 if mode.startswith(("tail-io:", "pair:tail-io:")) else [])
     tail_count = 0
 
     def tail_fault(point):
@@ -292,12 +293,24 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             raise MemoryError(point)
         raise OSError(getattr(errno, tail_case[1]), point)
 
+    def tail_signal_at(point):
+        if not tail_case or tail_case[0] not in {"exit-mask", "exit-ignore"}:
+            return
+        if point != (tail_case[3] if len(tail_case) > 3 else "rename"):
+            return
+        mask_bits, ignore_bits, _ = signal_status(pathlib.Path("/proc/self/status"))
+        required = sum(1 << (sig - 1) for sig in CATCHABLE_SIGNALS)
+        assert (mask_bits | ignore_bits) & required == required
+        os.kill(os.getpid(), signum)
+        (root / "tail-signal-sent").touch()
+
     def receipt_phase(frame):
         while frame is not None:
             transaction = frame.f_locals.get("transaction")
             if isinstance(transaction, image_lifecycle.Receipt):
                 return {"exit.json": "exit", "teardown.json": "teardown",
-                        "transport-validation.json": "validation"}.get(transaction.path.name)
+                        "transport-validation.json": "validation", "active.json": "active",
+                        "started.json": "started"}.get(transaction.path.name)
             if frame.f_code is image_lifecycle.retire_journal.__code__:
                 return "journal"
             frame = frame.f_back
@@ -408,6 +421,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def fixture_read_bytes(path):
         if path == directory / "exit.json":
+            tail_signal_at("readback")
             tail_fault("readback")
         if path == directory / "exit.json" and (mode == "unreadable-exit" or mode.startswith("readback:")):
             mark = root / "readback-injected"
@@ -514,6 +528,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         terminal = (how == signal.SIG_BLOCK and signals == CATCHABLE_SIGNALS
                     and sys._getframe(1).f_code.co_name != "sanitize_startup")
         if terminal:
+            if tail_case and tail_case[0] == "exit-ignore":
+                raise OSError(errno.ENOSYS, "fixture has no sigprocmask")
             tail_fault("exit-mask")
         previous = sigmask(how, signals)
         if terminal:
@@ -556,6 +572,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             tail_fault("teardown-rename")
         if destination == directory / "transport-validation.json":
             tail_fault("validation-rename")
+        if destination == directory / "started.json":
+            tail_fault("started-rename")
+        if destination == root / "returns/active.json":
+            tail_fault("active-rename")
         if destination == directory / "teardown.json":
             fault_at("teardown-rename")
         if pair:
@@ -599,6 +619,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             cancel()
             assert signum in signal.sigpending(), "TERM was not pending in the rename step"
         replace_file(source, destination)
+        if destination == directory / "exit.json":
+            tail_signal_at("rename")
         if mode == "raising-handler" and destination == directory / "exit.json":
             os.kill(os.getpid(), signal.SIGUSR1)
             assert signal.SIGUSR1 in signal.sigpending()
@@ -609,7 +631,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def sync(fd):
         phase = receipt_phase(sys._getframe(1)) if tail_case else None
         if phase:
-            tail_fault(f"{phase}-{'dir' if os.path.isdir(f'/proc/self/fd/{fd}') else 'file'}-fsync")
+            point = f"{phase}-{'dir' if os.path.isdir(f'/proc/self/fd/{fd}') else 'file'}-fsync"
+            tail_signal_at(point)
+            tail_fault(point)
         nonlocal fail_sync, terminal_synced
         if startup:
             # Keep receipt publication real without timing host disk flushes in the startup matrix.
@@ -623,6 +647,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                                 (directory / "artifacts/verification.json", "artifact-sync"),
                                 (directory / "artifacts", "artifact-dir-sync")):
             if path == location:
+                tail_fault(stage)
                 fault_at(stage)
         final = (terminal_entered and path == directory.parent and pair
                  and (directory.parent / "exit.json").exists())
@@ -648,6 +673,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if path == directory / "stream.partial":
             fault_at("stream-unlink")
         if path == root / "returns/active.json":
+            tail_signal_at("journal-unlink")
             if tail_case and tail_case[0] == "journal-unlink":
                 assert (directory / "exit.json").exists(), "journal unlink ran before exit commit"
                 if tail_case[1] == "ENOENT" and tail_count == 0:
@@ -761,7 +787,6 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             return
         job.cancellation.check()
         target = job.directory / "artifacts"
-        target.mkdir()
         (target / "fixture").write_bytes(b"public artifact")
 
     def priority_timeout(_pid, _cancellation):
@@ -861,7 +886,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     while current is not None:
                         owner = current.f_locals.get("self")
                         if isinstance(owner, image_lifecycle.Receipt):
-                            fd = owner.file_fd
+                            fd = getattr(owner, "file_fd", None)
                             if fd is not None and fd >= 0:
                                 # The close dispatch itself has a separate post-release
                                 # syscall matrix. Everything up to dispatch is covered.
@@ -1429,24 +1454,60 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 patches.enter_context(patch.object(image_lifecycle, "optional", fault_boundary))
         if tail_case:
             native_write = os.write
+            native_signal = signal.signal
+            native_mkdir = pathlib.Path.mkdir
+
+            def tail_signal(sig, handler):
+                if sig == signal.SIGUSR1 and handler == signal.SIG_IGN:
+                    tail_fault("exit-ignore")
+                return native_signal(sig, handler)
+
+            def tail_mkdir(path, *args, **kwargs):
+                assert not (root / "pid").exists(), f"directory created after spawn: {path}"
+                name = {root / "returns": "store", directory.parent: "attempt",
+                        directory: "build", directory / "artifacts": "artifacts",
+                        directory.parent / "verify": "verify",
+                        directory.parent / "verify/artifacts": "verify-artifacts"}.get(path)
+                if name:
+                    tail_fault(f"mkdir-{name}")
+                return native_mkdir(path, *args, **kwargs)
 
             def tail_open(path, flags, *args, **kwargs):
                 phase = receipt_phase(sys._getframe(1))
                 if phase:
-                    tail_fault(f"{phase}-{'dir' if flags & os.O_DIRECTORY else 'file'}-open")
+                    point = f"{phase}-{'dir' if flags & os.O_DIRECTORY else 'file'}-open"
+                    tail_signal_at(point)
+                    tail_fault(point)
+                if path == directory / "artifacts/verification.json" and flags & os.O_EXCL:
+                    tail_fault("artifact-open")
+                if path == directory / "stream.partial" and flags & os.O_EXCL:
+                    tail_fault("capture-open")
                 return native_open(path, flags, *args, **kwargs)
 
             def tail_close(fd):
                 phase = receipt_phase(sys._getframe(1))
                 directory_fd = os.path.isdir(f"/proc/self/fd/{fd}") if phase else False
+                target = os.readlink(f"/proc/self/fd/{fd}") if sys._getframe(1).f_code.co_name == "close" else ""
                 native_close(fd)
                 if phase:
-                    tail_fault(f"{phase}-{'dir' if directory_fd else 'file'}-close")
+                    point = f"{phase}-{'dir' if directory_fd else 'file'}-close"
+                    tail_signal_at(point)
+                    tail_fault(point)
+                if target == str(directory / "artifacts/verification.json"):
+                    tail_fault("artifact-close")
+                if target == str(directory / "stream.partial"):
+                    tail_fault("capture-close")
 
             def tail_write(fd, data):
                 phase = receipt_phase(sys._getframe(1))
                 if phase:
                     tail_fault(f"{phase}-write")
+                else:
+                    target = os.readlink(f"/proc/self/fd/{fd}")
+                    if target == str(directory / "artifacts/verification.json"):
+                        tail_fault("artifact-write")
+                    if target == str(directory / "stream.partial"):
+                        tail_fault("capture-write")
                 return native_write(fd, data)
 
             def tail_partial(fn, *args, **kwargs):
@@ -1462,6 +1523,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(os, "open", tail_open))
             patches.enter_context(patch.object(os, "close", tail_close))
             patches.enter_context(patch.object(os, "write", tail_write))
+            patches.enter_context(patch.object(signal, "signal", tail_signal))
+            patches.enter_context(patch.object(pathlib.Path, "mkdir", tail_mkdir))
         if teardown_fault:
             wall_time = time.time
             directory_sync = image_lifecycle.sync_directory
@@ -1916,14 +1979,14 @@ os.execvp(sys.argv[1], sys.argv[1:])
 
         directory = root / "returns/fixture/build"
         if mode.startswith("tail-io:"):
-            point, error, count = mode.removeprefix("tail-io:").split("/")
+            point, error, count, *_ = mode.removeprefix("tail-io:").split("/")
             marker = directory / "exit.json"
             required_exhaustion = point in {"verification-read", "exit-file-fsync"} and int(count) == 3
             required_memory_fault = error == "MemoryError" and (
                 point == "verification-read" or point.startswith(("teardown-", "validation-")))
             failed = (required_exhaustion or required_memory_fault or point.endswith("-temp-unlink")
-                      or point.startswith("rejected-fd-line-"))
-            assert launcher.returncode == int(failed), (mode, stderr)
+                      or point.startswith("rejected-fd-line-") or point == "exit-ignore" and int(count) == 3)
+            assert launcher.returncode == int(failed), (mode, launcher.returncode, stderr)
             row = json.loads(marker.read_text()) if marker.exists() else None
             if row is not None:
                 assert row["launcher_exit"] == launcher.returncode
@@ -1937,7 +2000,11 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert initial == final, (mode, initial, final, stderr)
             assert not list(root.rglob(".receipt-*"))
             if point == "exit-mask":
-                assert (b"finalization signal mask unverified" in stderr) == (int(count) == 3)
+                fallback = int(count) == 3 or error == "ENOSYS"
+                assert (b"catchable signals ignored" in stderr) == fallback
+                assert (root / "tail-signal-sent").exists()
+            if point == "exit-ignore":
+                assert (root / "tail-signal-sent").exists() is (not failed)
             if point.endswith("-allocation") or point == "baseline" or point.endswith("-fd-line-baseline"):
                 assert not (root / "tail-fault-count").exists(), (mode, stderr)
             else:
@@ -2194,6 +2261,11 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert len(children) == 2
             assert all(not pathlib.Path(f"/proc/{pid}").exists() for pid in children)
             assert not list(root.glob("job-*")) and not list(root.rglob(".receipt-*"))
+            if mode.startswith("pair:tail-io:"):
+                assert (root / "tail-fault-count").read_text() == "1"
+                initial, final = json.loads((root / "descriptor-check").read_text())
+                assert initial == final
+                assert not (root / "returns/active.json").exists()
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
@@ -3219,7 +3291,8 @@ def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
     assert baseline and baseline["launcher_exit"] == 0 and baseline["stream_bytes"] == 836
     operations = (
         "verification-read", "readback", "journal-unlink", "journal-dir-open", "journal-dir-fsync",
-        "journal-dir-close", "exit-mask",
+        "journal-dir-close", "exit-mask", "artifact-open", "artifact-write", "artifact-sync", "artifact-close",
+        "capture-open", "capture-write", "capture-sync",
         *(f"{phase}-{operation}" for phase in ("validation", "teardown", "exit") for operation in (
             "file-open", "write", "file-fsync", "file-close", "rename",
             "dir-open", "dir-fsync", "dir-close",
@@ -3240,9 +3313,39 @@ def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
     for error in ("EACCES", "ENOENT", "EBUSY"):
         assert cancelled_fixture(f"tail-io:journal-unlink/{error}/1") == baseline, error
     assert cancelled_fixture("tail-io:journal-unlink/EPERM/3") == baseline
-    for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
-        assert cancelled_fixture(f"tail-io:exit-mask/{error}/3") == baseline, error
     print(f"{len(operations)} tail syscall sites tested with five one-shot errno values", flush=True)
+
+
+def test_finalization_disposition_fallback_preserves_receipt_and_exit() -> None:
+    baseline = cancelled_fixture("tail-io:baseline/EINTR/0")
+    for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+        for signum in (signal.SIGUSR1, *vm.STOP_SIGNALS):
+            assert cancelled_fixture(f"tail-io:exit-mask/{error}/3", signum) == baseline, (error, signum)
+    for signum in (signal.SIGUSR1, *vm.STOP_SIGNALS):
+        assert cancelled_fixture("tail-io:exit-mask/ENOSYS/1", signum) == baseline
+        assert cancelled_fixture("tail-io:exit-ignore/EPERM/1", signum) == baseline
+        for point in ("exit-dir-open", "exit-dir-fsync", "exit-dir-close", "journal-unlink",
+                      "journal-dir-open", "journal-dir-fsync", "journal-dir-close", "readback"):
+            for fault in ("EPERM/3", "ENOSYS/1"):
+                assert cancelled_fixture(f"tail-io:exit-mask/{fault}/{point}", signum) == baseline
+    assert cancelled_fixture("tail-io:exit-ignore/EPERM/3") is None
+
+
+def test_attempt_preparation_and_journal_survive_transient_io() -> None:
+    baseline = cancelled_fixture("tail-io:baseline/EINTR/0")
+    for name in ("store", "attempt", "build", "artifacts"):
+        for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+            row = cancelled_fixture(f"tail-io:mkdir-{name}/{error}/1")
+            assert row == baseline, (name, error, baseline, row)
+    for name in ("verify", "verify-artifacts"):
+        for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+            cancelled_fixture(f"pair:tail-io:mkdir-{name}/{error}/1")
+    for phase in ("active", "started"):
+        for operation in ("file-open", "write", "file-fsync", "file-close", "rename",
+                          "dir-open", "dir-fsync", "dir-close"):
+            for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+                row = cancelled_fixture(f"tail-io:{phase}-{operation}/{error}/1")
+                assert row == baseline, (phase, operation, error, baseline, row)
 
 
 def test_tail_directory_fd_ownership_survives_allocation_faults() -> None:
@@ -3286,6 +3389,33 @@ def test_receipt_allocation_faults_close_live_temporary_descriptors() -> None:
             row = cancelled_fixture(f"tail-io:{verdict}-fd-line-{line}/MemoryError/1")
             assert row and row["launcher_exit"] == int(verdict == "rejected"), (verdict, line, row)
         print(f"{verdict}: {len(lines)} receipt FD allocation fault locations", flush=True)
+
+
+def test_exclusive_file_creation_has_one_owner() -> None:
+    def bypasses(file, tree):
+        allowed = next((node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "create_file"), None) if file == "image_stream.py" else None
+        owner_nodes = set(ast.walk(allowed)) if allowed is not None else set()
+        for node in ast.walk(tree):
+            if ((isinstance(node, ast.Attribute) and node.attr == "O_EXCL")
+                    or (isinstance(node, ast.alias) and node.name == "O_EXCL")
+                    or (isinstance(node, ast.Constant) and node.value == "O_EXCL")):
+                if node not in owner_nodes:
+                    yield node.lineno
+            if isinstance(node, ast.Call) and (
+                    isinstance(node.func, ast.Name) and node.func.id == "open"
+                    or isinstance(node.func, ast.Attribute) and node.func.attr == "open"):
+                if any(isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                       and arg.value.startswith("x") and set(arg.value) <= set("xbt+")
+                       for arg in (*node.args, *(kw.value for kw in node.keywords if kw.arg == "mode"))):
+                    yield node.lineno
+
+    root = ROOT / "ci/kernel-runner"
+    for file in root.glob("*.py"):
+        assert not (violations := list(bypasses(file.name, ast.parse(file.read_text())))), (file, violations)
+    for source in ("os.open(path, os.O_CREAT | os.O_EXCL)", "from os import O_EXCL as flags",
+                   "path.open('xb')", "open(path, mode='x')"):
+        assert list(bypasses("new_owner.py", ast.parse(source))), source
 
 
 def test_receipt_audit_detects_executed_work_outside_step_table() -> None:
@@ -3499,7 +3629,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                 def execute(_base, directory, request, _cancellation, jobs):
                     payload = request["payload"]
                     artifacts = directory / "artifacts"
-                    artifacts.mkdir(parents=True)
+                    assert artifacts.is_dir()
                     state = {"identity": payload["identity"], "stop_reason": "guest exited; transport validated"}
                     jobs.append(SimpleNamespace(directory=directory, state=state))
                     image_lifecycle.receipt(directory / "teardown.json", state)
@@ -3939,7 +4069,10 @@ if __name__ == "__main__":
         "--tail-syscalls": (test_tail_syscall_faults_preserve_the_validated_probe,
                             test_tail_directory_fd_ownership_survives_allocation_faults,
                             test_receipt_temporary_collisions_do_not_remove_unowned_files,
-                            test_receipt_allocation_faults_close_live_temporary_descriptors),
+                            test_receipt_allocation_faults_close_live_temporary_descriptors,
+                            test_exclusive_file_creation_has_one_owner),
+        "--terminal-fallback": (test_finalization_disposition_fallback_preserves_receipt_and_exit,),
+        "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,
                            test_validated_probe_retries_each_commit_preparation_allocation),

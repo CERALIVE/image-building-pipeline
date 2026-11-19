@@ -152,17 +152,19 @@ optional operations, and preserves the artifact, verdict and exit status.
 A required I/O, validation or publication operation that cannot complete
 still fails closed. Exceptions in diagnostics use pre-encoded unavailable
 fields without affecting the verdict. The launcher prepares the exit receipt
-paths and diagnostic fallback bytes before guest launch. A one-shot
+paths, artifact directories, and diagnostic fallback bytes before guest launch.
+Directory creation retries transient failures before any child starts. A one-shot
 `MemoryError` in probe finalization before rename gets one retry of the same
 outcome. On successful rename the launcher records the committed exit status
 in its preallocated slot. Verification uses the same bounded retry for
 interrupted reads and reports failure without changing the receipt or exit status.
 Safe filesystem operations retry an interruption at most twice, without
 sleeping. Required reads and writes also retry transient I/O errors at the
-same bound. Receipt temporaries use exclusive, close-on-exec creation in one
-open call. A name collision tries a fresh name without touching the existing
-file. Writes resume at the first unwritten byte. The transaction closes and
-removes its own temporary if publication fails.
+same bound. Named exclusive outputs use one close-on-exec open call. The
+decoder keeps the raw descriptor and never invokes a second file constructor.
+A receipt temporary name collision tries a fresh name without touching the
+existing file. Writes resume at the first unwritten byte. A failed
+transaction closes and removes only the file it acquired.
 A required operation that exhausts its attempts before commit still fails the
 attempt. A final directory sync error after rename is reported without changing
 the committed outcome.
@@ -766,16 +768,16 @@ The launcher holds the flock through all of these steps:
    when guest transport and teardown receipts already exist.
 
 Every receipt is written to a mode-0600 temporary file in its own directory,
-flushed and file-synced, atomically renamed into place, and followed by a
+file-synced after the unbuffered writes, atomically renamed into place, and followed by a
 directory sync. The final marker's **rename is the commit point**. A
 publication failure before that rename leaves the marker absent and exits
 nonzero. Consumers treat a missing marker as failure. Cancellation before
 the final rename transaction produces a marker with `stop_reason` set to
 `cancelled` and `launcher_exit` set to 1 when storage permits. The launcher
-blocks every catchable signal once, before the final cancellation checkpoint.
-It checks for pending stop signals before the rename. The same mask remains
-in force through the rename, directory sync, receipt read-back and direct
-process exit. Pending signals after the checkpoint are discarded at exit.
+protects the final cancellation checkpoint and rename against every catchable
+signal. It checks for pending stop signals before the rename. Signal protection
+continues through the rename, directory sync, journal retirement, receipt
+readback and direct process exit.
 The receipt step table independently attempts directory open, sync and close,
 temporary-file cleanup when applicable, and diagnostics. A step failure
 cannot skip the remaining cleanup or change the published result. A final
@@ -787,9 +789,12 @@ the status recorded at rename. A missing or unreadable marker is a
 verification error for consumers and does not change the CLI's committed
 status. Before rename, the launcher retries the terminal signal mask at
 most three times in total. Once established, the mask stays blocked through
-direct exit. If the mask cannot be established, the launcher reports
-`finalization signal mask unverified` on stderr and still attempts to commit
-the prepared outcome. The CLI uses a direct process exit so Python
+direct exit. If the mask cannot be established, the launcher sets every
+catchable signal to `SIG_IGN` with `sigaction` before it can publish a verdict.
+It reports this fallback on stderr. If any disposition cannot be set, the
+launcher abandons publication and exits nonzero. Saved dispositions are
+restored on rollback or if control returns from the direct exit boundary.
+The CLI uses a direct process exit so Python
 shutdown hooks cannot replace the result. The external flock releases its
 lock when the launcher exits. The launcher has already reaped QEMU and
 closed the guest descriptors and anonymous overlay before committing success.

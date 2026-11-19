@@ -112,11 +112,16 @@ def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str,
     return retained
 
 def validate_return(job: ImageJob, verifier: bool) -> None:
-    target = job.directory / "artifacts"
-    create_directory(target)
+    target = job.artifacts
     envelope = job.directory / "stream.partial"
-    with retry_io(envelope.open, "rb", recover=True) as source:
-        members = decode(source, target, job.identity, job.cancellation.check)
+    members = None
+    try:
+        with retry_io(envelope.open, "rb", recover=True) as source:
+            members = decode(source, target, job.identity, job.cancellation.check)
+    except OSError as error:
+        if members is None:
+            raise
+        report_error(error)  # The input is read-only and Linux released its FD.
     expected = {"verification.json"} if verifier else {
         "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
         "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -151,10 +156,11 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
         verify_sidecar(target / "boot.scr.sha256", next(member for member in members if member.id == "boot.scr"))
         job.state["guest_claimed_stage_exits"] = measurement["stages"]
     sync_directory(target)
-    receipt(job.directory / "transport-validation.json",
+    receipt(job.validation,
             {"schema": 1, "identity": asdict(job.identity),
              "members": [asdict(member) for member in members],
-             "transport_valid": True, "content_verified": verifier})
+             "transport_valid": True, "content_verified": verifier},
+            temporary=job.validation_temporary)
     retry_io(envelope.unlink, recover=True)
 
 def execute(base: Path, directory: Path, request: dict, cancellation: Cancellation,
@@ -163,29 +169,36 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
     artifacts = directory / "artifacts"
-    create_directory(directory)
-    with ImageJob(directory, identity, request["capsule"], cancellation,
-                  probe=request["payload"]["operation"] == "probe") as job:
-        jobs.append(job)
-        job.state.update(base_sha256=request["base_sha256"], base=str(base),
-                         public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
-                         overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
-                         stream_budget=CAPS.stream_max if request["payload"]["operation"] == "measure" else 4 * 1024**2)
-        with job_disk(base, job, cancellation) as (overlay, disk_fd):
-            remaining = int(request["deadline"] - time.monotonic())
-            if remaining <= 0:
-                raise AdmissionError("image deadline exhausted before guest launch")
-            seconds = min(CAPS.verify_seconds if request["payload"]["operation"] == "verify" else CAPS.build_seconds, remaining)
-            payload = json.dumps(request["payload"]).encode()
-            if len(payload) > 1024 * 1024:
-                raise AdmissionError("image job public metadata exceeds 1 MiB")
-            boot(overlay, payload, "image", seconds,
-                 disk_fd=disk_fd, image_job=job)
-        job.outputs.close()
-        cancellation.check()
-        disk_headroom(((directory, 16 * GIB),))
-        validate_return(job, request["payload"]["operation"] != "measure")
-        job.state["stop_reason"] = "guest exited; transport validated"
+    try:
+        with ImageJob(directory, identity, request["capsule"], cancellation,
+                      probe=request["payload"]["operation"] == "probe") as job:
+            jobs.append(job)
+            job.state.update(base_sha256=request["base_sha256"], base=str(base),
+                             public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
+                             overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
+                             stream_budget=CAPS.stream_max if request["payload"]["operation"] == "measure" else 4 * 1024**2)
+            with job_disk(base, job, cancellation) as (overlay, disk_fd):
+                remaining = int(request["deadline"] - time.monotonic())
+                if remaining <= 0:
+                    raise AdmissionError("image deadline exhausted before guest launch")
+                seconds = min(CAPS.verify_seconds if request["payload"]["operation"] == "verify" else CAPS.build_seconds, remaining)
+                payload = json.dumps(request["payload"]).encode()
+                if len(payload) > 1024 * 1024:
+                    raise AdmissionError("image job public metadata exceeds 1 MiB")
+                boot(overlay, payload, "image", seconds,
+                     disk_fd=disk_fd, image_job=job)
+            job.outputs.close()
+            cancellation.check()
+            disk_headroom(((directory, 16 * GIB),))
+            validate_return(job, request["payload"]["operation"] != "measure")
+            job.state["stop_reason"] = "guest exited; transport validated"
+    except BaseException:
+        # This covers constructor failure before ImageJob.__exit__ can run.
+        try:
+            retry_io(artifacts.rmdir, recover=True)
+        except (OSError, MemoryError):
+            pass  # Preserve a nonempty directory as diagnostic evidence.
+        raise
     return artifacts
 
 
@@ -289,6 +302,10 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     create_directory(directory)
     probe = args.image_mode == "probe"
     prepare_exit_receipt(directory, probe, cancellation)
+    for name in ("build",) if probe else ("build", "verify"):
+        job_directory = directory / name
+        create_directory(job_directory)
+        create_directory(job_directory / "artifacts")
     probe_result = directory / "build/artifacts/verification.json" if probe else None
     expected_probe = {"schema": 1, "identity": asdict(identity), "network_denied": True} if probe else None
     CAPS.qemu_limit()
