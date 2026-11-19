@@ -2,6 +2,7 @@
 """Run the real launcher lifecycle against small Python children, never a VM."""
 
 import ast
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 import atexit
 from contextlib import ExitStack, contextmanager
@@ -46,6 +47,15 @@ STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error", "stag
                "stages:over-cap", "stages:blocked-header", "stages:guest-loss",
                "stages:priority-timeout", "stages:before-header")
 DIAGNOSTIC_ERRORS = {"RuntimeError": RuntimeError, "OSError": OSError, "MemoryError": MemoryError}
+SUMMARY_ALLOCATION_SITES = {
+    f"{name}-{instruction.offset}": (function.__code__, instruction.offset)
+    for name, function in (
+        ("summary", ImageJob.diagnostic_summary),
+        ("tail", image_lifecycle.StageTail.text),
+    )
+    for instruction in dis.get_instructions(function)
+    if instruction.opname.startswith(("BUILD_", "BINARY_", "CALL"))
+}
 PRESTART_MODES = tuple(
     f"prestart:{step}:{error}"
     for step in ("pipe", "stream", "stderr", "console", "console-after-register")
@@ -54,7 +64,11 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                    *(f"isolated:{step}:{error}" for step in
                      ("read", "close", "StageTail", "observe", "drain", "summary", "text")
                      for error in DIAGNOSTIC_ERRORS),
-                   "isolated:summary-timeout:MemoryError")
+                   "isolated:summary-timeout:MemoryError", "isolated:fallback:MemoryError",
+                   "isolated:read-dispatch:MemoryError", "isolated:unregister:OSError",
+                   "isolated:stderr-baseline", "isolated:stderr-first", "isolated:stderr-second",
+                   "isolated:stderr-discard",
+                   *(f"isolated:alloc-{site}:MemoryError" for site in SUMMARY_ALLOCATION_SITES))
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
 STARTUP_STATES = {
@@ -471,7 +485,16 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if not pair or verifier:
             if mode in (*ISOLATION_MODES, "stages:at-cap", "stages:over-cap"):
                 assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
-            return validate_return(job, verifier)
+            validate_return(job, verifier)
+            if mode == "isolated:fallback:MemoryError":
+                class NoLateDefaults(dict):
+                    def __or__(self, other):
+                        if "capture_lost" in other:
+                            raise MemoryError("fixture late fallback merge")
+                        return super().__or__(other)
+
+                job.state = NoLateDefaults(job.state)
+            return
         job.cancellation.check()
         target = job.directory / "artifacts"
         target.mkdir()
@@ -540,8 +563,48 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
+        if mode in {"isolated:stderr-first", "isolated:stderr-second", "isolated:stderr-discard"}:
+            stderr_fd = -1
+            reads = 0
+            discard_read_failed = False
+            register = selectors.EpollSelector.register
+            read = os.read
+            readv = os.readv
+
+            def track_stderr(selector, file, events, data=None):
+                nonlocal stderr_fd
+                if data == "diagnostic":
+                    stderr_fd = file if isinstance(file, int) else file.fileno()
+                return register(selector, file, events, data)
+
+            def fault_stderr(fd, count):
+                nonlocal reads
+                if fd == stderr_fd:
+                    reads += 1
+                    if mode == "isolated:stderr-discard" or reads == (
+                        1 if mode == "isolated:stderr-first" else 2
+                    ):
+                        (root / "diag-injected").write_text(str(reads))
+                        raise OSError(errno.EIO, "fixture stderr read")
+                return read(fd, count)
+
+            def watch_discard(fd, buffers):
+                nonlocal discard_read_failed
+                if fd == stderr_fd and not discard_read_failed:
+                    discard_read_failed = True
+                    (root / "discard-read-failed").touch()
+                    raise OSError(errno.EIO, "fixture discard-drain read")
+                size = readv(fd, buffers)
+                if fd == stderr_fd and size:
+                    (root / "discard-drained").touch()
+                return size
+
+            patches.enter_context(patch.object(selectors.EpollSelector, "register", track_stderr))
+            patches.enter_context(patch.object(os, "read", fault_stderr))
+            patches.enter_context(patch.object(os, "readv", watch_discard))
         if mode in {"stages:timeout", "stages:before-header", "stages:blocked-header", "isolated:dropped",
-                    "isolated:summary-timeout:MemoryError"}:
+                    "isolated:summary-timeout:MemoryError", "isolated:stderr-first", "isolated:stderr-second",
+                    "isolated:stderr-discard"}:
             capture = ImageJob.capture
             patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
@@ -593,10 +656,42 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                         diagnostic_failure()
                     return original_read(fd, length)
                 patches.enter_context(patch.object(os, "read", fail_read))
-            elif operation in {"summary", "summary-timeout", "text"}:
-                owner, method = ((image_lifecycle.StageTail, "text") if operation == "text"
-                                 else (ImageJob, "diagnostic_summary"))
-                patches.enter_context(patch.object(owner, method, lambda *_: diagnostic_failure()))
+            elif operation == "read-dispatch":
+                reader = ImageJob.read_control
+
+                def lookup_reader(job):
+                    diagnostic_failure()
+                    return reader.__get__(job, ImageJob)
+
+                patches.enter_context(patch.object(ImageJob, "read_control", property(lookup_reader)))
+            elif operation == "unregister":
+                unregister = selectors.EpollSelector.unregister
+
+                def fail_console_eof(selector, file):
+                    if selector.get_key(file).data == "console":
+                        diagnostic_failure()
+                    return unregister(selector, file)
+
+                patches.enter_context(patch.object(selectors.EpollSelector, "unregister", fail_console_eof))
+            elif operation.startswith("alloc-"):
+                target_code, target_offset = SUMMARY_ALLOCATION_SITES[operation.removeprefix("alloc-")]
+                monitor = sys.monitoring
+                tool_id = monitor.DEBUGGER_ID
+                monitor.use_tool_id(tool_id, "probe summary allocation fault")
+
+                def inject_allocation(_code, offset):
+                    if offset == target_offset:
+                        diagnostic_failure()
+
+                monitor.register_callback(tool_id, monitor.events.INSTRUCTION, inject_allocation)
+                monitor.set_local_events(tool_id, target_code, monitor.events.INSTRUCTION)
+            elif operation in {"summary", "summary-timeout", "fallback", "text", "drain"}:
+                owner, method = {
+                    "text": (image_lifecycle.StageTail, "text"), "drain": (ImageJob, "drain"),
+                }.get(operation, (ImageJob, "diagnostic_summary"))
+                inject = property(lambda _: diagnostic_failure()) if operation == "fallback" else (
+                    lambda *_: diagnostic_failure())
+                patches.enter_context(patch.object(owner, method, inject))
             else:
                 boundary = image_lifecycle.optional
                 def fault_boundary(on_loss, action, *args, **kwargs):
@@ -767,6 +862,18 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
         if mode != "isolated:baseline":
             serial_write(b"STAGE 1 probe_start 0 1\\n")
             serial_write(b"STAGE 2 stream_close_end 0 " + (b"3" if mode == "isolated:gap" else b"2") + b"\\n")
+        if mode == "isolated:unregister:OSError":
+            os.close(console)
+            until = time.monotonic() + 2
+            while not (root / "diag-injected").exists():
+                assert time.monotonic() < until
+                time.sleep(0.01)
+    if mode.startswith("isolated:stderr-"):
+        capacity = fcntl.fcntl(2, fcntl.F_GETPIPE_SZ)
+        if capacity > 65536:
+            fcntl.fcntl(2, fcntl.F_SETPIPE_SZ, 65536)
+        assert os.write(2, b"x" * 65537) == 65537
+        (root / "stderr-written").touch()
     if mode != "isolated:dropped":
         os.write(1, (root / "probe.frame").read_bytes())
         sys.exit(0)
@@ -1056,8 +1163,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert (directory / "exit.json").is_file(), (mode, stderr.decode())
             record, teardown = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
             assert record["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
-            assert record["capture_lost"] is (mode != "isolated:complete")
-            assert record["sequence_complete"] is (mode == "isolated:complete")
+            complete = operation in {"complete", "stderr-baseline"}
+            assert record["capture_lost"] is (not complete), (mode, record, stderr.decode())
+            assert record["sequence_complete"] is complete
             for row in (record, teardown):
                 assert row["stream_bytes"] == (25 if stalled else (root / "probe.frame").stat().st_size)
                 assert row["qemu_reaped"] and row["input_descriptor_closed"] and row["overlay_descriptor_closed"]
@@ -1074,9 +1182,17 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert (directory / "artifacts/verification.json").read_bytes() == expected
             if mode.count(":") == 2:
                 assert (root / "diag-injected").exists(), mode
-            if operation in {"summary", "summary-timeout", "text"}:
+            if operation in {"summary", "summary-timeout", "fallback", "text"} or operation.startswith("alloc-"):
                 assert record["last_observed_stage"] is None and record["console_tail"] == ""
                 assert not record["console_tail_truncated"] and record["control_bytes_received"] == 0
+            if operation.startswith("stderr-"):
+                assert (root / "stderr-written").exists() and record["stream_bytes"] == 836
+                assert record["control_bytes_received"] == 65537 + len(record["console_tail"])
+                if operation != "stderr-baseline":
+                    expected_reads = {"stderr-first": 1, "stderr-second": 2, "stderr-discard": 3}
+                    assert (root / "diag-injected").read_text() == str(expected_reads[operation])
+                    assert (root / "discard-drained").exists() is (operation == "stderr-discard")
+                    assert (root / "discard-read-failed").exists() is (operation == "stderr-discard")
             assert json.loads((root / "leaks").read_text()) == []
             assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
             assert not (root / "returns/active.json").exists()
@@ -1228,43 +1344,58 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         return next(node for node in ast.walk(tree)
                     if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == name)
 
-    def unexpected(tree, allowed, wrapped=()):
-        return {ast.unparse(call) for call in ast.walk(tree) if isinstance(call, ast.Call)
-                and (ast.unparse(call) not in wrapped if ast.unparse(call.func) == "optional"
-                     else ast.unparse(call.func) not in allowed)}
-
-    def control_branch(capture):
-        return next(node for node in ast.walk(capture) if isinstance(node, ast.If)
-                    and ast.unparse(node.test) == "control"
-                    and any(isinstance(item, ast.Continue) for item in node.body))
+    def unexpected(tree, allowed, exact=()):
+        # Some inherited calls perform I/O. Allow their exact expressions once,
+        # regardless of which branch a new call is added to.
+        remaining = Counter(exact)
+        bad = set()
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call) or ast.unparse(call.func) in allowed:
+                continue
+            expression = ast.unparse(call)
+            if remaining[expression]:
+                remaining[expression] -= 1
+            else:
+                bad.add(expression)
+        return bad
 
     capture = node_for(ImageJob, "capture")
-    control_calls = {"optional(lose, self.record_control, name, chunk)"}
-    capture_calls = {"ExitStack", "Path", "StreamError", "counts.values", "disk_headroom",
-                     "events.get_map", "events.select", "events.unregister", "files[name].write",
-                     "len", "local.enter_context", "max", "min", "os.read", "overlay.stat",
-                     "poll_owned", "process_identity", "process_priority", "receipt",
-                     "selectors.DefaultSelector", "self._open_log", "self.cancellation.check",
-                     "self.close_console_writer", "self.outputs.callback", "self.outputs.enter_context",
-                     "self.register_measure_transport", "self.state.update", "subprocess.TimeoutExpired",
+    capture_calls = {"ExitStack", "Path", "StreamError", "counts.values",
+                     "events.get_map", "len", "max", "min", "poll_owned",
+                     "self.cancellation.check", "self.state.update", "subprocess.TimeoutExpired",
                      "sum", "time.monotonic", "time.time", "wait"}
-    capture_wrapped = control_calls | {"optional(lose, os.read, event.fd, 1024 * 1024)",
-                                       "optional(lose, events.unregister, event.fileobj)",
-                                       "optional(lose, StageTail)", "optional(lose, self.drain, events)",
-                                       "optional(lose, self.close_console_writer)"}
-    assert not (bad := unexpected(capture, capture_calls, capture_wrapped)), bad
-    assert not (bad := unexpected(control_branch(capture), set(), control_calls)), bad
-    for name, calls, wrapped in (
+    capture_exact = (
+        "files[name].write(chunk)", "self.read_control(name, event.fd)",
+        "events.unregister(event.fileobj)", "events.unregister(event.fileobj)",
+        "self.drain(events)", "optional(lose, self.close_console_writer)",
+        "os.read(event.fd, 1024 * 1024)",
+        "events.select(timeout=min(POLL_SECONDS, end - now))",
+        "local.enter_context(selectors.DefaultSelector())", "selectors.DefaultSelector()",
+        "self.register_measure_transport(events, process)", "self.close_console_writer()",
+        "self.outputs.callback(sync_output, output)", "overlay.stat()",
+        "self._open_log(self.directory / (name + '.partial'))",
+        "self.outputs.enter_context(self._open_log(self.directory / (name + '.partial')))",
+        "process_identity(process.pid)", "process_priority(process.pid, self.cancellation)",
+        "receipt(self.directory / 'started.json', self.state)",
+        "receipt(self.active, {'attempt': self.identity.attempt, 'launcher': self.state['launcher'], "
+        "'qemu': self.state['qemu'], 'overlay_inode': self.state['overlay_inode']})",
+        "disk_headroom(((Path(self.state['overlay_directory']), remaining_overlay), "
+        "(self.directory, 49 * GIB - self.state['retained_bytes'] - sum(counts.values()))))",
+    )
+    assert not (bad := unexpected(capture, capture_calls, capture_exact)), bad
+    helpers = (
         ("record_control", {"bool", "len"}, {"optional(self.lose_diagnostics, tail.observe, chunk)"}),
+        ("read_control", {"self.record_control"},
+         {"os.readv(fd, self.discard_buffer)", "os.read(fd, 1024 * 1024)"}),
         ("drain", {"events.get_map", "events.get_map().values", "range", "self.lose_diagnostics"},
-         {"optional(self.lose_diagnostics, os.read, key.fd, 1024 * 1024)",
-          "optional(self.lose_diagnostics, self.record_control, key.data, chunk)"}),
+         {"self.read_control(key.data, key.fd)"}),
         ("diagnostic_summary", {"tail.text"}, set()),
         ("lose_diagnostics", set(), set()),
         ("_close_console", {"getattr", "setattr", "os.close"},
          {"optional(self.lose_diagnostics, os.close, fd)"}),
-    ):
-        assert not (bad := unexpected(node_for(ImageJob, name), calls, wrapped)), (name, bad)
+    )
+    for name, calls, exact in helpers:
+        assert not (bad := unexpected(node_for(ImageJob, name), calls, exact)), (name, bad)
     tail = node_for(StageTail, "StageTail")
     memory_calls = {"bytearray", "chunk.split", "enumerate", "int", "joined.removesuffix",
                     "len", "match[2].decode", "min", "range", "self._append", "STAGE_LINE.fullmatch",
@@ -1273,21 +1404,28 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
     assert not (bad := unexpected(node_for(StageTail, "optional"), {"on_loss", "operation"})), bad
     run_calls = {"Cancelled", "digest_file", "int", "isinstance", "measure_image",
                  "receipt", "report_error", "type"}
-    run_wrapped = {"optional(build.lose_diagnostics, build.diagnostic_summary, row)"}
-    assert not (bad := unexpected(node_for(image_vm, "run_image"), run_calls, run_wrapped)), bad
+    run_exact = {"build.diagnostic_summary(row)"}
+    assert not (bad := unexpected(node_for(image_vm, "run_image"), run_calls, run_exact)), bad
 
-    for statement in (
+    mutations = (
         "self.finish_diagnostics()", "self.flush()", "self.persist_diagnostics()",
-        "os.fstat(event.fd)", "open('other', 'w')", "files[name].write(b'\\n')", "os.fork()",
+        "os.fstat(event.fd)", "open('other', 'w')", "files[name].write(b'\\n')",
+        "files[name].write(chunk)", "os.fork()", "self.unlisted_call()",
         "events.register(event.fd, selectors.EVENT_READ, name)",
         "optional(lose, self.finish_diagnostics)",
-    ):
-        private = node_for(ImageJob, "capture")
-        branch = control_branch(private)
-        branch.body.insert(0, ast.parse(statement).body[0])
-        assert unexpected(branch, set(), control_calls), statement
-        if not statement.startswith("files[name].write"):
-            assert unexpected(private, capture_calls, capture_wrapped), statement
+    )
+    # Every statement block in capture and its diagnostic helpers is tried,
+    # including exception/finally, EOF, timeout, and nested readiness branches.
+    guarded = (("capture", capture_calls, capture_exact), *helpers, ("run_image", run_calls, run_exact))
+    for name, calls, exact in guarded:
+        private = node_for(image_vm if name == "run_image" else ImageJob, name)
+        blocks = [value for node in ast.walk(private) for _, value in ast.iter_fields(node)
+                  if isinstance(value, list) and value and isinstance(value[0], ast.stmt)]
+        for block in blocks:
+            for source in mutations:
+                block.insert(0, ast.parse(source).body[0])
+                assert unexpected(private, calls, exact), (name, source)
+                block.pop(0)
     private_summary = node_for(ImageJob, "diagnostic_summary")
     private_summary.body.insert(0, ast.parse("tail.flush()").body[0])
     assert unexpected(private_summary, {"tail.text"})

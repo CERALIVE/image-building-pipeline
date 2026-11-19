@@ -15,13 +15,10 @@ import tarfile
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
-from image_lifecycle import (
-    UNAVAILABLE_DIAGNOSTICS, ImageJob, create_directory, receipt, reconcile, report_error, sync_directory,
-)
+from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
-from image_stages import optional
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -214,16 +211,17 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         if cancellation.requested:
             error = Cancelled("runner cancelled")
         status = int(error is not None)
-        row = build.state | UNAVAILABLE_DIAGNOSTICS | {"launcher_exit": status} if probe else {
+        row = build.state | {"launcher_exit": status} if probe else {
             "schema": 1, "identity": build.state["identity"], "launcher_exit": status,
             "stop_reason": jobs[-1].state["stop_reason"],
         }
         if error is not None:
             row["stop_reason"] = "cancelled" if isinstance(error, Cancelled) else type(error).__name__
         if probe:
-            summary = optional(build.lose_diagnostics, build.diagnostic_summary, row)
-            if summary is not None:
-                row = summary
+            try:
+                row = build.diagnostic_summary(row)
+            except Exception:
+                pass  # The outcome already contains the pre-start loss fields.
         else:
             row["pair_complete"] = not status
             if not status:

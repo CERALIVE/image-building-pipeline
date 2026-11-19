@@ -29,6 +29,7 @@ UNAVAILABLE_DIAGNOSTICS = {
     "console_tail_truncated": False,
     "control_bytes_received": 0,
 }
+CONTROL_READ_FAILURE_LIMIT = 3
 
 
 class ReceiptError(OSError):
@@ -243,10 +244,13 @@ class ImageJob:
                       "stop_reason": "not started", "qemu_reaped": False,
                       "stream_budget": CAPS.stream_max,
                       "input_descriptor_closed": False, "overlay_descriptor_closed": False}
+        if probe:
+            self.state.update(UNAVAILABLE_DIAGNOSTICS)
         self.stage_tail = None
         self.control_bytes = 0
         self.capture_lost = False
         self.observe_stages = True
+        self.control_failures = {"diagnostic": 0, "console": 0}
         self.probe_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
@@ -337,6 +341,8 @@ class ImageJob:
                              ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
             self.probe_events = events
+            self.discard_buffer = (bytearray(64 * 1024),)
+            self.stage_tail = optional(self.lose_diagnostics, StageTail)
         except Exception as error:
             # The pre-commit OSError path cannot publish an outcome for this setup failure.
             raise OSError("probe transport setup failed: " + str(error)) from error
@@ -348,16 +354,33 @@ class ImageJob:
         if name == "console" and self.observe_stages and tail is not None:
             self.observe_stages = bool(optional(self.lose_diagnostics, tail.observe, chunk))
 
+    def read_control(self, name: str, fd: int) -> bool:
+        """Report EOF only when a read returns zero. Keep errors drainable."""
+        failures = self.control_failures[name]
+        try:
+            if failures == CONTROL_READ_FAILURE_LIMIT:
+                size = os.readv(fd, self.discard_buffer)
+                self.control_bytes += size
+                return size == 0
+            chunk = os.read(fd, 1024 * 1024)
+        except Exception:
+            self.capture_lost = True
+            if failures < CONTROL_READ_FAILURE_LIMIT:
+                self.control_failures[name] = failures + 1
+            return False
+        self.control_failures[name] = 0
+        if chunk:
+            self.record_control(name, chunk)
+        return chunk == b""
+
     def drain(self, events: selectors.BaseSelector) -> None:
         for key in events.get_map().values():
             if key.data == "stream":
                 continue
             # Only already-open nonblocking control pipes can remain here.
             for _ in range(8):
-                chunk = optional(self.lose_diagnostics, os.read, key.fd, 1024 * 1024)
-                if not chunk:
+                if self.read_control(key.data, key.fd):
                     break
-                optional(self.lose_diagnostics, self.record_control, key.data, chunk)
             else:
                 self.lose_diagnostics()
 
@@ -383,7 +406,6 @@ class ImageJob:
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
-        tail = self.stage_tail = optional(lose, StageTail) if self.probe else None
         with ExitStack() as local:
             events = self.probe_events
             if not self.probe:
@@ -401,8 +423,13 @@ class ImageJob:
                     self.cancellation.check()
                     now = time.monotonic()
                     if now >= end:
-                        stage = (tail.last if tail is not None else None) or "none seen"
-                        command = f"image guest (last stage: {stage})" if self.probe else "image guest"
+                        command = "image guest"
+                        if self.probe:
+                            try:
+                                stage = self.stage_tail.last if self.stage_tail is not None else None
+                                command = f"image guest (last stage: {stage or 'none seen'})"
+                            except Exception:
+                                self.capture_lost = True
                         raise subprocess.TimeoutExpired(command, seconds)
                     if now >= next_priority_check and poll_owned(process) is None:
                         try:
@@ -419,24 +446,21 @@ class ImageJob:
                     for event, _mask in ready:
                         self.cancellation.check()
                         name = event.data
-                        control = self.probe and name != "stream"
-                        if control:
-                            chunk = optional(lose, os.read, event.fd, 1024 * 1024)
-                        else:
+                        if self.probe and name != "stream":
                             try:
-                                chunk = os.read(event.fd, 1024 * 1024)
-                            except InterruptedError:
-                                continue
+                                if self.read_control(name, event.fd):
+                                    events.unregister(event.fileobj)
+                            except Exception:
+                                self.capture_lost = True
+                            continue
+                        try:
+                            chunk = os.read(event.fd, 1024 * 1024)
+                        except InterruptedError:
+                            continue
                         if not chunk:
                             if name == "stream":
                                 stream_open = False
-                            if control:
-                                optional(lose, events.unregister, event.fileobj)
-                            else:
-                                events.unregister(event.fileobj)
-                            continue
-                        if control:
-                            optional(lose, self.record_control, name, chunk)
+                            events.unregister(event.fileobj)
                             continue
                         counts[name] += len(chunk)
                         if (counts["stream"] > min(CAPS.stream_max, self.state["stream_budget"])
@@ -450,7 +474,10 @@ class ImageJob:
                                    (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
                 wait(process, end, self.cancellation)
                 if self.probe:
-                    optional(lose, self.drain, events)
+                    try:
+                        self.drain(events)
+                    except Exception:
+                        self.capture_lost = True
             finally:
                 self.state["stream_bytes"] = counts["stream"]
 

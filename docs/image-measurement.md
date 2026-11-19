@@ -105,6 +105,9 @@ starting the probe guest. Transport setup failure aborts before guest launch
 and leaves no `exit.json`. Once running, the launcher drains the console into
 a fixed 4 KiB memory ring. The ring discards ordinary console text and evicts
 the oldest complete stage lines when full.
+A control read error marks capture lost and leaves the pipe registered.
+After three consecutive errors, the launcher drains that pipe into a
+preallocated buffer and discards its contents until EOF.
 
 The probe's `exit.json` contains `last_observed_stage`, `sequence_complete`,
 `capture_lost`, the sanitized `console_tail` (at most 4 KiB), and
@@ -114,8 +117,9 @@ over 8 MiB, and capture errors set `capture_lost`. A stalled probe can still
 report the last stage and its tail when capture is incomplete. `stream_bytes`
 remains the artifact byte count in both `exit.json` and `teardown.json`.
 
-The launcher builds the summary in memory before the existing atomic receipt
-commit. If summary construction fails, the receipt reports capture loss,
+The launcher seeds the loss fields before starting the guest and builds the
+summary in memory before the existing atomic receipt commit. If summary
+construction fails, the receipt reports capture loss,
 an unknown last stage, and an empty tail. The launcher uses the same receipt
 commit for the summary and the exit status, with no separate diagnostic file.
 
