@@ -15,6 +15,7 @@ import lzma
 import os
 from pathlib import Path
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -249,7 +250,7 @@ index_verify_digest "$9" "$expected" sealed-mirror
     return tuple(windows)
 
 
-def serve(directory: Path) -> None:
+def serve(directory: Path, *, managed: bool = False) -> None:
     """Finite guest-local mirror; no upstream client, CONNECT or credential endpoint."""
     validities = mirror_validities(directory)
     mapping = {}
@@ -299,14 +300,34 @@ def serve(directory: Path) -> None:
             return
 
     def stop(_signal, _frame):
-        raise SystemExit(int(missing))
+        raise SystemExit(int(missing or managed))
 
     previous = signal.signal(signal.SIGTERM, stop)
     try:
         with HTTPServer(("127.0.0.1", 3142), Handler) as server:
-            print("CERALIVE_SEALED_MIRROR_READY", flush=True)
-            while not missing:
-                server.handle_request()
+            if managed:
+                control = sys.stdin.fileno()
+                with selectors.DefaultSelector() as events:
+                    events.register(control, selectors.EVENT_READ)
+                    events.register(server, selectors.EVENT_READ)
+                    print("CERALIVE_SEALED_MIRROR_READY", flush=True)
+                    while not missing:
+                        ready = events.select()
+                        if not ready:
+                            continue
+                        if any(key.fileobj is server for key, _ in ready):
+                            server.handle_request()
+                        elif os.read(control, 1) == b"S":
+                            break
+                        else:
+                            raise SealedError("invalid mirror shutdown request")
+            else:
+                print("CERALIVE_SEALED_MIRROR_READY", flush=True)
+                while not missing:
+                    server.handle_request()
+        if managed and not missing:
+            print("CERALIVE_SEALED_MIRROR_STOPPED", flush=True)
+            return
     finally:
         signal.signal(signal.SIGTERM, previous)
     raise SealedError("guest requested an object absent from the sealed inventory")
@@ -314,7 +335,8 @@ def serve(directory: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("copy", "repository", "valid-release", "decompress-index", "serve"))
+    parser.add_argument("operation", choices=("copy", "repository", "valid-release", "decompress-index", "serve",
+                                             "serve-managed"))
     parser.add_argument("values", nargs="*")
     args = parser.parse_args()
     directory = Path(os.environ["CERALIVE_SEALED_INPUTS"])
@@ -336,6 +358,8 @@ def main() -> None:
             decompress_index(Path(source), Path(destination), index_path)
         case "serve":
             serve(directory)
+        case "serve-managed":
+            serve(directory, managed=True)
 
 
 if __name__ == "__main__":

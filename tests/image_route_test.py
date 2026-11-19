@@ -554,25 +554,31 @@ import os, signal, sys
 mode = sys.argv[1]
 if mode == 'early':
     sys.exit(0)
-if mode in ('clean', 'bad'):
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0 if mode == 'clean' else 7))
 print('CERALIVE_SEALED_MIRROR_READY', flush=True)
+if mode in ('clean', 'bad'):
+    if os.read(sys.stdin.fileno(), 1) != b'S':
+        sys.exit(8)
+    if mode == 'bad':
+        sys.exit(7)
+    print('CERALIVE_SEALED_MIRROR_STOPPED', flush=True)
+    sys.exit(0)
 while True:
     signal.pause()
 """
     for mode in ("clean", "legacy", "early", "bad", "foreign-term", "kill"):
-        with subprocess.Popen([sys.executable, "-c", child, mode], stdout=subprocess.PIPE) as mirror:
+        with subprocess.Popen([sys.executable, "-c", child, mode], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE) as mirror:
             entered = False
             try:
-                with image_guest.ready_mirror(mirror):
+                with patch.object(image_guest, "MIRROR_STOP_SECONDS", 0.25), image_guest.ready_mirror(mirror):
                     entered = True
                     if mode in ("foreign-term", "kill"):
                         os.kill(mirror.pid, signal.SIGTERM if mode == "foreign-term" else signal.SIGKILL)
                         mirror.wait(timeout=2)
             except StreamError:
-                assert mode in ("early", "bad", "foreign-term", "kill"), mode
+                assert mode in ("legacy", "early", "bad", "foreign-term", "kill"), mode
             else:
-                assert mode in ("clean", "legacy"), mode
+                assert mode == "clean", mode
             finally:
                 if mirror.poll() is None:
                     mirror.kill()
@@ -580,6 +586,103 @@ while True:
             assert entered == (mode != "early"), mode
             if mode in ("clean", "legacy"):
                 assert mirror.returncode == (0 if mode == "clean" else -signal.SIGTERM)
+
+
+def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:
+    child = """
+import os, signal, sys
+print('CERALIVE_SEALED_MIRROR_READY', flush=True)
+os.read(sys.stdin.fileno(), 1)
+if sys.argv[1] == 'foreign':
+    os.kill(os.getpid(), signal.SIGTERM)
+elif sys.argv[1] == 'ack':
+    print('CERALIVE_SEALED_MIRROR_STOPPED', flush=True)
+"""
+    for mode in ("ack", "silent", "foreign"):
+        with subprocess.Popen([sys.executable, "-c", child, mode],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as mirror:
+            try:
+                with image_guest.ready_mirror(mirror):
+                    pass
+            except StreamError:
+                assert mode != "ack", mode
+            else:
+                assert mode == "ack", mode
+            finally:
+                if mirror.poll() is None:
+                    mirror.kill()
+                    mirror.wait(timeout=2)
+
+
+def test_partial_mirror_marker_cannot_outlive_readiness_deadline() -> None:
+    child = "import signal; print('CERALIVE_', end='', flush=True); signal.pause()"
+    with subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE) as mirror:
+        try:
+            with patch.object(image_guest, "MIRROR_READY_SECONDS", 0.25, create=True):
+                try:
+                    with image_guest.ready_mirror(mirror):
+                        raise AssertionError("partial marker admitted")
+                except StreamError:
+                    pass
+            assert mirror.returncode is not None
+        finally:
+            if mirror.poll() is None:
+                mirror.kill()
+                mirror.wait(timeout=2)
+
+
+def test_managed_mirror_can_acknowledge_only_after_its_last_request() -> None:
+    server = pathlib.Path(__file__).resolve().parents[1] / "lib/sealed-inputs.py"
+    program = """
+import os, runpy, signal, sys
+from pathlib import Path
+serve = runpy.run_path(sys.argv[1])['serve']
+request, close = int(sys.argv[2]), int(sys.argv[3])
+mode = sys.argv[4]
+class Listener:
+    def __init__(self, _address, handler): self.handler = handler
+    def __enter__(self): return self
+    def __exit__(self, *_args): os.close(request); os.close(close)
+    def fileno(self): return request
+    def handle_request(self):
+        os.read(request, 1)
+        if mode == 'foreign':
+            signal.raise_signal(signal.SIGTERM)
+        handler = self.handler.__new__(self.handler)
+        handler.path = 'https://fixture.invalid/missing'
+        handler.send_error = lambda _: None
+        if mode == 'marker-error':
+            def fail(*_args): raise OSError('fixture missing-object marker')
+            Path.write_text = fail
+        handler.do_GET()
+serve.__globals__.update(HTTPServer=Listener, inventory=lambda _: {'objects': []},
+                         mirror_validities=lambda _: [])
+serve(Path(sys.argv[5]), managed=True)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = pathlib.Path(tmp) / "missing-object"
+        for mode in ("healthy", "miss", "marker-error", "foreign"):
+            read_end, write_end = os.pipe()
+            try:
+                with subprocess.Popen([sys.executable, "-B", "-c", program, str(server),
+                                       str(read_end), str(write_end), mode, tmp],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, pass_fds=(read_end, write_end)) as mirror:
+                    try:
+                        with image_guest.ready_mirror(mirror):
+                            if mode != "healthy":
+                                os.write(write_end, b"R")
+                    except (StreamError, BrokenPipeError):
+                        assert mode != "healthy", mode
+                    else:
+                        assert mode == "healthy", mode
+                    assert mirror.returncode == (0 if mode == "healthy" else 1), mode
+                    assert marker.exists() == (mode == "miss"), mode
+                    marker.unlink(missing_ok=True)
+            finally:
+                os.close(read_end)
+                os.close(write_end)
 
 
 def test_nested_slot_directory_close_does_not_leak_or_replace_read_failure() -> None:

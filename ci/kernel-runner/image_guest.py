@@ -26,6 +26,8 @@ from image_stream import (
 from vm_process import poll_owned, wait
 
 HOME = Path("/opt/ceralive-image-job")
+MIRROR_READY_SECONDS = 600
+MIRROR_STOP_SECONDS = 20
 UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
 
 
@@ -94,39 +96,54 @@ def resolve(source: Path, board: str, env: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def mirror_marker(fd: int, marker: bytes, deadline: float) -> None:
+    received = bytearray()
+    with selectors.DefaultSelector() as events:
+        events.register(fd, selectors.EVENT_READ)
+        while len(received) < len(marker):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not events.select(remaining):
+                raise StreamError("sealed mirror control marker timed out")
+            try:
+                data = os.read(fd, len(marker) - len(received))
+            except BlockingIOError:
+                continue
+            received.extend(data)
+            if not data or not marker.startswith(received):
+                raise StreamError("sealed mirror control marker is incomplete or invalid")
+
+
 @contextmanager
 def ready_mirror(mirror: subprocess.Popen):
-    """Require readiness and an owned shutdown, including legacy default TERM."""
-    sent_term = False
-    ready_seen = False
+    """Only a positive response on the owned pipe authorizes acceptance."""
     try:
-        with selectors.DefaultSelector() as ready:
-            ready.register(mirror.stdout, selectors.EVENT_READ)
-            if not ready.select(timeout=600) or mirror.stdout.readline() != b"CERALIVE_SEALED_MIRROR_READY\n":
-                raise StreamError("sealed guest mirror did not become ready")
+        output = mirror.stdout.fileno()
+        os.set_blocking(output, False)
+        mirror_marker(output, b"CERALIVE_SEALED_MIRROR_READY\n", time.monotonic() + MIRROR_READY_SECONDS)
         if retry_io(poll_owned, mirror, recover=True) is not None:
             raise StreamError("sealed guest mirror exited during readiness")
-        ready_seen = True
         yield
+        deadline = time.monotonic() + MIRROR_STOP_SECONDS
+        if mirror.stdin is None or retry_io(poll_owned, mirror, recover=True) is not None:
+            raise StreamError("sealed guest mirror exited before shutdown request")
+        retry_io(os.write, mirror.stdin.fileno(), b"S", recover=True)
+        mirror_marker(output, b"CERALIVE_SEALED_MIRROR_STOPPED\n", deadline)
+        retry_io(wait, mirror, deadline, recover=True)
+        if mirror.returncode != 0 or os.read(output, 1):
+            raise StreamError("sealed guest mirror did not shut down cleanly")
     finally:
-        try:
-            if retry_io(poll_owned, mirror, recover=True) is None:
-                try:
-                    retry_io(os.kill, mirror.pid, signal.SIGTERM, recover=True)
-                    sent_term = True
-                except ProcessLookupError:
-                    pass
-            retry_io(wait, mirror, time.monotonic() + 20, recover=True)
-        except (OSError, subprocess.TimeoutExpired):
-            if retry_io(poll_owned, mirror, recover=True) is None:
+        if retry_io(poll_owned, mirror, recover=True) is None:
+            try:
+                retry_io(os.kill, mirror.pid, signal.SIGTERM, recover=True)
+                retry_io(wait, mirror, time.monotonic() + MIRROR_STOP_SECONDS, recover=True)
+            except ProcessLookupError:
+                retry_io(wait, mirror, time.monotonic() + MIRROR_STOP_SECONDS, recover=True)
+            except subprocess.TimeoutExpired:
                 try:
                     retry_io(os.kill, mirror.pid, signal.SIGKILL, recover=True)
                 except ProcessLookupError:
                     pass
-                retry_io(wait, mirror, time.monotonic() + 20, recover=True)
-            raise
-        if ready_seen and (not sent_term or mirror.returncode not in (0, -signal.SIGTERM)):
-            raise StreamError("sealed guest mirror did not remain ready through the build")
+                retry_io(wait, mirror, time.monotonic() + MIRROR_STOP_SECONDS, recover=True)
 
 
 def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
@@ -191,9 +208,9 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     log = HOME / "build.log"
     with ExclusiveFile(log, 0o666) as output:
         output.open()
-        with subprocess.Popen(["python3", str(source / "lib/sealed-inputs.py"), "serve"],
+        with subprocess.Popen(["python3", str(Path(__file__).with_name("sealed-inputs.py")), "serve-managed"],
                               env=env | {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
-                              stdout=subprocess.PIPE, stderr=output) as mirror:
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=output) as mirror:
             with ready_mirror(mirror):
                 args = ["bash", str(source / "build"), capsule.board, "--rootfs-measurement"]
                 with subprocess.Popen(args, env=env, cwd=source, stdout=subprocess.PIPE,

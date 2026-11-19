@@ -180,20 +180,18 @@ class Receipt:
             if self.outcome is not None:
                 if self.outcome.exit_sync_calls >= 2:
                     raise ReceiptError("terminal receipt sync budget exhausted")
-                self.outcome.exit_sync_calls += 1
-            syncing = True
             try:
-                sync_file(self.file_fd, retry_interrupted=not terminal)
-                syncing = False
-                if terminal:
+                sync_file(self.file_fd, terminal_budget=self.outcome)
+                try:
                     retry_io(self._verify_payload, self.file_fd, recover=True)
-                else:
-                    retry_check(self._verify_payload, self.file_fd)
+                except MemoryError:
+                    # This inode was already synced. Restart only the comparison.
+                    retry_io(self._verify_payload, self.file_fd, recover=True)
                 return
             except OSError as error:
-                recoverable = (terminal and error.errno in RECEIPT_RETRY
-                               or syncing and isinstance(error, FileSyncError) and can_rewrite(error))
-                if not recoverable or attempt or (self.outcome is not None and self.outcome.exit_sync_calls >= 2):
+                if (error.errno not in RECEIPT_RETRY or attempt
+                        or (not terminal and isinstance(error, FileSyncError) and not can_rewrite(error))
+                        or (self.outcome is not None and self.outcome.exit_sync_calls >= 2)):
                     raise
                 # Keep the failed inode linked until the fresh inode exists.
                 self.replacement = ExclusiveFile(receipt_temporary(self.path), readable=True)
@@ -204,8 +202,12 @@ class Receipt:
 
     def file_close(self) -> None:
         try:
-            self.output.close()
-        except OSError as error:
+            try:
+                self.output.close()
+            except MemoryError as error:
+                report_error(error)
+                self.output.close()  # The owner has already invalidated a released FD.
+        except (OSError, MemoryError) as error:
             report_error(error)  # Linux has already released the descriptor.
 
     def temp_cleanup(self) -> None:
@@ -286,16 +288,21 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
                     transaction.errors.append(error)
     finally:
         try:
-            if not transaction.renamed:
-                # Both preallocated owners survive even if the first cleanup step fails.
-                transaction.temp_cleanup()
+            if not transaction.renamed and (transaction.primary.fd is not None
+                    or transaction.replacement is not None and transaction.replacement.fd is not None):
+                try:
+                    transaction.temp_cleanup()
+                except (OSError, MemoryError) as error:
+                    if failure is None:
+                        failure = error
+                    report_error(error)
         finally:
             if transaction.directory_fd is not None:
                 transaction.dir_close()
     if failure is not None and (outcome is None or not transaction.renamed):
         if not transaction.renamed and (transaction.primary.fd is not None or (
                 transaction.replacement is not None and transaction.replacement.fd is not None)):
-            raise ReceiptError("receipt temporary cleanup could not be verified") from None
+            raise ReceiptError("receipt temporary cleanup could not be verified") from failure
         if isinstance(failure, Cancelled):
             raise failure
         raise ReceiptError(str(failure)) from failure

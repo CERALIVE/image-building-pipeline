@@ -2075,6 +2075,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
             active = root / "returns/active.json"
             if point == "journal-unlink" and int(count) == 3:
                 assert active.exists() and b"journal_removed=false" in stderr
+                if mode.endswith("/unfiltered"):
+                    check_real_proc_reconciliation(active.parent, "fixture")
                 scan = image_lifecycle.list_directory
                 with patch.object(image_lifecycle, "list_directory", side_effect=lambda path, **kwargs:
                                   [str(os.getpid())] if path == image_lifecycle.PROC_ROOT else scan(path, **kwargs)):
@@ -3181,6 +3183,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             "file_close": ("self.output.close()",),
             "report_error": ("os.close(fd)",),
         }.get(tree.body[0].name, ()))
+        receipt_close_retries = int(tree.body[0].name == "file_close")
         registration_methods = {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}
         bad = set()
         for node in ast.walk(tree):
@@ -3221,6 +3224,12 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             parent = parents[node]
             if isinstance(parent, ast.Call):
                 if ast.unparse(parent) in stack_closes:
+                    continue
+                if (receipt_close_retries and ast.unparse(parent) == "self.output.close()"
+                        and isinstance(statement := parents[parent], ast.Expr)
+                        and isinstance(handler := parents[statement], ast.ExceptHandler)
+                        and isinstance(handler.type, ast.Name) and handler.type.id == "MemoryError"):
+                    receipt_close_retries -= 1
                     continue
                 if raw_close[ast.unparse(parent)] > 0:
                     raw_close[ast.unparse(parent)] -= 1
@@ -3287,6 +3296,11 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             compile(private, "<private-copy>", "exec")
             assert unguarded(private, acquisitions), (fn.__qualname__, mutation)
             del private.body[-1].body[:len(statements)]
+        if fn is image_lifecycle.Receipt.file_close:
+            recovery = next(node for node in ast.walk(private) if isinstance(node, ast.ExceptHandler)
+                            and isinstance(node.type, ast.Name) and node.type.id == "MemoryError")
+            recovery.body.append(ast.parse("self.output.close()").body[0])
+            assert unguarded(private, acquisitions) == {"self.output.close"}
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:
@@ -3476,6 +3490,7 @@ def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
         assert cancelled_fixture(f"tail-io:journal-unlink/{error}/1") == baseline, error
     assert cancelled_fixture("tail-io:journal-unlink/ENOENT/1/still-present") == baseline
     assert cancelled_fixture("tail-io:journal-unlink/EPERM/3") == baseline
+    assert cancelled_fixture("tail-io:journal-unlink/EPERM/3/unfiltered") == baseline
     print(f"{len(operations)} tail syscall sites tested with five one-shot errno values", flush=True)
 
 
@@ -3672,8 +3687,12 @@ def test_terminal_receipt_readback_restarts_and_uses_the_remaining_attempt() -> 
         body_length = len(json.dumps(row, sort_keys=True, indent=2)[:-2].encode("ascii"))
         probes = ((None, 0), (None, len((json.dumps(row, sort_keys=True, indent=2) + "\n").encode())),
                   (probe, 0), (probe, body_length), (probe, body_length + len(probe.fallback_fields)))
-        for error, (probe, target_offset), fault_scope in product(errors, probes, ("once", "first-inode", "always")):
-            marker = root / "exit.json"
+        scenarios = tuple((root / "exit.json", probe, offset) for probe, offset in probes)
+        scenarios += tuple((root / name, probe, offset)
+                           for name in ("transport-validation.json", "teardown.json")
+                           for probe, offset in probes if probe is None)
+        for error, (marker, probe, target_offset), fault_scope in product(
+                errors, scenarios, ("once", "first-inode", "always")):
             reads = []
 
             def pread(fd, address, size, offset):
@@ -3690,7 +3709,8 @@ def test_terminal_receipt_readback_restarts_and_uses_the_remaining_attempt() -> 
 
             with patch("image_stream._PREAD", pread):
                 try:
-                    image_lifecycle.receipt(marker, row, outcome=Cancellation(), probe=probe)
+                    flag = Cancellation() if marker.name == "exit.json" else None
+                    image_lifecycle.receipt(marker, row, outcome=flag, probe=probe)
                 except image_lifecycle.ReceiptError:
                     assert fault_scope == "always", (error, target_offset, fault_scope, reads)
             assert list(root.iterdir()) == ([] if fault_scope == "always" else [marker]), (error, target_offset, fault_scope)
@@ -3776,6 +3796,7 @@ def test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults() -> 
             baseline = set(os.listdir("/proc/self/fd"))
             syncs = 0
             hit = False
+            occurrences = Counter()
 
             def sync(_fd):
                 nonlocal syncs
@@ -3787,7 +3808,9 @@ def test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults() -> 
                 if frame.f_code not in watched:
                     return None
                 if syncs == 2 and event == "line":
-                    site = (frame.f_code.co_qualname, frame.f_lineno)
+                    line = (frame.f_code.co_qualname, frame.f_lineno)
+                    occurrences[line] += 1
+                    site = (*line, occurrences[line])
                     if fault is None:
                         sites.add(site)
                     elif site == fault:
@@ -3814,6 +3837,74 @@ def test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults() -> 
     assert sites
     for site in sorted(sites):
         replay(site)
+
+
+def test_readback_allocation_after_second_sync_preserves_verified_receipt() -> None:
+    import image_stream
+
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        marker = root / "exit.json"
+        row = {"launcher_exit": 0, "stop_reason": "verified"}
+        syncs = []
+        injected = False
+        native_read = image_stream._PREAD
+        native_sync = image_stream.sync_once
+
+        def sync(fd):
+            syncs.append(os.fstat(fd).st_ino)
+            if len(syncs) == 1:
+                raise OSError(errno.EIO, "fixture first fsync")
+            native_sync(fd)
+
+        def read(fd, destination, size, offset):
+            nonlocal injected
+            assert len(syncs) == 2
+            if not injected and offset:
+                injected = True
+                raise MemoryError("fixture replacement EOF comparison")
+            return native_read(fd, destination, size, offset)
+
+        with patch.object(image_stream, "sync_once", sync), patch.object(image_stream, "_PREAD", read):
+            image_lifecycle.receipt(marker, row, outcome=Cancellation())
+        assert injected and len(syncs) == len(set(syncs)) == 2
+        assert list(root.iterdir()) == [marker] and json.loads(marker.read_bytes()) == row
+
+
+def test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor() -> None:
+    from image_stream import ExclusiveFile
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        native_close = os.close
+        source = root / "sentinel"
+        source.write_bytes(b"distinct descriptor")
+        with ExclusiveFile(root / "owned") as owner:
+            owner.open()
+            owned_fd = owner.fileno()
+            replacement = None
+
+            def close(fd):
+                nonlocal replacement
+                native_close(fd)
+                if fd == owned_fd and replacement is None:
+                    replacement = os.open(source, os.O_RDONLY)
+                    assert replacement == owned_fd
+                    raise MemoryError("fixture late allocation after real close")
+
+            try:
+                with patch.object(os, "close", close):
+                    try:
+                        owner.close()
+                    except MemoryError:
+                        pass
+                    owner.discard()
+                assert replacement == owned_fd
+                assert os.read(replacement, 32) == b"distinct descriptor"
+                assert sorted(path.name for path in root.iterdir()) == ["sentinel"]
+            finally:
+                if replacement is not None and pathlib.Path(f"/proc/self/fd/{replacement}").exists():
+                    native_close(replacement)
 
 
 def test_attempt_preparation_and_journal_survive_transient_io() -> None:
@@ -4428,6 +4519,36 @@ def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() 
         assert record["stop_reason"] == "previous launcher interrupted; guest cleanup unknown"
 
 
+def check_real_proc_reconciliation(store: pathlib.Path, attempt: str, holder: bool = False) -> None:
+    journal = store / "active.json"
+    record = store / (attempt + ".reconciled.json")
+    try:
+        reconcile(store)
+    except image_resources.AdmissionError as error:
+        cause = error.__cause__
+        if cause is None:
+            assert holder and "still held by" in str(error), error
+        else:
+            assert isinstance(cause, OSError) and cause.errno in {
+                errno.EACCES, errno.EPERM, errno.ENOENT, errno.ESRCH,
+            }, error
+        assert journal.exists() and not record.exists()
+    else:
+        assert not holder and not journal.exists()
+        assert json.loads(record.read_bytes())["overlay_descriptors_closed"] is True
+
+
+def test_reconciliation_refuses_inconclusive_unfiltered_proc_inventory() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        with (store / "overlay").open("wb") as overlay:
+            info = os.fstat(overlay.fileno())
+            (store / "active.json").write_text(json.dumps({
+                "attempt": "interrupted", "overlay_inode": [info.st_dev, info.st_ino]}))
+            check_real_proc_reconciliation(store, "interrupted", holder=True)
+        check_real_proc_reconciliation(store, "interrupted")
+
+
 def test_reconciliation_checks_descriptors_of_a_second_real_process() -> None:
     code = "import os,sys; os.fstat(int(sys.argv[1])); print('ready', flush=True); sys.stdin.read()"
     scan = image_lifecycle.list_directory
@@ -4697,6 +4818,7 @@ class PairAndAdmissionCases:
         test_image_admission_requires_effective_cgroup_caps,
         test_nice_nine_requires_low_cpu_weight_and_all_hard_caps,
         test_reconciliation_holds_admission_until_owned_overlay_descriptors_close,
+        test_reconciliation_refuses_inconclusive_unfiltered_proc_inventory,
         test_reconciliation_checks_descriptors_of_a_second_real_process,
         test_journal_reconciliation_restarts_and_never_certifies_an_incomplete_proc_scan,
         test_image_base_rejects_backing_and_nested_external_data_files,
@@ -4723,7 +4845,9 @@ if __name__ == "__main__":
                             test_each_reached_fresh_receipt_recovery_line_keeps_ownership),
         "--terminal-io-budget": (test_terminal_receipt_sync_has_one_two_call_budget,
                                  test_terminal_receipt_readback_restarts_and_uses_the_remaining_attempt,
-                                 test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults),
+                                 test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults,
+                                 test_readback_allocation_after_second_sync_preserves_verified_receipt,
+                                 test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor),
         "--admission-restart": (test_priority_syscall_error_restarts_the_whole_observation,
                                 test_late_disk_error_restarts_store_admission_before_execution),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),

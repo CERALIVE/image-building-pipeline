@@ -214,16 +214,19 @@ def sync_once(fd: int) -> None:
 
 
 def sync_file(fd: int, *, directory: bool = False, recover: bool = True,
-              retry_interrupted: bool = True) -> None:
+              terminal_budget=None) -> None:
     """Sync data or report unsupported durability."""
     try:
         if directory:
             retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
+        elif terminal_budget is not None:
+            # Reserve the call at the sync boundary so a late exception cannot refund it.
+            terminal_budget.exit_sync_calls += 1; sync_once(fd)
         else:
             try:
                 sync_once(fd)
             except OSError as error:
-                if error.errno != errno.EINTR or not retry_interrupted:
+                if error.errno != errno.EINTR:
                     raise
                 sync_once(fd)
     except OSError as error:
@@ -422,14 +425,8 @@ class ExclusiveFile:
     def close(self) -> None:
         fd = self.fd
         if fd is not None and fd >= 0:
-            try:
-                os.close(fd)
-            except OSError:
-                # A Linux close error still releases the FD.
-                self.fd = -1
-                raise
-            else:
-                self.fd = -1
+            # A late exception must never let cleanup close a reused number.
+            self.fd = -1; os.close(fd)
 
 
 def rewrite_file(path: Path, replay: Callable[[int], None]) -> None:

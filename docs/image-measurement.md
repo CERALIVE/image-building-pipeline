@@ -236,7 +236,8 @@ Host error text is best effort. Reporting attempts one bounded-size
 nonblocking write via a separately opened stderr descriptor. A full pipe
 can drop the message without delaying the authoritative receipt or exit.
 
-The image base embeds the guest wrapper, helper, stage logger and stream writer at
+The image base embeds the guest wrapper, helper, sealed mirror and its repository
+verification scripts, stage logger and stream writer at
 `build-base --profile image` time. A newer launcher or source bundle does not
 update an earlier base. Prepare a new file from the reviewed helper revision,
 and independently approve its digest before using it for an attended probe.
@@ -784,10 +785,11 @@ two actual file sync calls, including EINTR, even if the transaction restarts.
 After a recoverable sync fault or exhausted readback it rewrites the prepared
 bytes into a fresh inode, closes and removes the old temporary, and syncs the
 replacement if the budget permits. Each write attempt requires a complete
-positioned readback of the prepared bytes and EOF before rename. A transient
-readback error restarts that comparison at offset zero, up to three comparisons
-per inode. A byte mismatch rejects the receipt. Other regular-file consumers
-retain their bounded EINTR retry.
+positioned readback of the prepared bytes and EOF before rename. All receipt
+kinds use the same bounded retry for readback I/O errors. One allocation
+failure restarts comparison on the synced inode without repeating sync.
+A byte mismatch rejects the receipt. Other regular-file consumers retain
+their bounded EINTR retry.
 Decoded artifacts replay from the captured envelope and recheck their member
 digest. Staging captures replay only if the bytes match the digest accumulated
 as the launcher read the guest pipe and the additional disk space is available.
@@ -852,10 +854,14 @@ input for tar parsing. Archive headers and members use positioned reads that
 retry at the failed byte offset. Each object still has to match its inventory
 length and SHA-256.
 The slot, firmware and sealed-mirror checks require complete directory
-observations. After readiness, the guest sends TERM to the mirror it started.
-It accepts either an orderly zero exit or the legacy default TERM disposition
-and separately checks the sealed missing-object marker. An early mirror exit,
-an unowned shutdown, or any other exit status rejects the measurement.
+observations. The guest uses the mirror shipped in the base with the selected
+source's existing build and capsule contracts. After the build, it requests
+shutdown over the mirror's private stdin pipe. The mirror finishes its active
+request, closes its listener, and acknowledges shutdown only if it detected
+no miss. Both the acknowledgement and a collected zero exit status are required.
+The guest separately checks for the missing-object marker. TERM and KILL are
+cleanup signals after failure. They cannot establish a successful measurement.
+Readiness and shutdown markers use bounded nonblocking reads.
 The offline probe requires an empty JSON list of default routes
 and ENETUNREACH or EHOSTUNREACH for every selected TCP endpoint. ECONNREFUSED
 indicates a reachable endpoint, and ETIMEDOUT supplies no conclusive evidence.
