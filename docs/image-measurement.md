@@ -9,8 +9,9 @@ refresh a baseline or qualify a board.
 
 No host directory, socket, agent, physical disk or credential service is
 attached. The only additional input is a typed read-only block capsule. An
-output-only virtio-serial channel returns data over QEMU stdout; console and
-diagnostics use separate bounded pipes. Stdin is `/dev/null`. Guest bytes are
+output-only virtio-serial channel returns data over QEMU stdout. The console has
+its own bounded pipe. Probe QEMU stderr and stdin go to `/dev/null`.
+Measurement and verification retain a bounded QEMU stderr log. Guest bytes are
 never rendered on the host terminal. Nested Docker mounts and privileged image
 operations belong entirely to the disposable guest.
 
@@ -21,6 +22,9 @@ owner authorization. Never run the full test gate or privileged image tools on
 the workstation to validate this implementation. PR CI owns that gate.
 
 Prepare an independent base with `build-base --profile image --base FILE`.
+Use a new path and record the new SHA-256 for owner approval before use. The
+base installs the managed sealed mirror and guest helpers. An approved older
+source bundle still supplies the build, but the base supplies the mirror.
 The existing SHA-verified cloud image and create-only publication remain in
 use. This **trusted preparation** has networking for public tools; it installs
 no Actions runner. The image base is 128 GiB virtual, at most 32 GiB allocated,
@@ -58,7 +62,7 @@ ananicy-cpp's `Heavy_CPU` can change QEMU from nice 10 to 9 without changing
 the cgroup. The launcher tolerates that adjustment, checks the running QEMU
 process and its cgroup about every five seconds, and stops the attempt if the
 priority floor or required limits are lost at a check. The exit receipt
-includes the last QEMU observation of `nice`, `ionice` (via util-linux), and
+includes the last QEMU observation of `nice`, the I/O class (via `ioprio_get`), and
 `cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
 is refused for the measurement guest.
 
@@ -616,11 +620,13 @@ The launcher holds the flock through all of these steps:
 3. Close the input capsule, console and any remaining output descriptors.
    Write each guest's `teardown.json` after cleanup. It records source, base
    and input identities, process start identities, timing, caps, reaping and
-   descriptor closure. Retire and sync the ownership journal only after
+   descriptor closure. Mark the journal eligible for retirement only after
    teardown has been recorded and closure is confirmed. On the measurement
    path, repeat these steps for the independent verifier, validate its result,
    remove its temporary capsule and write the candidate `acceptance.json`.
-4. Commit exactly one final `exit.json` last. For a probe it is in `build/`.
+4. Commit one final `exit.json`, then retire and sync the eligible journal.
+   An unconfirmed receipt or unsafe teardown leaves the journal in place.
+   For a probe the receipt is in `build/`.
    For a build and verifier pair it is in the attempt directory alongside
    `acceptance.json`. Only a marker with `launcher_exit` equal to 0 and
    `pair_complete` equal to true, with the matching identity and SHA-256 of
@@ -645,9 +651,10 @@ cannot skip the remaining cleanup or change the published result. A final
 directory-sync failure leaves the file visible at runtime, but a crash may
 lose the rename.
 
-After teardown and publication, the CLI reads `launcher_exit` from the
-published marker. A missing or unreadable marker, or an invalid status,
-returns a nonzero exit. The CLI uses a direct process exit so Python
+The CLI takes its exit status from the verdict recorded after a successful
+rename. It checks `launcher_exit` in the published marker for diagnostics.
+If the launcher cannot commit a receipt, it exits nonzero and retains the
+journal. The CLI uses a direct process exit so Python
 shutdown hooks cannot replace the result. The external flock releases its
 lock when the launcher exits. The launcher has already reaped QEMU and
 closed the guest descriptors and anonymous overlay before committing success.

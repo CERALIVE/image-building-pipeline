@@ -15,7 +15,7 @@ import subprocess
 import tarfile
 
 from image_capsule import Capsule, digest_file
-from image_stream import Identity, StreamError
+from image_stream import Identity, StreamError, list_directory, listed_entry, retry_check
 
 
 @contextmanager
@@ -36,6 +36,11 @@ def parent_fd(root: Path, name: str):
 
 
 def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
+    """Bind file bytes, ownership, modes, links and special-file identities."""
+    retry_check(_compare_slot, root, archive, boot)
+
+
+def _compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
     """Bind file bytes, ownership, modes, links and special-file identities."""
     expected = set()
     with tarfile.open(archive, "r:") as tar:
@@ -87,14 +92,23 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                 else:
                     raise StreamError("unsupported returned tar member")
     actual_names = set()
-    for directory, dirs, files in os.walk(root, followlinks=False):
-        for name in (*dirs, *files):
-            actual_names.add(str((Path(directory) / name).relative_to(root)))
+    directories = [root]
+    while directories:
+        directory = directories.pop()
+        for name in list_directory(directory):
+            path = directory / name
+            actual_names.add(str(path.relative_to(root)))
+            if len(actual_names) > 1_000_000 + len(boot) + 2:
+                raise StreamError("excessive slot directory inventory")
+            if stat.S_ISDIR(path.lstat().st_mode):
+                directories.append(path)
     additions = set(boot) | {"usr/lib/ceralive/boot", "lost+found"}
     if actual_names - expected - additions:
         raise StreamError("slot contains unexpected additions to emitted tar")
-    if (root / "lost+found").exists() and list((root / "lost+found").iterdir()):
-        raise StreamError("slot lost+found is not empty")
+    if "lost+found" in actual_names:
+        housekeeping = root / "lost+found"
+        if not stat.S_ISDIR(housekeeping.lstat().st_mode) or list_directory(housekeeping):
+            raise StreamError("slot lost+found is not an empty directory")
     for name, content in boot.items():
         with parent_fd(root, name) as (fd, leaf):
             actual = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
@@ -104,6 +118,13 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
             with os.fdopen(handle, "rb") as file:
                 if hashlib.file_digest(file, "sha256").hexdigest() != digest_file(content):
                     raise StreamError("slot boot payload differs from trusted compilation")
+
+
+def check_firmware(firmware: Path, removed: tuple[str, ...], retained: tuple[str, ...]) -> None:
+    unexpected = any(listed_entry(firmware, name) is not None for name in removed)
+    if unexpected or not all((info := listed_entry(firmware, name)) is not None
+                             and stat.S_ISDIR(info.st_mode) for name in retained):
+        raise StreamError("ceralive8 removed/retained firmware inventory mismatch")
 
 
 def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
@@ -212,9 +233,7 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             removed = ("amdgpu", "radeon", "i915", "xe", "mellanox", "netronome", "intel/ipu", "intel/vsc")
             retained = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "mrvl", "mrvl/prestera", "nvidia")
             firmware = mount / "usr/lib/firmware"
-            if any((firmware / name).exists() for name in removed) or not all(
-                    (firmware / name).is_dir() for name in retained):
-                raise StreamError("ceralive8 removed/retained firmware inventory mismatch")
+            retry_check(check_firmware, firmware, removed, retained)
             references = subprocess.run(["bash", "-euo", "pipefail", "-c",
                 'source "$1"; firmware_sweep_module_refs "$2"', "_",
                 str(source / "mkosi/customize/firmware-sweep.sh"), str(mount)],

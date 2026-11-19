@@ -10,6 +10,7 @@ import json
 import lzma
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -309,6 +310,52 @@ def test_guest_mirror_matches_encoded_package_urls_without_changing_origin() -> 
             serve.__globals__["HTTPServer"] = original
         assert responses == [200, 404]
         assert output.getvalue() == data
+
+
+def test_mirror_shutdown_rejects_a_missing_object_even_when_marker_write_fails() -> None:
+    module = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
+    serve = module["serve"]
+    for missed in (False, True):
+        with bootstrap_fixture() as work:
+            marker = work / "missing-object"
+            write_text = Path.write_text
+
+            def interrupt_marker(path, *args, **kwargs):
+                if path == marker:
+                    signal.raise_signal(signal.SIGTERM)
+                return write_text(path, *args, **kwargs)
+
+            class Server:
+                def __init__(self, _address, handler):
+                    self.handler = handler
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_args):
+                    return False
+                def handle_request(self):
+                    if missed:
+                        request = self.handler.__new__(self.handler)
+                        request.path = "http://deb.debian.org/debian/missing"
+                        request.send_error = lambda _status: None
+                        request.do_GET()
+                    else:
+                        signal.raise_signal(signal.SIGTERM)
+
+            previous = signal.signal(signal.SIGTERM, lambda *_: None)
+            try:
+                with patch.dict(serve.__globals__, HTTPServer=Server), \
+                        patch.object(Path, "write_text", interrupt_marker):
+                    try:
+                        serve(work)
+                    except SystemExit as error:
+                        assert error.code == int(missed)
+                    except module["SealedError"] as error:
+                        raise AssertionError("mirror shutdown did not report its status") from error
+                    else:
+                        raise AssertionError("mirror shutdown returned without reporting its status")
+            finally:
+                signal.signal(signal.SIGTERM, previous)
+            assert not marker.exists()
 
 
 if __name__ == "__main__":

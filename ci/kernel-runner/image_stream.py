@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import asdict, dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
+import struct
 from typing import BinaryIO, Callable, Final, Iterable, TypeAlias
 
 JSONValue: TypeAlias = str | bool | int | float | None | list["JSONValue"] | dict[str, "JSONValue"]
@@ -18,6 +22,14 @@ MANIFEST_LIMIT: Final = 65536
 CONTROL_LOG_LIMIT: Final = 8 * 1024**2
 BUILD_LOG_LIMIT: Final = 1024**3 - 16 * 1024**2
 MAGIC: Final = b"CERALIVE_IMAGE_STREAM_V1\n"
+IO_ATTEMPTS: Final = 3
+CHECK_RETRY: Final = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO))
+RETRYABLE_IO: Final = CHECK_RETRY | frozenset((errno.EACCES, errno.EPERM, errno.EBUSY, errno.ENOSPC,
+                                              errno.EBADF, errno.ENOSYS, errno.EDQUOT))
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_GETDENTS = _LIBC.getdents64
+_GETDENTS.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
+_GETDENTS.restype = ctypes.c_ssize_t
 ARTIFACTS: Final = frozenset((
     "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
     "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -73,6 +85,86 @@ def unique_object(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
     return result
 
 
+def retry_io(operation, *args, recover: bool = False, no_retry: frozenset[int] = frozenset(), **kwargs):
+    """Retry safe operations at most three times including the first call."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            return operation(*args, **kwargs)
+        except OSError as error:
+            if (error.errno in no_retry or attempt + 1 == IO_ATTEMPTS or not (
+                    isinstance(error, InterruptedError) or error.errno == errno.EINTR
+                    or recover and error.errno in RETRYABLE_IO)):
+                raise
+
+
+def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
+    """Return a complete Linux directory scan, preserving ENOENT from getdents."""
+    # glibc readdir treats an ENOENT from getdents as end of directory.
+    # A safety check must distinguish a dead directory from normal EOF.
+    buffer = ctypes.create_string_buffer(32 * 1024)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        names = []
+        while (length := _GETDENTS(fd, buffer, len(buffer))) > 0:
+            batch = buffer.raw[:length]
+            offset = 0
+            while offset < length:
+                record_size = struct.unpack_from("=H", batch, offset + 16)[0]
+                if record_size < 20 or offset + record_size > length:
+                    raise OSError(errno.EIO, "invalid getdents record", path)
+                name = batch[offset + 19:offset + record_size].split(b"\0", 1)[0]
+                if name not in (b".", b"..") and not (omit_open_fd and name == str(fd).encode()):
+                    names.append(os.fsdecode(name))
+                offset += record_size
+        if length < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), path)
+        return names
+    finally:
+        os.close(fd)
+
+
+def retry_check(operation, *args, disappearing: bool = False):
+    """Restart a read-only observation, discarding any incomplete result."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            return operation(*args)
+        except OSError as error:
+            retryable = error.errno in CHECK_RETRY or disappearing and error.errno in (errno.ENOENT, errno.ESRCH)
+            if not retryable or attempt + 1 == IO_ATTEMPTS:
+                raise
+
+
+def listed_entry(root: Path, relative: str) -> os.stat_result | None:
+    """Prove absence by listing the parent, including each intermediate path."""
+    parts = Path(relative).parts
+    for index, name in enumerate(parts):
+        if name not in list_directory(root):
+            return None
+        root = root / name
+        info = root.lstat()
+        if index == len(parts) - 1:
+            return info
+        if not stat.S_ISDIR(info.st_mode):
+            raise StreamError("inventory ancestor is not a directory")
+    raise ValueError("inventory entry must have a name")
+
+
+def write_all(destination: BinaryIO | int, data: bytes) -> int:
+    """Write every byte without replaying any successfully written prefix."""
+    offset = 0
+    while offset < len(data):
+        remaining = data if offset == 0 else memoryview(data)[offset:]
+        if isinstance(destination, int):
+            written = retry_io(os.write, destination, remaining, recover=True)
+        else:
+            written = destination.write(remaining)
+        if written is None or not 0 < written <= len(remaining):
+            raise OSError(errno.EIO, "file write made no progress")
+        offset += written
+    return offset
+
+
 def read_header(source: BinaryIO) -> Member:
     line = source.readline(HEADER_LIMIT + 1)
     if len(line) > HEADER_LIMIT or not line.endswith(b"\n"):
@@ -101,7 +193,7 @@ def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
         chunk = source.read(min(1024 * 1024, remaining))
         if not chunk:
             raise StreamError("truncated artifact")
-        destination.write(chunk)
+        write_all(destination, chunk)
         digest.update(chunk)
         remaining -= len(chunk)
     if digest.hexdigest() != member.sha256:
@@ -161,7 +253,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
 def encode(destination: BinaryIO, records: Iterable[tuple[str, bytes | Path]],
            identity: Identity) -> None:
     """Guest producer; the host independently recomputes every record hash."""
-    destination.write(MAGIC)
+    write_all(destination, MAGIC)
     members = []
     for name, value in records:
         if isinstance(value, Path):
@@ -172,17 +264,17 @@ def encode(destination: BinaryIO, records: Iterable[tuple[str, bytes | Path]],
             digest = hashlib.sha256(value).hexdigest()
             length = len(value)
         member = Member(name, length, digest)
-        destination.write(json.dumps(asdict(member), separators=(",", ":")).encode() + b"\n")
+        write_all(destination, json.dumps(asdict(member), separators=(",", ":")).encode() + b"\n")
         if isinstance(value, Path):
             with value.open("rb") as source:
                 transfer(source, destination, member)
         else:
-            destination.write(value)
+            write_all(destination, value)
         members.append(member)
     manifest = json.dumps({"schema": 1, "identity": asdict(identity),
                            "members": [asdict(item) for item in members]},
                           separators=(",", ":")).encode()
     terminal = Member("manifest", len(manifest), hashlib.sha256(manifest).hexdigest())
-    destination.write(json.dumps(asdict(terminal), separators=(",", ":")).encode() + b"\n")
-    destination.write(manifest)
+    write_all(destination, json.dumps(asdict(terminal), separators=(",", ":")).encode() + b"\n")
+    write_all(destination, manifest)
     destination.flush()

@@ -19,7 +19,7 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import job_disk, report_error
+from image_lifecycle import job_disk, report_error, sync_directory
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
     child_pipes, read_check_script, run, terminate, wait,
@@ -81,11 +81,18 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         check_spawn_signals(cancellation)
+        parent = os.getpid()
+        if image_job:
+            # Both execs keep the same PID. Check the race before setpriv armed parent death.
+            args = ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
+                    'test "$PPID" = "$1" || exit 125; shift; exec "$@"', "runner-child", str(parent), *args]
         process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
-                                   preexec_fn=partial(die_with_parent, os.getpid()),
+                                   preexec_fn=None if image_job else partial(die_with_parent, parent),
+                                   start_new_session=image_job is not None,
                                    stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE if image_job else subprocess.STDOUT,
+                                   stderr=(subprocess.DEVNULL if image_job and image_job.probe else
+                                           subprocess.PIPE if image_job else subprocess.STDOUT),
                                    restore_signals=True)
         with child_pipes(process):
             lines: list[bytes] = []
@@ -208,7 +215,11 @@ def main(cancellation: Cancellation) -> int:
                 files.append({"path": destination, "permissions": "0755", "encoding": "b64",
                               "content": base64.b64encode((HERE / source).read_bytes()).decode()})
             if args.profile == "image":
-                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py"):
+                files.append({"path": "/usr/local/lib/ceralive-kernel-runner/sealed-inputs.py",
+                              "permissions": "0755", "encoding": "b64",
+                              "content": base64.b64encode((HERE.parents[1] / "lib/sealed-inputs.py").read_bytes()).decode()})
+                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py",
+                               "vm_process.py"):
                     files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
                                   "permissions": "0755", "encoding": "b64",
                                   "content": base64.b64encode((HERE / source).read_bytes()).decode()})
@@ -294,13 +305,18 @@ def exit_launcher() -> None:
     finally:
         try:
             if cancellation.exit_receipt is not None:
-                status = 1
+                status = 1 if cancellation.committed_exit is None else cancellation.committed_exit
                 # Final receipt publication keeps signals blocked through this exit.
                 try:
+                    if cancellation.committed_exit is not None and cancellation.safe_journal is not None:
+                        cancellation.safe_journal.unlink(missing_ok=True)
+                        sync_directory(cancellation.safe_journal.parent)
+                except BaseException as exc:
+                    report_error(exc)
+                try:
                     published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
-                    if type(published) is not int or published not in (0, 1):
-                        raise ValueError("invalid launcher_exit in image receipt")
-                    status = published
+                    if type(published) is not int or published != cancellation.committed_exit:
+                        raise ValueError("image receipt disagrees with committed launcher_exit")
                 except BaseException as exc:
                     report_error(exc)
             else:

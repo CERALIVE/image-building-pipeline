@@ -2,21 +2,38 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import errno
 import os
 from pathlib import Path
 import resource
 from typing import Final, TypedDict
 
-from vm_process import Cancellation, run
+from image_stream import retry_check
+from vm_process import Cancellation
 
 GIB: Final = 1024**3
 MIN_NICE: Final = 9
 MAX_CPU_WEIGHT: Final = 10
 
+SYS_IOPRIO_GET: Final = 252
+IOPRIO_WHO_PROCESS: Final = 1
+IOPRIO_CLASS_SHIFT: Final = 13
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.syscall.restype = ctypes.c_long
+
 
 class AdmissionError(Exception):
     """An image attempt cannot fit its approved resource envelope."""
+
+
+class IOPriorityError(AdmissionError):
+    """The live guest's I/O class could not be verified."""
+
+
+class IOPrioritySyscallError(OSError):
+    """A native sampling error whose errno must reach the observation retry."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,12 +134,30 @@ class PriorityObservation(TypedDict):
 
 def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
     """Observe the owned QEMU process, including containment after exec."""
+    try:
+        return retry_check(_process_priority, pid, cancellation)
+    except IOPrioritySyscallError as error:
+        raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
+
+
+def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
+    cancellation.check()
+    if cancellation.finalizing:
+        raise RuntimeError("cannot sample a child during terminal finalization")
     nice = require_process_priority(pid)
     cpu_weight = cgroup_limits(pid)
-    ionice = run(["ionice", "-p", str(pid)], cancellation=cancellation,
-                 capture_output=True, timeout=1).stdout.decode().strip()
-    if ionice.startswith("realtime"):
+    if os.uname().machine != "x86_64" or ctypes.sizeof(ctypes.c_void_p) != 8:
+        raise IOPriorityError(os.strerror(errno.ENOSYS))
+    value = _LIBC.syscall(ctypes.c_long(SYS_IOPRIO_GET), IOPRIO_WHO_PROCESS, pid)
+    if value == -1:
+        error = ctypes.get_errno()
+        raise IOPrioritySyscallError(error, os.strerror(error))
+    policy, level = divmod(value, 1 << IOPRIO_CLASS_SHIFT)
+    if policy == 1:
         raise AdmissionError("image profile forbids realtime I/O priority")
+    if policy not in (0, 2, 3):
+        raise IOPriorityError(f"unrecognized I/O priority class {policy}")
+    ionice = f"{('none', 'realtime', 'best-effort', 'idle')[policy]}: prio {level}"
     return {"nice": nice, "ionice": ionice, "cpu_weight": cpu_weight}
 
 

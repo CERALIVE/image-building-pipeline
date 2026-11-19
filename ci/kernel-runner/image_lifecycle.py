@@ -17,7 +17,7 @@ from typing import TextIO
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
-from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
+from image_stream import CONTROL_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, write_all
 from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
 
 
@@ -103,7 +103,7 @@ class Receipt:
             self.file.close()
 
     def temp_cleanup(self) -> None:
-        if not self.renamed:
+        if not self.renamed and self.file is not None:
             self.temporary.unlink(missing_ok=True)
 
     def mask_block(self) -> None:
@@ -115,7 +115,10 @@ class Receipt:
             self.outcome.check()
             if signal.sigpending().intersection(STOP_SIGNALS):
                 raise Cancelled("runner cancelled")
+        status = self.row["launcher_exit"] if self.outcome is not None else None
         os.replace(self.temporary, self.path)
+        if self.outcome is not None:
+            self.outcome.committed_exit = status
         self.renamed = True
 
     def dir_open(self) -> None:
@@ -218,10 +221,11 @@ class ImageJob:
     """Mutable attempt journal and private descriptor ownership for one guest."""
 
     def __init__(self, directory: Path, identity: Identity, capsule: Path,
-                 cancellation: Cancellation | None = None) -> None:
+                 cancellation: Cancellation | None = None, *, probe: bool = False) -> None:
         self.directory = directory
         self.identity = identity
         self.cancellation = cancellation or Cancellation()
+        self.probe = probe
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
@@ -252,8 +256,7 @@ class ImageJob:
         receipt(self.directory / "teardown.json", self.state)
         if (self.state["overlay_descriptor_closed"] and "overlay_inode" in self.state
                 and ("qemu" not in self.state or self.state["qemu_reaped"])):
-            self.active.unlink(missing_ok=True)
-            sync_directory(self.active.parent)
+            self.cancellation.safe_journal = self.active
 
     def close_console_writer(self) -> None:
         if self.console_write >= 0:
@@ -262,6 +265,7 @@ class ImageJob:
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
+        self.cancellation.safe_journal = None
         inode = os.fstat(disk_fd)
         self.state.update(overlay_fd=disk_fd, overlay_inode=[inode.st_dev, inode.st_ino])
         receipt(self.active, {
@@ -270,7 +274,7 @@ class ImageJob:
         })
 
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
-        """Drain three bounded pipes without echoing guest bytes to a terminal."""
+        """Drain the artifact and console ports without echoing guest bytes."""
         self.state.update(qemu=process_identity(process.pid), started_at=time.time(),
                           stop_reason="running")
         receipt(self.directory / "started.json", self.state)
@@ -282,14 +286,17 @@ class ImageJob:
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
+        read_errors = dict.fromkeys(counts, 0)
         with selectors.DefaultSelector() as events:
             files = {}
-            for name, pipe in (("stream", process.stdout), ("diagnostic", process.stderr),
-                               ("console", self.console_read)):
+            pipes = [("stream", process.stdout), ("console", self.console_read)]
+            if not self.probe:
+                pipes.append(("diagnostic", process.stderr))
+            for name, pipe in pipes:
                 events.register(pipe, selectors.EVENT_READ, name)
                 fd = os.open(self.directory / (name + ".partial"),
                              os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                output = self.outputs.enter_context(os.fdopen(fd, "wb"))
+                output = self.outputs.enter_context(os.fdopen(fd, "wb", buffering=0))
                 self.outputs.callback(sync_output, output)
                 files[name] = output
             try:
@@ -301,7 +308,7 @@ class ImageJob:
                     if now >= next_priority_check and poll_owned(process) is None:
                         try:
                             self.state["qemu_priority"] = process_priority(process.pid, self.cancellation)
-                        except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
+                        except (FileNotFoundError, ProcessLookupError):
                             if poll_owned(process) is None:
                                 raise
                         next_priority_check = now + 5
@@ -316,8 +323,12 @@ class ImageJob:
                         fd = event.fileobj if type(event.fileobj) is int else event.fileobj.fileno()
                         try:
                             chunk = os.read(fd, 1024 * 1024)
-                        except InterruptedError:
+                        except OSError as error:
+                            read_errors[name] += 1
+                            if error.errno not in RETRYABLE_IO or read_errors[name] >= IO_ATTEMPTS:
+                                raise
                             continue
+                        read_errors[name] = 0
                         if not chunk:
                             events.unregister(event.fileobj)
                             continue
@@ -325,7 +336,7 @@ class ImageJob:
                         if (counts["stream"] > min(CAPS.stream_max, self.state["stream_budget"])
                                 or counts["console"] + counts["diagnostic"] > CONTROL_LOG_LIMIT):
                             raise StreamError("image return stream or log budget exceeded")
-                        files[name].write(chunk)
+                        write_all(files[name], chunk)
                     # Fixed caps bound growth between these observations.
                     overlay = Path(f"/proc/self/fd/{self.state['overlay_fd']}")
                     remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)

@@ -9,6 +9,7 @@ import errno
 import fcntl
 import io
 import inspect
+from itertools import product
 import json
 import hashlib
 import os
@@ -630,8 +631,10 @@ def term(_signum, _frame):
         sys.exit(0)
 if mode != "slow":
     signal.signal(signal.SIGTERM, term)
-fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
+fds = ({{1, 2}} if mode.startswith("pair:") else {{1}}) | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
+if not mode.startswith("pair:"):
+    assert os.readlink("/proc/self/fd/2") == "/dev/null"
 (root / "owned-fds").write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
 (root / "pid").write_text(str(os.getpid()))
 with (root / "children").open("a") as logged:
@@ -770,7 +773,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             return
         if mode == "unreadable-exit":
             assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
-            assert launcher.returncode == 1 and b"fixture final receipt readback" in stderr
+            assert launcher.returncode == 0 and b"fixture final receipt readback" in stderr
             assert json.loads((root / "leaks").read_text()) == []
             return
         if mode == "audit-mutation":
@@ -852,12 +855,16 @@ os.execvp(sys.argv[1], sys.argv[1:])
         if mode.startswith("fault:"):
             action, boundary = mode.split(":")[1:]
             assert (root / "injected").is_file(), (mode, stderr)
-            assert launcher.returncode == 1, (mode, stderr)
+            committed = boundary == "journal-unlink"
+            assert launcher.returncode == (0 if committed else 1), (mode, stderr)
             marker = directory / "exit.json"
-            assert marker.exists() == (action == "term" and boundary != "parent-sync"), mode
+            assert marker.exists() == (committed or action == "term" and boundary != "parent-sync"), mode
             if marker.exists():
                 row = json.loads(marker.read_text())
-                assert row["launcher_exit"] == launcher.returncode and row["stop_reason"] == "cancelled", mode
+                assert row["launcher_exit"] == launcher.returncode
+                assert row["stop_reason"] == ("guest exited; transport validated" if committed else "cancelled"), mode
+            if committed:
+                assert (root / "returns/active.json").exists() == (action == "fail")
             assert not (directory.parent / "acceptance.json").exists(), mode
             assert not list(root.rglob(".receipt-*")), mode
             assert not list(root.glob("job-*")), mode
@@ -916,7 +923,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
             if ignored:
                 assert entry_ignored & (1 << (signal.SIGTERM - 1))
                 assert b"replaced inherited ignored stop signals: SIGTERM" in stderr
-            for child in ("info", "create", "qemu", "ionice"):
+            assert not (root / "status-ionice").exists()
+            for child in ("info", "create", "qemu"):
                 mask, ignored_bits, caught = signal_status(root / f"status-{child}")
                 assert mask == 0, (child, blocked, mask)
                 assert ignored_bits & stop_bits == 0, (child, ignored, ignored_bits)
@@ -1375,9 +1383,16 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
     envelope = io.BytesIO()
     encode(envelope, [("verification.json", b"{}")], IDENTITY)
     observed = []
+    artifact_fd = -1
+    injected = False
+    native_read = os.read
 
     def child(args, **options):
+        nonlocal artifact_fd
         observed.append(args)
+        assert args[:6] == ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c"]
+        assert args[6] == 'test "$PPID" = "$1" || exit 125; shift; exec "$@"'
+        assert args[7:10] == ["runner-child", str(os.getpid()), "qemu-system-x86_64"]
         assert args[args.index("-smp") + 1] == "4"
         assert args[args.index("-m") + 1] == "20480"
         assert args[args.index("-nic") + 1] == "none"
@@ -1390,10 +1405,26 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         assert capsule.startswith("file=/proc/self/fd/")
         assert set(options["env"]) == {"PATH", "LANG"}
         assert options["stdin"] == subprocess.DEVNULL
-        assert options["preexec_fn"].func is vm.die_with_parent
-        assert options["preexec_fn"].args == (os.getpid(),)
-        return real_popen([sys.executable, "-c",
-                          f"import os; os.write(1, {envelope.getvalue()!r})"], **options)
+        assert options["preexec_fn"] is None and options["stderr"] == subprocess.DEVNULL
+        assert options["start_new_session"] is True
+        guest = ("import ctypes, os, signal\n"
+                 "death = ctypes.c_int()\n"
+                 "assert ctypes.CDLL(None).prctl(2, ctypes.byref(death), 0, 0, 0) == 0\n"
+                 "assert death.value == signal.SIGKILL\n"
+                 "assert os.getsid(0) == os.getpid()\n"
+                 "os.write(2, b'x' * (2 * 1024**2))\n"
+                 f"os.write(1, {envelope.getvalue()!r})")
+        process = real_popen([*args[:9], sys.executable, "-c",
+                              guest], **options)
+        artifact_fd = process.stdout.fileno()
+        return process
+
+    def read(fd, length):
+        nonlocal injected
+        if fd == artifact_fd and not injected:
+            injected = True
+            raise OSError(errno.EIO, "fixture live artifact read")
+        return native_read(fd, length)
 
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
@@ -1401,10 +1432,11 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         directory.mkdir(parents=True)
         capsule = root / "capsule"
         capsule.write_bytes(b"not a credential")
-        with tempfile.TemporaryFile(dir=root) as overlay, ImageJob(directory, IDENTITY, capsule) as job:
+        with tempfile.TemporaryFile(dir=root) as overlay, ImageJob(directory, IDENTITY, capsule, probe=True) as job:
             job.state.update(overlay_directory=str(root), retained_bytes=0)
             job.overlay_created(overlay.fileno())
             with patch.object(vm.subprocess, "Popen", child), patch.object(image_lifecycle, "disk_headroom"), \
+                    patch.object(image_lifecycle.os, "read", read), \
                     patch.object(image_lifecycle, "process_priority", return_value=FIXTURE_PRIORITY):
                 vm.boot(pathlib.Path(f"/proc/self/fd/{overlay.fileno()}"), b"{}", "image", 5,
                         disk_fd=overlay.fileno(), image_job=job)
@@ -1412,7 +1444,8 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         exit_record = json.loads((directory / "teardown.json").read_text())
         assert exit_record["input_descriptor_closed"] is True
         assert (directory / "stream.partial").read_bytes() == envelope.getvalue()
-    assert len(observed) == 1
+        assert not (directory / "diagnostic.partial").exists()
+    assert len(observed) == 1 and injected
 
 
 def test_kernel_check_keeps_its_existing_cpu_ram_and_network_defaults() -> None:
@@ -1608,6 +1641,112 @@ def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
             "acceptance_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
         }))
         assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == allocated
+
+
+def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        store = root / "returns"
+        prior = store / "previous"
+        prior.mkdir(parents=True, mode=0o700)
+        store.chmod(0o700)
+        (store / "unfinished").mkdir()
+        base, capsule = root / "base", root / "input"
+        base.write_bytes(b"base")
+        capsule.write_bytes(b"capsule")
+        digest = hashlib.sha256(b"capsule").hexdigest()
+        args = SimpleNamespace(image_mode="probe", base=base, input_capsule=capsule, input_sha256=digest,
+                               base_sha256="c" * 64, trust_policy=root / "policy", output_dir=store,
+                               attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                               source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None, group_id=None)
+        identity = asdict(replace(IDENTITY, attempt="previous", input_sha256=digest))
+        acceptance = json.dumps({"schema": 1, "identity": identity, "content_verified": True,
+                                 "base_sha256": "c" * 64, "public_root_der_sha256": "d" * 64}).encode()
+        (prior / "acceptance.json").write_bytes(acceptance)
+        (prior / "exit.json").write_text(json.dumps({"schema": 1, "launcher_exit": 0, "pair_complete": True,
+                                                    "identity": identity,
+                                                    "acceptance_sha256": hashlib.sha256(acceptance).hexdigest()}))
+        listdir = os.listdir
+
+        for error in (errno.EIO, errno.EINTR, errno.EAGAIN, errno.EPERM, errno.ENOENT):
+            for failures in (1, 3):
+                scans = 0
+                injected = 0
+                diagnostics = []
+
+                def scan(path):
+                    nonlocal scans, injected
+                    if path == store:
+                        scans += 1
+                        return ["unfinished", "previous"]
+                    if path == store / "unfinished" and injected < failures:
+                        injected += 1
+                        raise OSError(error, "fixture scan failure")
+                    return listdir(path)
+
+                with patch.object(image_vm, "list_directory", scan), \
+                        patch.object(image_vm, "require_host_lock"), patch.object(image_vm, "cgroup_admission"), \
+                        patch.object(image_vm, "load_policy", return_value=SimpleNamespace()) as policy, \
+                        patch.object(image_vm, "asdict", side_effect=lambda value: {"root_der_sha256": "d" * 64}
+                                     if value is policy.return_value else asdict(value)), \
+                        patch.object(image_vm, "report_error", side_effect=diagnostics.append), \
+                        patch.object(image_vm, "run") as launch, patch.object(image_vm, "execute") as execute:
+                    assert image_vm.run_image(args, None, vm.Cancellation()) == 1
+                launch.assert_not_called()
+                execute.assert_not_called()
+                recovered = error in (errno.EIO, errno.EINTR, errno.EAGAIN) and failures == 1
+                assert scans == (2 if recovered else 3 if error in (errno.EIO, errno.EINTR, errno.EAGAIN) else 1)
+                assert len(diagnostics) == 1
+                assert ("already contains this board" if recovered else "cannot complete") in str(diagnostics[0])
+                assert not (store / IDENTITY.attempt).exists()
+
+
+def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
+    with patch.object(image_resources, "require_process_priority", return_value=9), \
+            patch.object(image_resources, "cgroup_limits", return_value=10), \
+            patch.object(subprocess, "Popen") as spawn:
+        for value, error in ((0, None), ((2 << 13) | 7, None), (1 << 13, None),
+                             (4 << 13, None), (-1, errno.ENOSYS), (-1, errno.EPERM)):
+            with patch.object(image_resources._LIBC, "syscall", return_value=value), \
+                    patch.object(image_resources.ctypes, "get_errno", return_value=error):
+                if value in (0, (2 << 13) | 7):
+                    row = image_resources.process_priority(os.getpid(), Cancellation())
+                    assert row["ionice"] == ("none: prio 0" if value == 0 else "best-effort: prio 7")
+                else:
+                    try:
+                        image_resources.process_priority(os.getpid(), Cancellation())
+                    except image_resources.AdmissionError:
+                        pass
+                    else:
+                        raise AssertionError((value, error))
+        spawn.assert_not_called()
+
+
+def test_priority_syscall_error_restarts_the_whole_observation() -> None:
+    for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
+        steps = []
+
+        def cpu(_pid):
+            steps.append("cpu")
+            return 9
+
+        def cgroup(_pid):
+            steps.append("cgroup")
+            return 10
+
+        def ioprio(*_args):
+            steps.append("ioprio")
+            return -1 if steps.count("ioprio") <= failures else 0
+
+        with patch.object(image_resources, "require_process_priority", cpu), \
+                patch.object(image_resources, "cgroup_limits", cgroup), \
+                patch.object(image_resources._LIBC, "syscall", ioprio), \
+                patch.object(image_resources.ctypes, "get_errno", return_value=error):
+            try:
+                assert image_resources.process_priority(os.getpid(), Cancellation())["ionice"] == "none: prio 0"
+            except image_resources.IOPriorityError:
+                assert failures == 3 or error == errno.EPERM
+        assert steps == ["cpu", "cgroup", "ioprio"] * (1 if error == errno.EPERM else min(failures + 1, 3))
 
 
 if __name__ == "__main__":

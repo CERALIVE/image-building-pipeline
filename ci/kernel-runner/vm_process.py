@@ -31,6 +31,8 @@ class Cancellation:
 
     requested = False
     exit_receipt: Path | None = None
+    committed_exit: int | None = None
+    safe_journal: Path | None = None
     finalizing = False
 
     def request(self, _signum: int, _frame) -> None:

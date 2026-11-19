@@ -9,10 +9,11 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tarfile
 from typing import BinaryIO, Callable, Final
 
-from image_stream import Identity, StreamError, unique_object
+from image_stream import Identity, StreamError, list_directory, unique_object
 from image_urls import InputURLError, canonical_url
 
 INPUT_LIMIT: Final = 32 * 1024**3
@@ -156,8 +157,9 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
         objects = {item["sha256"]: item for item in row["objects"]
                    if item["kind"] in ("source-bundle", "public-trust", "apt-metadata", "kernel-metadata")}
         files = {}
-        for file in artifacts.iterdir():
-            if not file.is_file() or file.is_symlink():
+        for name in list_directory(artifacts):
+            file = artifacts / name
+            if not stat.S_ISREG(file.lstat().st_mode):
                 raise StreamError("returned artifact is not a controller-owned regular file")
             digest = digest_file(file, checkpoint)
             selected[file.name] = digest

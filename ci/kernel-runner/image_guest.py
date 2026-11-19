@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
+import errno
 import json
 import os
 from pathlib import Path
@@ -16,14 +18,117 @@ import signal
 import time
 
 from image_capsule import Capsule, unpack
-from image_stream import BUILD_LOG_LIMIT, Identity, StreamError, encode
+from image_stream import (
+    BUILD_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, encode, list_directory, listed_entry,
+    retry_check, retry_io, write_all,
+)
+from vm_process import poll_owned, wait
 
 HOME = Path("/opt/ceralive-image-job")
+MIRROR_READY_SECONDS = 600
+MIRROR_STOP_SECONDS = 20
+MIRROR_RETRY = RETRYABLE_IO | {errno.EINTR}
+UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
 
 
 def command(args: list[str], env: dict[str, str]) -> str:
     return subprocess.run(args, check=True, env=env, stdout=subprocess.PIPE,
                           text=True, timeout=180).stdout.strip()
+
+
+def check_route(env: dict[str, str]) -> None:
+    rows = json.loads(command(["ip", "-j", "route", "show", "default"], env))
+    if type(rows) is not list:
+        raise StreamError("offline guest route inventory is invalid")
+    if rows:
+        raise StreamError("offline guest has a default route")
+
+
+def check_tcp(address: str, deadline: float) -> None:
+    timeout = deadline - time.monotonic()
+    if timeout <= 0:
+        raise StreamError("offline guest TCP check exhausted its deadline")
+    with socket.socket() as probe:
+        probe.setblocking(False)
+        try:
+            probe.connect((address, 443))
+        except OSError as error:
+            result = error.errno
+            if result == errno.EINPROGRESS:
+                with selectors.DefaultSelector() as ready:
+                    ready.register(probe, selectors.EVENT_WRITE)
+                    if not ready.select(max(0, deadline - time.monotonic())):
+                        raise StreamError("offline guest TCP check exhausted its deadline")
+                result = probe.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        else:
+            result = 0
+    if result == 0:
+        raise StreamError("offline guest can reach an external endpoint")
+    if result not in UNREACHABLE:
+        raise OSError(result, "offline guest TCP check is inconclusive")
+
+
+def mirror_io(events: selectors.BaseSelector, deadline: float, operation, *args):
+    """Retry a zero-progress control operation only after fresh readiness."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not events.select(remaining):
+                raise StreamError("sealed mirror control operation timed out")
+            return operation(*args)
+        except OSError as error:
+            if error.errno not in MIRROR_RETRY or attempt + 1 == IO_ATTEMPTS:
+                raise
+
+
+def mirror_marker(events: selectors.BaseSelector, fd: int, marker: bytes, deadline: float) -> None:
+    received = bytearray()
+    while len(received) < len(marker):
+        data = mirror_io(events, deadline, os.read, fd, len(marker) - len(received))
+        received.extend(data)
+        if not data or not marker.startswith(received):
+            raise StreamError("sealed mirror control marker is incomplete or invalid")
+
+
+@contextmanager
+def ready_mirror(mirror: subprocess.Popen):
+    """Only a positive response on the owned pipe authorizes acceptance."""
+    try:
+        output = mirror.stdout.fileno()
+        os.set_blocking(output, False)
+        with selectors.DefaultSelector() as response:
+            response.register(output, selectors.EVENT_READ)
+            mirror_marker(response, output, b"CERALIVE_SEALED_MIRROR_READY\n",
+                          time.monotonic() + MIRROR_READY_SECONDS)
+            if retry_io(poll_owned, mirror, recover=True) is not None:
+                raise StreamError("sealed guest mirror exited during readiness")
+            yield
+            deadline = time.monotonic() + MIRROR_STOP_SECONDS
+            if mirror.stdin is None or retry_io(poll_owned, mirror, recover=True) is not None:
+                raise StreamError("sealed guest mirror exited before shutdown request")
+            control = mirror.stdin.fileno()
+            os.set_blocking(control, False)
+            with selectors.DefaultSelector() as request:
+                request.register(control, selectors.EVENT_WRITE)
+                if mirror_io(request, deadline, os.write, control, b"S") != 1:
+                    raise StreamError("sealed mirror shutdown request was not written")
+            mirror_marker(response, output, b"CERALIVE_SEALED_MIRROR_STOPPED\n", deadline)
+            retry_io(wait, mirror, deadline, recover=True)
+            if mirror.returncode != 0 or mirror_io(response, deadline, os.read, output, 1):
+                raise StreamError("sealed guest mirror did not shut down cleanly")
+    finally:
+        if retry_io(poll_owned, mirror, recover=True) is None:
+            try:
+                retry_io(os.kill, mirror.pid, signal.SIGTERM, recover=True)
+                retry_io(wait, mirror, time.monotonic() + MIRROR_STOP_SECONDS, recover=True)
+            except ProcessLookupError:
+                retry_io(wait, mirror, time.monotonic() + MIRROR_STOP_SECONDS, recover=True)
+            except subprocess.TimeoutExpired:
+                try:
+                    retry_io(os.kill, mirror.pid, signal.SIGKILL, recover=True)
+                except ProcessLookupError:
+                    pass
+                retry_io(wait, mirror, time.monotonic() + MIRROR_STOP_SECONDS, recover=True)
 
 
 def source_checkout(capsule: Capsule, directory: Path, env: dict[str, str]) -> Path:
@@ -115,14 +220,10 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
                    check=True, env=env, cwd=source, timeout=60)
     log = HOME / "build.log"
     with log.open("xb") as output:
-        with subprocess.Popen(["python3", str(source / "lib/sealed-inputs.py"), "serve"],
+        with subprocess.Popen(["python3", str(Path(__file__).with_name("sealed-inputs.py")), "serve-managed"],
                               env=env | {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
-                              stdout=subprocess.PIPE, stderr=output) as mirror:
-            try:
-                with selectors.DefaultSelector() as ready:
-                    ready.register(mirror.stdout, selectors.EVENT_READ)
-                    if not ready.select(timeout=600) or mirror.stdout.readline() != b"CERALIVE_SEALED_MIRROR_READY\n":
-                        raise StreamError("sealed guest mirror did not become ready")
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=output) as mirror:
+            with ready_mirror(mirror):
                 args = ["bash", str(source / "build"), capsule.board, "--rootfs-measurement"]
                 with subprocess.Popen(args, env=env, cwd=source, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, start_new_session=True) as build:
@@ -142,7 +243,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
                                     written += len(chunk)
                                     if written > BUILD_LOG_LIMIT:
                                         raise StreamError("guest build log exceeded its 1 GiB budget")
-                                    output.write(chunk)
+                                    write_all(output, chunk)
                         code = build.wait(timeout=20)
                         if code:
                             raise subprocess.CalledProcessError(code, args)
@@ -154,13 +255,10 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
                             except subprocess.TimeoutExpired:
                                 os.killpg(build.pid, signal.SIGKILL)
                                 build.wait()
-            finally:
-                mirror.terminate()
-                mirror.wait(timeout=20)
-    if (directory / "missing-object").exists():
+    if retry_check(listed_entry, directory, "missing-object") is not None:
         raise StreamError("guest requested an object absent from the sealed inventory")
     out = source / "images" / capsule.board
-    receipts = list(out.glob("*.measurement.json"))
+    receipts = [out / name for name in retry_check(list_directory, out) if name.endswith(".measurement.json")]
     if len(receipts) != 1:
         raise StreamError("build did not emit exactly one measurement receipt")
     prefix = receipts[0].name.removesuffix(".measurement.json")
@@ -212,14 +310,9 @@ def main() -> None:
                 from image_verify import verify
                 records = verify(source, capsule, job)
             case "probe":
-                routes = command(["ip", "-j", "route", "show", "default"], env)
-                if json.loads(routes):
-                    raise StreamError("offline guest has a default route")
+                check_route(env)
                 for address in ("10.0.2.2", "169.254.169.254", "192.168.0.1", "1.1.1.1"):
-                    with socket.socket() as probe:
-                        probe.settimeout(1)
-                        if probe.connect_ex((address, 443)) == 0:
-                            raise StreamError("offline guest can reach an external endpoint")
+                    retry_check(lambda: check_tcp(address, time.monotonic() + 1))
                 report = HOME / "verification.json"
                 report.write_text(json.dumps({"schema": 1, "identity": asdict(identity),
                                              "network_denied": True}) + "\n")
