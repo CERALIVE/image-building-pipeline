@@ -215,9 +215,11 @@ def main(cancellation: Cancellation) -> int:
                 files.append({"path": destination, "permissions": "0755", "encoding": "b64",
                               "content": base64.b64encode((HERE / source).read_bytes()).decode()})
             if args.profile == "image":
-                files.append({"path": "/usr/local/lib/ceralive-kernel-runner/sealed-inputs.py",
-                              "permissions": "0755", "encoding": "b64",
-                              "content": base64.b64encode((HERE.parents[1] / "lib/sealed-inputs.py").read_bytes()).decode()})
+                # The installed mirror sources these helpers relative to itself.
+                for source in ("sealed-inputs.py", "fetch-debs-auth.sh", "fetch/index.sh"):
+                    files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
+                                  "permissions": "0755", "encoding": "b64",
+                                  "content": base64.b64encode((HERE.parents[1] / "lib" / source).read_bytes()).decode()})
                 for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py",
                                "vm_process.py"):
                     files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,

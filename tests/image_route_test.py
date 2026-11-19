@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unprivileged image transport regressions; never start QEMU or read credentials."""
 
+import base64
 import errno
 import hashlib
 import http.client
@@ -8,6 +9,7 @@ import io
 import json
 import os
 import pathlib
+import select
 import signal
 import subprocess
 import sys
@@ -20,10 +22,14 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from bootstrap_metadata_test import PACKAGE_URL, bootstrap_fixture
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 import image_guest
+import image_resources
 import image_verify
 import image_vm
+import vm
 from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
 from image_capsule import unpack
 from image_verify import compare_slot
@@ -344,12 +350,115 @@ elif sys.argv[1] == 'ack':
                     mirror.wait(timeout=2)
 
 
+def assemble_image_payload(root: pathlib.Path) -> None:
+    """Decode the cloud-init file emitted by the real build-base command."""
+    image = b"fixture cloud image"
+    proc = pathlib.Path("/proc/123")
+    read_text, read_bytes = pathlib.Path.read_text, pathlib.Path.read_bytes
+
+    def run(args, **_kwargs):
+        match args[:2]:
+            case ["curl", "-fSL"]:
+                pathlib.Path(args[-1]).write_bytes(image)
+            case ["qemu-img", "convert"]:
+                pathlib.Path(args[-1]).touch()
+            case ["qemu-img", "resize"]:
+                pass
+            case ["xorriso", "-as"]:
+                config = vm.yaml.safe_load(pathlib.Path(args[-2]).read_text())
+                for row in config["write_files"]:
+                    destination = root / row["path"].lstrip("/")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    content = row["content"].encode()
+                    destination.write_bytes(base64.b64decode(content) if row.get("encoding") == "b64" else content)
+                    destination.chmod(int(row["permissions"], 8))
+            case _:
+                raise AssertionError(args)
+
+    argv = ["vm.py", "build-base", "--profile", "image", "--base", str(root / "fixture-base")]
+    with patch.object(sys, "argv", argv), patch.object(vm.os, "getppid", return_value=123), \
+            patch.object(pathlib.Path, "read_text",
+                         lambda path: "flock\n" if path == proc / "comm" else read_text(path)), \
+            patch.object(pathlib.Path, "read_bytes",
+                         lambda path: b"flock\0--exclusive\0--close\0" if path == proc / "cmdline" else read_bytes(path)), \
+            patch.object(vm, "sanitize_startup", return_value=[]), patch.object(vm, "die_with_parent"), \
+            patch.object(image_resources, "require_host_lock"), patch.object(image_resources, "cgroup_admission"), \
+            patch.object(image_resources, "disk_headroom"), patch.object(type(image_resources.CAPS), "qemu_limit"), \
+            patch.object(vm, "IMAGE_SHA", hashlib.sha256(image).hexdigest()), \
+            patch.object(vm, "run", run), patch.object(vm, "boot"):
+        assert vm.main(vm.Cancellation()) == 0
+
+
+def test_generated_image_payload_starts_mirror_and_reports_http_outcomes() -> None:
+    # Substitute only the bind address and the fixture's signature verifier.
+    # The isolated interpreter can import only the standard library and the installed files.
+    child = """
+import http.server, pathlib, runpy, sys
+script, port_file = map(pathlib.Path, sys.argv[1:])
+class LoopbackServer(http.server.HTTPServer):
+    def __init__(self, address, handler):
+        assert address == ("127.0.0.1", 3142)
+        super().__init__(("127.0.0.1", 0), handler)
+        port_file.write_text(str(self.server_port))
+http.server.HTTPServer = LoopbackServer
+sys.path.insert(0, str(script.parent))
+sys.argv = [str(script), "serve-managed"]
+runpy.run_path(str(script), run_name="__main__")
+"""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        assemble_image_payload(root)
+        library = root / "usr/local/lib/ceralive-kernel-runner"
+        script, address = library / "sealed-inputs.py", root / "mirror-port"
+        for missed in (False, True):
+            with bootstrap_fixture() as objects, subprocess.Popen(
+                [sys.executable, "-B", "-I", "-S", "-c", child, str(script), str(address)],
+                cwd=root, env={"PATH": os.environ["PATH"], "HOME": temporary, "LANG": "C.UTF-8",
+                               "CERALIVE_SEALED_INPUTS": str(objects),
+                               "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ) as mirror:
+                try:
+                    assert select.select([mirror.stdout], [], [], 5)[0], "installed mirror did not report readiness"
+                    ready = mirror.stdout.readline()
+                    if ready != b"CERALIVE_SEALED_MIRROR_READY\n":
+                        stdout, stderr = mirror.communicate(timeout=2)
+                        raise AssertionError((mirror.returncode, ready + stdout, stderr))
+                    connection = http.client.HTTPConnection("127.0.0.1", int(address.read_text()), timeout=2)
+                    try:
+                        url = PACKAGE_URL + ".missing" if missed else PACKAGE_URL
+                        connection.request("GET", url)
+                        response = connection.getresponse()
+                        body = response.read()
+                    finally:
+                        connection.close()
+                    stdout, stderr = mirror.communicate(b"S", timeout=2)
+                    assert (mirror.returncode, stdout) == (
+                        (1, b"") if missed else (0, b"CERALIVE_SEALED_MIRROR_STOPPED\n")
+                    ), stderr
+                    assert response.status == (404 if missed else 200)
+                    if missed:
+                        assert (objects / "missing-object").read_text() == hashlib.sha256(url.encode()).hexdigest() + "\n"
+                    else:
+                        assert body == b"public package fixture"
+                        assert not (objects / "missing-object").exists()
+                    validity = json.loads((objects / "metadata-validity.json").read_text())
+                    release_sha = json.loads((objects / "inventory.json").read_text())["repositories"]["debian-bootstrap"]["inrelease"]
+                    assert validity["purpose"] == "rootfs-measurement"
+                    assert [(row["repository"], row["release_sha256"], row["freshness_checked"])
+                            for row in validity["repositories"]] == [("debian-bootstrap", release_sha, True)]
+                finally:
+                    if mirror.poll() is None:
+                        mirror.kill()
+                        mirror.wait(timeout=2)
+
+
 def test_measure_uses_base_mirror_for_historical_and_current_sources() -> None:
     spawn = subprocess.Popen
     server = pathlib.Path(__file__).resolve().parents[1] / "lib/sealed-inputs.py"
     mirror_code = """
 import hashlib, http.server, pathlib, runpy, sys
-script, objects, address = map(pathlib.Path, sys.argv[1:])
+script, objects, address, transcript = map(pathlib.Path, sys.argv[1:])
 module = runpy.run_path(str(script))
 serve = module["serve"]
 digest = hashlib.sha256((objects / "data").read_bytes()).hexdigest()
@@ -359,7 +468,11 @@ class LoopbackServer(http.server.HTTPServer):
         assert requested == ("127.0.0.1", 3142)
         super().__init__(("127.0.0.1", 0), handler)
         address.write_text(str(self.server_port))
-serve.__globals__.update(HTTPServer=LoopbackServer, mirror_validities=lambda _: (),
+def record_marker(marker, *, flush):
+    print(marker, flush=flush)
+    with transcript.open("a") as copy:
+        print(marker, file=copy)
+serve.__globals__.update(HTTPServer=LoopbackServer, print=record_marker, mirror_validities=lambda _: (),
                          inventory=lambda _: {"objects": [{
                              "urls": ["https://deb.debian.org/debian/fixture"], "sha256": digest
                          }]})
@@ -393,13 +506,17 @@ serve(objects, managed=True)
                 launches = []
                 replies = []
                 address = root / "mirror-port"
+                transcript = root / "mirror-control"
+                mirrors = []
 
                 def start(args, **kwargs):
                     launches.append(args)
                     if args[-1] == "serve-managed":
                         assert args[1] == str(pathlib.Path(image_guest.__file__).with_name("sealed-inputs.py"))
-                        return spawn([sys.executable, "-B", "-c", mirror_code,
-                                      str(server), str(objects), str(address)], **kwargs)
+                        child = spawn([sys.executable, "-B", "-c", mirror_code,
+                                       str(server), str(objects), str(address), str(transcript)], **kwargs)
+                        mirrors.append(child)
+                        return child
                     assert args == ["bash", str(source / "build"), board, "--rootfs-measurement"]
                     assert kwargs["env"]["CERALIVE_IMAGE_BUILD_COMMIT"] == revision
                     connection = http.client.HTTPConnection("127.0.0.1", int(address.read_text()), timeout=2)
@@ -424,6 +541,11 @@ serve(objects, managed=True)
                     else:
                         assert not missed and len(records) == 20, (revision, records)
                 assert len(launches) == 2, (revision, missed, launches)
+                markers = transcript.read_text().splitlines()
+                assert markers == (["CERALIVE_SEALED_MIRROR_READY"] if missed else
+                                   ["CERALIVE_SEALED_MIRROR_READY", "CERALIVE_SEALED_MIRROR_STOPPED"]), (
+                                       revision, missed, markers)
+                assert [child.returncode for child in mirrors] == [1 if missed else 0]
                 if missed:
                     assert len(replies) == 1 and replies[0][0] == 404
                     assert (objects / "missing-object").is_file()

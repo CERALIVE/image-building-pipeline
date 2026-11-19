@@ -88,7 +88,7 @@ def cgroup_limits(pid: int | str) -> int:
     memory = []
     quotas = []
     swaps = []
-    weights = []
+    weights: list[dict[str, int]] = []
 
     def read(path: Path, field: str) -> str:
         try:
@@ -120,17 +120,17 @@ def cgroup_limits(pid: int | str) -> int:
                 if cpu_quota == 0:
                     raise ValueError("CPU quota is zero")
                 quotas.append(cpu_quota / period)
-            defaults = []
+            by_device: dict[str, int] = {}
             for line in read(path, "io.weight").splitlines():
                 selector, value = line.split()
                 weight = number(value)
-                if not 1 <= weight <= 10000 or (selector != "default" and not re.fullmatch(r"[0-9]+:[0-9]+", selector)):
+                if (selector in by_device or not 1 <= weight <= 10000 or
+                        (selector != "default" and not re.fullmatch(r"[0-9]+:[0-9]+", selector))):
                     raise ValueError("invalid I/O weight")
-                if selector == "default":
-                    defaults.append(weight)
-            if len(defaults) != 1:
+                by_device[selector] = weight
+            if "default" not in by_device:
                 raise ValueError("expected one default I/O weight")
-            weights.append(defaults[0])
+            weights.append(by_device)
         weight = number(read(group, "cpu.weight"))
     except ValueError as error:
         raise AdmissionError(f"invalid cgroup limit: {error}") from error
@@ -140,7 +140,9 @@ def cgroup_limits(pid: int | str) -> int:
         raise AdmissionError("image profile needs effective CPUQuota <= 400%")
     if not swaps or min(swaps) != 0:
         raise AdmissionError("image profile needs effective MemorySwapMax=0")
-    if not weights or min(weights) > 10:
+    # Each level uses its own default unless it overrides this device.
+    if any(min(level.get(device, level["default"]) for level in weights) > 10
+           for device in set().union(*weights)):
         raise AdmissionError("image profile needs effective IOWeight <= 10")
     if not 1 <= weight <= MAX_CPU_WEIGHT:
         raise AdmissionError(f"image profile needs CPUWeight <= {MAX_CPU_WEIGHT} on its cgroup")

@@ -23,8 +23,11 @@ the workstation to validate this implementation. PR CI owns that gate.
 
 Prepare an independent base with `build-base --profile image --base FILE`.
 Use a new path and record the new SHA-256 for owner approval before use. The
-base installs the managed sealed mirror and guest helpers. An approved older
-source bundle still supplies the build, but the base supplies the mirror.
+base installs `sealed-inputs.py`, `image_urls.py`, `fetch-debs-auth.sh` and
+`fetch/index.sh` under `/usr/local/lib/ceralive-kernel-runner`. The mirror uses
+the provisioned Python, Bash, GnuPG and system utilities with the capsule's
+inventory, trust policy and digest-named metadata. An approved older source
+bundle still supplies the build, but the base supplies the mirror.
 The existing SHA-verified cloud image and create-only publication remain in
 use. This **trusted preparation** has networking for public tools; it installs
 no Actions runner. The image base is 128 GiB virtual, at most 32 GiB allocated,
@@ -70,8 +73,11 @@ The sampler excludes the cgroup v2 mount root, where these per-cgroup
 controls can be absent. The workload and each non-root ancestor must expose
 `memory.max`, `memory.swap.max`, `cpu.max` and `io.weight`. The workload also
 needs `cpu.weight`. A missing, unreadable or malformed required control
-refuses admission. A transient EIO, EINTR or EAGAIN restarts the whole sample
-within the retry bound.
+refuses admission. The I/O check applies the bound to the effective default
+and to every device named by a workload or ancestor override. For each device,
+the override replaces that level's default before taking the minimum across
+the hierarchy. A transient EIO, EINTR or EAGAIN restarts the whole sample within
+the retry bound.
 
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,

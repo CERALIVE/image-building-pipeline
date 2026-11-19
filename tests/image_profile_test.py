@@ -1890,6 +1890,46 @@ def test_cgroup_sample_retries_whole_observation_or_refuses() -> None:
                 raise AssertionError("persistent cgroup error accepted")
 
 
+def test_admission_and_live_sampling_enforce_all_device_io_weights() -> None:
+    child, parent = "/sys/fs/cgroup/parent/child", "/sys/fs/cgroup/parent"
+    caps = {"memory.max": str(24 * image_resources.GIB), "memory.swap.max": "0",
+            "cpu.max": "400000 100000"}
+    files = {f"{level}/{name}": value for level in (child, parent) for name, value in caps.items()}
+    files.update({"/proc/self/cgroup": "0::/parent/child\n", "/proc/123/cgroup": "0::/parent/child\n",
+                  f"{child}/cpu.weight": "10", "/proc/meminfo": "MemAvailable: 33554432 kB\n"})
+    cases = (
+        ("default 10\n", "default 100\n", None),
+        ("default 100\n", "default 100\n", "IOWeight"),
+        ("default 10\n8:0 100\n", "default 100\n", "IOWeight"),
+        ("default 10\n8:0 10\n", "default 100\n", None),
+        ("default 10\n8:0 9\n", "default 100\n", None),
+        ("default 10\n8:0 10\n8:1 1\n", "default 100\n", None),
+        ("default 10\n8:0 10\n8:1 11\n", "default 100\n", "IOWeight"),
+        ("default 10\n253:17 11\n", "default 100\n8:0 10\n", "IOWeight"),
+        ("default 100\n", "default 10\n253:17 11\n", "IOWeight"),
+        ("default 10\n8:0 100\n", "default 100\n8:0 9\n", None),
+        ("default 10\n8:0 wrong\n", "default 100\n", "invalid cgroup limit"),
+        ("default 10\n8 9\n", "default 100\n", "invalid cgroup limit"),
+        ("default 10\n8:0 0\n", "default 100\n", "invalid cgroup limit"),
+        ("default 10\n8:0 9\n8:0 10\n", "default 100\n", "invalid cgroup limit"),
+    )
+    with patch.object(pathlib.Path, "read_text", lambda path: files[str(path)]), \
+            patch.object(image_resources, "require_process_priority", return_value=9), \
+            patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
+            patch.object(image_resources._LIBC, "syscall", return_value=0):
+        for child_weights, parent_weights, expected in cases:
+            files[f"{child}/io.weight"] = child_weights
+            files[f"{parent}/io.weight"] = parent_weights
+            for observe in (image_resources.cgroup_admission,
+                            lambda: image_resources.process_priority(123, Cancellation())):
+                try:
+                    observe()
+                except image_resources.AdmissionError as error:
+                    assert expected and expected in str(error), (child_weights, parent_weights, observe, error)
+                else:
+                    assert expected is None, (child_weights, parent_weights, observe, "invalid device weight accepted")
+
+
 def test_full_launcher_probe_stderr_flood() -> None:
     for mib in (3, 8):
         cancelled_fixture(f"stderr-flood:{mib}")
