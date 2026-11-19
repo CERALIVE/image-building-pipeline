@@ -267,11 +267,16 @@ _PIPE2.restype = ctypes.c_int
 class PipeEnd:
     """Own a kernel result slot before pipe2 has any descriptor to return."""
 
-    def __init__(self, slots: ctypes.Array, index: int) -> None:
+    def __init__(self, slots: ctypes.Array, index: int, mode: str) -> None:
         self.slots = slots
         self.index = index
+        self.mode = mode
+        self.file = FileIO.__new__(FileIO)
+        self.attached = False
 
     def fileno(self) -> int:
+        if self.attached:
+            return self.file.fileno()
         fd = self.slots[self.index]
         if fd < 0:
             raise ValueError("closed pipe end")
@@ -279,10 +284,16 @@ class PipeEnd:
 
     def close(self) -> None:
         fd = self.slots[self.index]
-        if fd >= 0:
-            # Linux may release the FD even when close reports an error.
-            self.slots[self.index] = -1
-            os.close(fd)
+        if fd < 0:
+            return
+        if not self.attached:
+            if self.file.closed:
+                self.file.__init__(fd, self.mode)
+            self.attached = True
+        # FileIO consumes its FD inside the native close. Keep the same owner
+        # even if close raises or Python is interrupted before clearing the slot.
+        self.file.close()
+        self.slots[self.index] = -1
 
 
 def pipe_files(flags: int, inputs: ExitStack, writers: ExitStack, name: str,
@@ -290,8 +301,8 @@ def pipe_files(flags: int, inputs: ExitStack, writers: ExitStack, name: str,
                close_reader: Callable[[], None] | None = None) -> tuple[PipeEnd, PipeEnd]:
     """Write pipe2 results straight into slots held by preallocated owners."""
     slots = _PIPE_SLOTS(-1, -1)
-    reader = PipeEnd(slots, 0)
-    writer = PipeEnd(slots, 1)
+    reader = PipeEnd(slots, 0, "rb")
+    writer = PipeEnd(slots, 1, "wb")
     register_close(inputs, name + "-reader", reader.close, on_loss, close_reader)
     register_close(writers, name + "-writer", writer.close, on_loss)
     try:
@@ -398,7 +409,7 @@ class ImageJob:
             "control_bytes_received": self.control_bytes,
         }
 
-    def prepare_probe_transport(self, writers: ExitStack) -> int:
+    def prepare_probe_transport(self, writers: ExitStack) -> PipeEnd:
         """Register the artifact and serial streams before guest startup."""
         try:
             events = selectors.DefaultSelector()
@@ -418,7 +429,7 @@ class ImageJob:
         except Exception as error:
             # The pre-commit OSError path cannot publish an outcome for this setup failure.
             raise OSError("probe transport setup failed: " + str(error)) from error
-        return stream_writer.fileno()
+        return stream_writer
 
     def read_console(self, fd: int) -> bool:
         """Consume one nonblocking serial read and report EOF."""

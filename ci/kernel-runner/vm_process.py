@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+import errno
 from io import FileIO
 import os
 from pathlib import Path
@@ -38,7 +39,8 @@ def close_transport(release: Callable[[], None], on_loss: Callable[[], None] | N
 def register_close(stack: ExitStack, role: str, release: Callable[[], None],
                    on_loss: Callable[[], None] | None = None,
                    attempt: Callable[[], None] | None = None,
-                   before_close: Callable[[], None] | None = None) -> None:
+                   before_close: Callable[[], None] | None = None, *,
+                   close_on_error: bool = True) -> None:
     """Keep the owner's role and failure policy together in the cleanup stack."""
     def retire(_role: str) -> None:
         try:
@@ -50,7 +52,8 @@ def register_close(stack: ExitStack, role: str, release: Callable[[], None],
     try:
         stack.callback(retire, role)
     except (MemoryError, OSError):
-        close_transport(release, on_loss)
+        if close_on_error:
+            close_transport(release, on_loss)
         raise
 
 
@@ -191,28 +194,41 @@ def wait(process: subprocess.Popen, deadline: float | None,
 def terminate(process: subprocess.Popen, handle: FileIO | None = None,
               on_reaped: Callable[[int], None] | None = None) -> None:
     """Stop only the owned child, without allowing another signal to abort reaping."""
-    status = poll_owned(process)
-    if status is not None:
-        if on_reaped is not None:
-            on_reaped(status)
+    if poll_owned(process, on_reaped) is not None:
         return
     with ExitStack() as handles:
         if handle is None:
-            handle = open_pidfd(process)
-            register_close(handles, "termination-pidfd", handle.close, ignore_cleanup_failure)
-        pidfd = handle.fileno()
-        try:
-            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+            try:
+                candidate = open_pidfd(process)
+                register_close(handles, "termination-pidfd", candidate.close, ignore_cleanup_failure)
+                handle = candidate
+            except (OSError, MemoryError):
+                pass  # Signal the still-owned, unreaped child below.
+        signal_owned(process, handle, signal.SIGTERM)
         try:
             wait(process, time.monotonic() + TERM_GRACE_SECONDS, on_reaped=on_reaped)
         except subprocess.TimeoutExpired:
-            try:
-                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            signal_owned(process, handle, signal.SIGKILL)
             wait(process, None, on_reaped=on_reaped)
+
+
+def signal_owned(process: subprocess.Popen, handle: FileIO | None, signum: signal.Signals) -> None:
+    """Use a PID only while this launcher still owns its wait status."""
+    if handle is not None and not handle.closed:
+        try:
+            signal.pidfd_send_signal(handle.fileno(), signum)
+        except ProcessLookupError:
+            return
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            return
+    try:
+        # A child which exits here keeps its PID until our wait collects it.
+        os.kill(process.pid, signum)
+    except ProcessLookupError:
+        pass
 
 
 def run(args: list[str], *, timeout: int, cancellation: Cancellation,

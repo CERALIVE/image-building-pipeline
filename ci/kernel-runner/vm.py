@@ -24,7 +24,7 @@ import yaml
 from image_lifecycle import job_disk, report_error
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
-    child_pipes, open_pidfd, read_check_script, register_close, run, terminate, wait,
+    child_pipes, close_transport, open_pidfd, read_check_script, register_close, run, terminate, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -95,8 +95,9 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         stdout, stderr = subprocess.PIPE, subprocess.PIPE if image_job else subprocess.STDOUT
+        artifact_writer = None
         if image_job and image_job.probe:
-            stdout = image_job.prepare_probe_transport(writers)
+            artifact_writer = stdout = image_job.prepare_probe_transport(writers)
             stderr = subprocess.DEVNULL
         check_spawn_signals(cancellation)
         process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
@@ -117,10 +118,15 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
 
             reader = None
             handle = None
+            handle_registered = False
             try:
                 if on_loss is not None:
-                    handle = open_pidfd(process)
-                    register_close(startup, "qemu-pidfd", handle.close, on_loss)
+                    try:
+                        handle = open_pidfd(process)
+                        register_close(startup, "qemu-pidfd", handle.close, on_loss, close_on_error=False)
+                        handle_registered = True
+                    except (OSError, MemoryError):
+                        on_loss()
                 writers.close()
                 if image_job:
                     image_job.capture(process, seconds)
@@ -129,7 +135,15 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                     reader.start()
                     wait(process, time.monotonic() + seconds, cancellation)
             finally:
-                terminate(process, handle, image_job.record_reaped if image_job else None)
+                try:
+                    terminate(process, handle, image_job.record_reaped if image_job else None)
+                finally:
+                    try:
+                        if handle is not None and not handle_registered:
+                            close_transport(handle.close, on_loss)
+                    finally:
+                        if artifact_writer is not None:
+                            close_transport(artifact_writer.close, on_loss)
                 if reader:
                     reader.join()
         cancellation.check()

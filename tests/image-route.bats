@@ -44,8 +44,32 @@
   [ "$status" -eq 0 ]
 }
 
-@test "image profile lifecycle uses Python stand-ins, never QEMU" {
-  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --lifecycle
+@test "image profile transport uses Python stand-ins, never QEMU" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --transport
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image profile ownership faults preserve descriptors and reap the child" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --ownership
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image profile shutdown signals preserve lifecycle guarantees" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --shutdown
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image profile receipt faults preserve the committed outcome" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --receipts
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image profile pair publication and admission preserve lifecycle guarantees" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --pair-and-admission
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
 }

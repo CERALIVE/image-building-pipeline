@@ -113,11 +113,19 @@ and the live transport files have explicit owners. One guarded close path
 records capture loss if a probe close callback fails and gives the same
 idempotent owner another chance to release the resource. Successful stream
 flush and sync, required validation, and receipt publication remain strict.
-The launcher registers the two pipe-end owners before asking the kernel for
-the descriptors. Rollback closes the owners once, even if returning the
-pipe pair fails. The launcher records QEMU's wait status before retiring its
-process handle. A handle-close failure can mark capture lost while the
-recorded reap and the attempt outcome remain authoritative.
+The launcher registers both pipe-end owners before the kernel allocates the
+descriptors. Each owner releases its descriptor through `FileIO.close()` and
+clears the pipe slot only afterward. A retry uses the same owner, so it cannot
+close an unrelated descriptor that later takes the same number. The parent
+releases its artifact writer before capture so it can see EOF, and teardown
+still owns the writer if that release fails.
+
+If pidfd registration fails, the launcher keeps the handle until it has
+collected QEMU's wait status. When a handle is unavailable or unusable, the
+launcher signals its own unreaped child by PID. It checks the child's status
+with `waitpid`, gives TERM up to 20 seconds, then sends KILL and collects the
+exit status. Only collecting the wait status records a reap. Handle cleanup
+can mark capture lost without changing that status or the probe outcome.
 
 The guest flushes and closes the artifact port before attempting
 `CERALIVE_JOB_DONE`. The image wrapper gives that write 250 ms and requests

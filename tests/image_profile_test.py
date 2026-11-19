@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the real launcher lifecycle against small Python children, never a VM."""
+"""Run the real launcher lifecycle against small Python children, never a VM.
+
+The AST ownership checks are a best-effort tripwire for known mistakes.
+The behavioral fault cases and /proc/self/fd snapshots verify ownership.
+"""
 
 import ast
 from collections import Counter
@@ -18,6 +22,7 @@ import os
 import pathlib
 import pty
 import runpy
+import select
 import selectors
 import signal
 import subprocess
@@ -176,6 +181,12 @@ def descriptor_snapshot() -> dict[int, tuple[str, int, int]]:
     return result
 
 
+def waits_for_guest_ready(mode: str) -> bool:
+    return (not mode.startswith(("fault:", "receipt-step:", "pair:"))
+            and mode not in ("audit-mutation", "startup:success", "startup:failure", "startup:signal",
+                             *SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *PRESTART_MODES))
+
+
 def test_pipe_setup_allocation_failure_does_not_close_a_reused_fd() -> None:
     pipe_files = image_lifecycle.pipe_files
     monitor = sys.monitoring
@@ -190,7 +201,6 @@ def test_pipe_setup_allocation_failure_does_not_close_a_reused_fd() -> None:
     jump = next(x for x in instructions[syscall + 1:returned] if "JUMP" in x.opname)
     offsets = {x.offset for x in instructions if jump.argval <= x.offset <= instructions[returned].offset}
     offsets.update((call_result.offset, jump.offset))
-    original_close = os.close
     original_pipe = image_lifecycle._PIPE2
     before = descriptor_snapshot()
     monitor.use_tool_id(tool, "pipe setup fault")
@@ -207,15 +217,17 @@ def test_pipe_setup_allocation_failure_does_not_close_a_reused_fd() -> None:
                     raise MemoryError("fixture pipe handoff")
                 return 0
 
-            def close_and_reuse(fd):
-                nonlocal replacement
-                original_close(fd)
-                if fd == pipe_writer and replacement is None:
-                    new_fd = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
-                    if new_fd != fd:
-                        os.dup2(new_fd, fd, inheritable=False)
-                        original_close(new_fd)
-                    replacement = fd
+            class ReusingFile(io.FileIO):
+                def close(self):
+                    nonlocal replacement
+                    fd = None if self.closed else self.fileno()
+                    super().close()
+                    if fd is not None and fd == pipe_writer and replacement is None:
+                        new_fd = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+                        if new_fd != fd:
+                            os.dup2(new_fd, fd, inheritable=False)
+                            os.close(new_fd)
+                        replacement = fd
 
             def inject(_code, offset):
                 if offset == point:
@@ -225,7 +237,7 @@ def test_pipe_setup_allocation_failure_does_not_close_a_reused_fd() -> None:
             monitor.set_local_events(tool, pipe_files.__code__, monitor.events.INSTRUCTION)
             try:
                 with patch.object(image_lifecycle, "_PIPE2", acquire_pipe), \
-                        patch.object(os, "close", close_and_reuse), ExitStack() as owners:
+                        patch.object(image_lifecycle, "FileIO", ReusingFile), ExitStack() as owners:
                     try:
                         pipe_files(os.O_CLOEXEC, owners, owners, "fixture")
                     except MemoryError as error:
@@ -236,7 +248,7 @@ def test_pipe_setup_allocation_failure_does_not_close_a_reused_fd() -> None:
                 assert os.readlink(f"/proc/self/fd/{replacement}") == os.devnull, point
             finally:
                 if replacement is not None and replacement in descriptor_snapshot():
-                    original_close(replacement)
+                    os.close(replacement)
             assert descriptor_snapshot() == before, point
     finally:
         monitor.set_local_events(tool, pipe_files.__code__, 0)
@@ -571,6 +583,14 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             cancel()
         return read_text(path, *args, **kwargs)
 
+    def wait_for_guest() -> None:
+        fd = os.open(root / "guest-ready", os.O_RDWR | os.O_CLOEXEC)
+        try:
+            assert select.select([fd], [], [], 5)[0], "fake QEMU never reached startup"
+            assert os.read(fd, 1) == b"1"
+        finally:
+            os.close(fd)
+
     def poller():
         epoll = poll_type()
 
@@ -579,13 +599,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return getattr(epoll, name)
 
             def poll(self, *args):
-                if (not fault and not audit_receipts and not pair
-                        and startup not in {"success", "failure", "signal"}
-                        and mode not in (*SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *PRESTART_MODES) and not sent):
-                    until = time.monotonic() + 5
-                    while not (root / "ready").exists():
-                        assert time.monotonic() < until, "fake QEMU never reached startup"
-                        time.sleep(0.01)
+                if waits_for_guest_ready(mode) and not sent:
+                    wait_for_guest()
                     cancel()
                     if startup and (root / "startup-ready").exists():
                         return []  # The startup matrix targets entry state, not the existing 1s poll bound.
@@ -616,10 +631,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         (target / "fixture").write_bytes(b"public artifact")
 
     def priority_timeout(_pid, _cancellation):
-        until = time.monotonic() + 5
-        while not (root / "ready").exists():
-            assert time.monotonic() < until, "fake QEMU never reached startup"
-            time.sleep(0.01)
+        wait_for_guest()
         raise subprocess.TimeoutExpired("ionice fixture", 1)
 
     capsule = root / "capsule"
@@ -680,7 +692,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     with ExitStack() as patches:
         ownership_case = root / "ownership-case"
         pidfd_case = root / "pidfd-case"
-        check_descriptors = (ownership_case.exists() or pidfd_case.exists()
+        pipe_fault = (root / "pipe-fault").read_text() if (root / "pipe-fault").exists() else ""
+        registration_fault = ((root / "registration-fault").read_text()
+                              if (root / "registration-fault").exists() else "")
+        check_descriptors = (ownership_case.exists() or pidfd_case.exists() or pipe_fault or registration_fault
                              or mode in (*BACKUP_SELECTOR_CLOSE_MODES, *READER_CLEANUP_MODES, *PRESTART_MODES))
         if check_descriptors:
             initial_fds = descriptor_snapshot()
@@ -697,9 +712,55 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             register_owner = vm_process.register_close
             inventory = []
 
-            def inspect_registration(stack, role, release, on_loss=None, attempt=None, before_close=None):
+            def inject_in_call(watched, target, line_or_return, marker):
+                def trace(frame, event, arg):
+                    if frame.f_code is not watched or not target(frame.f_locals):
+                        return None
+                    if ((event == "line" and str(frame.f_lineno) == line_or_return)
+                            or (event == line_or_return == "return")):
+                        marker.touch()
+                        sys.settrace(None)
+                        raise MemoryError("fixture ownership transition")
+                    return trace
+
+                sys.settrace(trace)
+
+            if registration_fault:
+                waitpid = os.waitpid
+
+                def record_launcher_wait(pid, options):
+                    waited, status = waitpid(pid, options)
+                    if waited and os.getpid() == launcher_pid:
+                        with (root / "launcher-waits").open("a") as output:
+                            print(waited, os.waitstatus_to_exitcode(status), file=output)
+                    return waited, status
+
+                patches.enter_context(patch.object(os, "waitpid", record_launcher_wait))
+                if registration_fault == "unusable":
+                    def unusable_pidfd(*_args):
+                        (root / "registration-injected").touch()
+                        raise OSError(errno.EBADF, "fixture unusable pidfd")
+
+                    patches.enter_context(patch.object(signal, "pidfd_send_signal", unusable_pidfd))
+                elif registration_fault.startswith("rollback:"):
+                    callback = ExitStack.callback
+
+                    def fail_pidfd_callback(stack, function, *args, **kwargs):
+                        if args == ("qemu-pidfd",):
+                            raise OSError("fixture pidfd callback allocation")
+                        return callback(stack, function, *args, **kwargs)
+
+                    patches.enter_context(patch.object(ExitStack, "callback", fail_pidfd_callback))
+
+            def inspect_registration(stack, role, release, on_loss=None, attempt=None, before_close=None, **options):
                 point = None
                 marker = root / "diag-injected"
+                if role == "artifact-writer" and pipe_fault:
+                    inject_in_call(image_lifecycle.PipeEnd.close.__code__,
+                                   lambda local: local["self"] is release.__self__, pipe_fault, marker)
+                if role == "qemu-pidfd" and registration_fault and registration_fault != "unusable":
+                    inject_in_call(register_owner.__code__, lambda local: local["role"] == role,
+                                   registration_fault.removeprefix("rollback:"), root / "registration-injected")
                 if role == "qemu-pidfd" and pidfd_fault != "baseline":
                     point = pidfd_fault.split(":")
                     marker = root / "pidfd-injected"
@@ -709,7 +770,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     inventory.append(role)
                     (root / "ownership-inventory").write_text(json.dumps(inventory))
                 if point is None:
-                    return register_owner(stack, role, release, on_loss, attempt, before_close)
+                    return register_owner(stack, role, release, on_loss, attempt, before_close, **options)
 
                 def fail_close():
                     if role == "qemu-pidfd":
@@ -720,7 +781,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     marker.touch()
                     raise DIAGNOSTIC_ERRORS[point[1]]("fixture transport close")
 
-                return register_owner(stack, role, release, on_loss, fail_close, before_close)
+                return register_owner(stack, role, release, on_loss, fail_close, before_close, **options)
 
             patches.enter_context(patch.object(image_lifecycle, "register_close", inspect_registration))
             patches.enter_context(patch.object(vm_process, "register_close", inspect_registration))
@@ -752,7 +813,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(os, "read", partial(check_stderr_reader, os.read)))
             patches.enter_context(patch.object(os, "readv", partial(check_stderr_reader, os.readv)))
         if mode in {"stages:timeout", "stages:before-header", "stages:blocked-header", "isolated:dropped",
-                    "isolated:summary-timeout:MemoryError", *STDERR_FLOOD_MODES}:
+                    "isolated:summary-timeout:MemoryError", *STDERR_FLOOD_MODES} or pipe_fault:
             capture = ImageJob.capture
             patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
@@ -841,6 +902,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                         attempts.append(time.monotonic())
                         if mode in UNREGISTER_MODES:
                             (root / "unregister-attempts").write_text(json.dumps(attempts))
+                        if len(attempts) == (2 if mode in UNREGISTER_MODES else 1):
+                            with (root / "unregister-ready").open("wb", buffering=0) as ready:
+                                ready.write(b"1")
                         if operation == "unregister-always" and len(attempts) > 1:
                             raise OSError("fixture persistent unregister failure")
                         diagnostic_failure()
@@ -973,13 +1037,22 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
                       ignored: tuple[signal.Signals, ...] = (),
                       entry_setup: str | None = None, full_stderr: bool = False,
                       ownership_case: tuple[int, str, str] | None = None,
-                      pidfd_case: str | None = None) -> dict | None:
+                      pidfd_case: str | None = None, pipe_fault: str = "",
+                      registration_fault: str = "") -> dict | None:
     with tempfile.TemporaryDirectory() as tmp, ExitStack() as launch_io:
         root = pathlib.Path(tmp)
+        if waits_for_guest_ready(mode) or mode == "stages:priority-timeout":
+            os.mkfifo(root / "guest-ready")
+        if mode.startswith("isolated:unregister"):
+            os.mkfifo(root / "unregister-ready")
         if ownership_case is not None:
             (root / "ownership-case").write_text(json.dumps(ownership_case))
         if pidfd_case is not None:
             (root / "pidfd-case").write_text(pidfd_case)
+        if pipe_fault:
+            (root / "pipe-fault").write_text(pipe_fault)
+        if registration_fault:
+            (root / "registration-fault").write_text(registration_fault)
         capsule = root / "capsule"
         if mode.startswith("pair:"):
             with tarfile.open(capsule, "w") as archive:
@@ -1074,6 +1147,9 @@ with (root / "children").open("a") as logged:
 (root / "ready").touch()
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
+if {waits_for_guest_ready(mode) or mode == "stages:priority-timeout"!r}:
+    with (root / "guest-ready").open("wb", buffering=0) as ready:
+        ready.write(b"1")
 if mode in ("startup:success", "startup:failure", "startup:signal"):
     os.write(1, (root / "probe.frame").read_bytes())
     if mode == "startup:signal":
@@ -1104,12 +1180,8 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
             serial_write(b"STAGE 2 stream_close_end 0 " + (b"3" if mode == "isolated:gap" else b"2") + b"\\n")
         if mode.startswith("isolated:unregister"):
             os.close(console)
-            until = time.monotonic() + 2
-            while not (root / "diag-injected").exists():
-                assert time.monotonic() < until
-                time.sleep(0.01)
-            if mode in {UNREGISTER_MODES!r}:
-                time.sleep(1.2)
+            with (root / "unregister-ready").open("rb", buffering=0) as ready:
+                assert ready.read(1) == b"1"
     if mode in {STDERR_FLOOD_MODES!r}:
         assert not os.get_blocking(console)
         if mode.endswith("-fault"):
@@ -1194,9 +1266,6 @@ if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-tim
 if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(("fault:", "receipt-step:")):
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
-if mode == "slow":
-    # Startup has not initialized the guest or installed a TERM handler.
-    time.sleep(60)
 while True:
     signal.pause()
 """)
@@ -1280,6 +1349,22 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if pipe_fault or registration_fault:
+            assert (directory / "exit.json").is_file(), (mode, pipe_fault, registration_fault, stderr)
+            exit_row = json.loads((directory / "exit.json").read_text())
+            teardown = json.loads((directory / "teardown.json").read_text())
+            assert launcher.returncode == (1 if mode == "term" else 0), (exit_row, teardown, stderr)
+            assert exit_row["qemu_reaped"] and teardown["qemu_reaped"], (exit_row, teardown)
+            assert not (root / "returns/active.json").exists()
+            if pipe_fault:
+                assert (root / "diag-injected").is_file(), pipe_fault
+                assert exit_row["stream_bytes"] == teardown["stream_bytes"] == 836
+            if registration_fault:
+                assert (root / "registration-injected").is_file(), registration_fault
+                pid = (root / "pid").read_text()
+                waits = (root / "launcher-waits").read_text().splitlines()
+                assert [entry for entry in waits if entry.split()[0] == pid] == [f"{pid} {exit_row['qemu_exit']}"]
+                assert not pathlib.Path(f"/proc/{pid}").exists()
         if pidfd_case is not None:
             assert (directory / "exit.json").is_file(), (mode, pidfd_case, stderr)
             assert (directory / "teardown.json").is_file()
@@ -1287,7 +1372,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert (root / "pidfd-injected").exists() == (pidfd_case != "baseline"), (mode, pidfd_case)
             assert all(json.loads((directory / receipt).read_text())["qemu_reaped"]
                        for receipt in ("exit.json", "teardown.json"))
-        if (root / "descriptor-check").exists() or (ownership_case is not None or pidfd_case is not None
+        if (root / "descriptor-check").exists() or (pipe_fault or registration_fault
+                                                   or ownership_case is not None or pidfd_case is not None
                                                    or mode in (*BACKUP_SELECTOR_CLOSE_MODES,
                                                                *READER_CLEANUP_MODES, *PRESTART_MODES)):
             initial, final = json.loads((root / "descriptor-check").read_text())
@@ -1451,7 +1537,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             record, teardown = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
             assert record["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
             close_injected = (ownership_case is not None and ownership_case[0] >= 0
-                              or pidfd_case not in (None, "baseline"))
+                              or pidfd_case not in (None, "baseline") or pipe_fault or registration_fault)
             complete = not close_injected and (
                 operation == "complete" or (mode in STDERR_FLOOD_MODES and not mode.endswith("-fault")))
             assert record["capture_lost"] is (not complete), (mode, record, stderr.decode())
@@ -1658,6 +1744,36 @@ def test_pidfd_close_faults_preserve_normal_and_cancelled_probe_receipts() -> No
         baseline = cancelled_fixture(mode, pidfd_case="baseline")
         for phase, error in CLOSE_FAULTS:
             assert cancelled_fixture(mode, pidfd_case=f"{phase}:{error}") == baseline
+
+
+def test_pipe_close_statement_faults_preserve_eof_and_the_complete_probe() -> None:
+    baseline = cancelled_fixture("isolated:complete")
+    code = image_lifecycle.PipeEnd.close.__code__
+    for point in (*statement_lines(code), "return"):
+        assert cancelled_fixture("isolated:complete", pipe_fault=point) == baseline, point
+
+
+def test_pidfd_registration_statement_faults_preserve_launcher_reaping() -> None:
+    register = vm_process.register_close
+    code = register.__code__
+    source = inspect.getsource(register).splitlines()
+    callback_line = next(i.positions.lineno for i in dis.get_instructions(code) if i.argval == "callback")
+    for mode in ("isolated:complete", "term"):
+        baseline = cancelled_fixture(mode)
+        for point in (*dict.fromkeys(statement_lines(code)), "return"):
+            if point != "return" and int(point) > callback_line:
+                # The release arm is excluded: the caller still owns this handle.
+                line = source[int(point) - code.co_firstlineno]
+                if line.strip() == "close_transport(release, on_loss)":
+                    continue
+                point = "rollback:" + point
+            assert cancelled_fixture(mode, registration_fault=point) == baseline, (mode, point)
+    assert cancelled_fixture("term", registration_fault="unusable") == cancelled_fixture("term")
+
+
+def statement_lines(code) -> tuple[str, ...]:
+    return tuple(str(line) for _, line in dis.findlinestarts(code)
+                 if line is not None and line > code.co_firstlineno)
 
 
 def test_all_probe_transport_owner_close_faults_preserve_the_committed_probe() -> None:
@@ -1946,12 +2062,22 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             "subprocess.Popen", "tempfile.TemporaryFile", "self._open_log",
         }
         remaining = Counter(acquisitions)
+        registration_methods = {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}
         bad = set()
         for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for imported in node.names:
+                    if imported.name in {"DefaultSelector", "PollSelector", "EpollSelector", "SelectSelector"}:
+                        bad.add(ast.unparse(node))
             if isinstance(node, ast.Call):
                 name = ast.unparse(node.func)
                 if name in {"closing", "aclosing"}:
                     bad.add(name)
+                if (name == "getattr" and len(node.args) >= 2
+                        and isinstance(attribute := node.args[1], ast.Constant)
+                        and isinstance(attribute.value, str)
+                        and attribute.value in registration_methods | {"close"}):
+                    bad.add(ast.unparse(node))
                 if name in constructors:
                     if remaining[name] > 0:
                         remaining[name] -= 1
@@ -1968,7 +2094,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
                         bad.add(ast.unparse(item.context_expr))
             if not isinstance(node, ast.Attribute):
                 continue
-            if node.attr in {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}:
+            if node.attr in registration_methods:
                 bad.add(ast.unparse(node))
             if node.attr != "close":
                 continue
@@ -2023,16 +2149,21 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         "stack.enter_context(selectors.DefaultSelector())", "stack.push(extra)",
         "stack.callback(release)", "contextlib.closing(extra)",
         "self.extra = selectors.DefaultSelector()", "self.extra = open('file', 'rb')",
+        'alias = stack\ngetattr(alias, "callback")(getattr(events, "close"))',
+        'close_transport(lambda: getattr(events, "close")())',
+        'from transport import DefaultSelector as Reexported\nself.extra = Reexported()',
+        'from transport import DefaultSelector as Reexported\ngetattr(stack, "enter_context")(Reexported())',
     )
     for fn, acquisitions in functions:
         source = inspect.getsource(fn)
         private = ast.parse(dedent(source))
         assert not (bad := unguarded(private, acquisitions)), (fn.__qualname__, bad)
         for mutation in mutations:
-            private.body[-1].body.insert(0, ast.parse(mutation).body[0])
+            statements = ast.parse(mutation).body
+            private.body[-1].body[:0] = statements
             compile(private, "<private-copy>", "exec")
             assert unguarded(private, acquisitions), (fn.__qualname__, mutation)
-            private.body[-1].body.pop(0)
+            del private.body[-1].body[:len(statements)]
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:
@@ -2719,25 +2850,99 @@ def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
         assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == allocated
 
 
+class TransportCases:
+    tests = (
+        test_pipe_setup_allocation_failure_does_not_close_a_reused_fd,
+        test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_timeout,
+        test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe,
+        test_serial_reader_cleanup_faults_preserve_the_committed_probe,
+        test_failed_console_unregister_does_not_spin_or_change_probe_result,
+        test_backup_selector_close_faults_preserve_the_committed_probe,
+        test_full_host_stderr_does_not_block_exit_after_probe_timeout,
+        test_guest_poweroff_does_not_depend_on_image_completion_marker,
+        test_guest_failure_frame_and_poweroff_survive_full_standard_streams,
+        test_probe_stderr_flood_does_not_depend_on_host_reads,
+    )
+
+
+class OwnershipCases:
+    tests = (
+        test_pidfd_close_faults_preserve_normal_and_cancelled_probe_receipts,
+        test_pipe_close_statement_faults_preserve_eof_and_the_complete_probe,
+        test_pidfd_registration_statement_faults_preserve_launcher_reaping,
+        test_all_probe_transport_owner_close_faults_preserve_the_committed_probe,
+        test_probe_transport_setup_failure_prevents_guest_launch_and_exit_commit,
+        test_live_capture_rejects_new_diagnostic_io,
+        test_live_and_teardown_closes_go_through_transport_guard,
+    )
+
+
+class ShutdownCases:
+    tests = (
+        test_one_term_in_selector_reaps_term_resistant_qemu,
+        test_inherited_blocked_and_ignored_signals_do_not_reach_children,
+        test_no_qemu_or_helper_spawn_under_terminal_mask,
+        test_term_int_hup_and_repeated_term_preserve_teardown,
+        test_term_during_final_probe_validation_updates_receipt_and_status,
+    )
+
+
+class ReceiptCases:
+    tests = (
+        test_term_after_final_outcome_is_decided_preserves_receipt_and_status,
+        test_final_receipt_rename_decides_status_even_if_directory_sync_fails,
+        test_mask_restoration_after_rename_cannot_change_launcher_exit,
+        test_raising_signal_handler_during_rename_cannot_change_published_status,
+        test_pending_handler_cannot_interrupt_exit_receipt_readback,
+        test_every_catchable_signal_stays_blocked_through_committed_pair_exit,
+        test_single_exit_point_uses_readback_after_return_or_exception,
+        test_each_receipt_step_preserves_commit_and_releases_owned_resources,
+        test_receipt_audit_detects_executed_work_outside_step_table,
+    )
+
+
+class PairAndAdmissionCases:
+    tests = (
+        test_failed_verifier_receipt_does_not_publish_pair_acceptance,
+        test_pair_publication_failure_and_signal_matrix,
+        test_probe_cleanup_and_artifact_publication_failures_never_publish_success,
+        test_verifier_capsule_and_result_failures_leave_pair_unaccepted,
+        test_term_while_check_waits_for_fifo_releases_its_overlay_and_lock,
+        test_image_has_no_nic_shares_registration_or_credential_environment,
+        test_kernel_check_keeps_its_existing_cpu_ram_and_network_defaults,
+        test_oversized_stream_reaps_only_its_owned_child_and_closes_inputs,
+        test_same_filesystem_headroom_combines_overlay_and_return_budgets,
+        test_image_admission_requires_effective_cgroup_caps,
+        test_nice_nine_requires_low_cpu_weight_and_all_hard_caps,
+        test_reconciliation_holds_admission_until_owned_overlay_descriptors_close,
+        test_image_base_rejects_backing_and_nested_external_data_files,
+        test_quarantined_outputs_do_not_reduce_future_pair_disk_admission,
+    )
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--fixture-launcher"]:
         fixture_launcher(pathlib.Path(sys.argv[2]), sys.argv[3], signal.Signals(int(sys.argv[4])))
         raise AssertionError("launcher did not exit")
-    startup_tests = (
-        test_hostile_startup_does_not_change_guest_outcome,
-        test_startup_verification_failure_refuses_before_spawning,
-        test_echild_cannot_be_reported_as_guest_or_helper_success,
-    )
-    tests = [test for name, test in list(globals().items()) if name.startswith("test_")]
-    match sys.argv[1:]:
-        case []:
-            pass
-        case ["--startup"]:
-            tests = list(startup_tests)
-        case ["--lifecycle"]:
-            tests = [test for test in tests if test not in startup_tests]
-        case _:
-            raise SystemExit("usage: image_profile_test.py [--startup | --lifecycle]")
+    selections = {
+        "--transport": TransportCases.tests, "--ownership": OwnershipCases.tests,
+        "--shutdown": ShutdownCases.tests, "--receipts": ReceiptCases.tests,
+        "--pair-and-admission": PairAndAdmissionCases.tests,
+        "--startup": (test_hostile_startup_does_not_change_guest_outcome,
+                      test_startup_verification_failure_refuses_before_spawning,
+                      test_echild_cannot_be_reported_as_guest_or_helper_success),
+    }
+    selected = tuple(test for shard in selections.values() for test in shard)
+    assert Counter(selected) == Counter(test for name, test in globals().items() if name.startswith("test_"))
+    args = sys.argv[1:]
+    if not args:
+        tests = selected
+    elif args == ["--lifecycle"]:
+        tests = selected[:-len(selections["--startup"])]
+    elif len(args) == 1 and args[0] in selections:
+        tests = selections[args[0]]
+    else:
+        raise SystemExit("usage: image_profile_test.py [" + " | ".join(selections) + "]")
     for test in tests:
         test()
         print(f"PASS {test.__name__}")
