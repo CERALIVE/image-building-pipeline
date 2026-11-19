@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
 from functools import partial
+from io import FileIO
 import json
 import os
 from pathlib import Path
@@ -276,8 +277,19 @@ class ImageJob:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
             inputs.callback(os.close, self.capsule_fd)
             self.console_read, self.console_write = os.pipe2(os.O_NONBLOCK) if probe else os.pipe()
-            inputs.callback(self.close_console_reader)
-            inputs.callback(self.close_console_writer)
+            if probe:
+                inputs.callback(optional, self.lose_diagnostics, self.close_console_writer)
+                try:
+                    self.probe_console_reader = FileIO(self.console_read, "rb")
+                except (MemoryError, OSError):
+                    optional(self.lose_diagnostics, os.close, self.console_read)
+                    raise
+                # The same owner closes the fd if the optional callback fails at entry.
+                inputs.callback(optional, self.lose_diagnostics, self.probe_console_reader.close)
+                inputs.callback(optional, self.lose_diagnostics, self.close_console_reader)
+            else:
+                inputs.callback(self._close_console, "console_read")
+                inputs.callback(self.close_console_writer)
             self.inputs = inputs.pop_all()
 
     def __enter__(self) -> ImageJob:
@@ -310,7 +322,7 @@ class ImageJob:
             os.close(fd)
 
     def close_console_reader(self) -> None:
-        self._close_console("console_read")
+        self.probe_console_reader.close()
 
     def close_console_writer(self) -> None:
         self._close_console("console_write")

@@ -16,6 +16,7 @@ import json
 import hashlib
 import os
 import pathlib
+import pty
 import runpy
 import selectors
 import signal
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -62,6 +64,16 @@ ENCODE_SITES = {
     for instruction in dis.get_instructions(image_lifecycle.encode_diagnostic_fields)
     if instruction.starts_line and instruction.opname != "RESUME"
 }
+READER_CLEANUP = ImageJob.close_console_reader.__code__
+READER_CLEANUP_SITES = tuple(
+    instruction.offset for instruction in dis.get_instructions(READER_CLEANUP)
+    if instruction.opname != "RESUME"
+    and (instruction.starts_line or instruction.opname.startswith("RETURN"))
+)
+READER_CLEANUP_MODES = tuple(
+    f"isolated:reader-cleanup-{site}:{error}"
+    for site in READER_CLEANUP_SITES for error in ("MemoryError", "OSError")
+)
 STDERR_FLOOD_MODES = tuple(f"isolated:sink-{size}-{case}"
                           for size in ("small", "large") for case in ("baseline", "flood", "fault"))
 PRESTART_MODES = tuple(
@@ -74,6 +86,7 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                      for error in DIAGNOSTIC_ERRORS),
                    "isolated:summary-timeout:MemoryError", "isolated:fallback:MemoryError",
                    "isolated:read-dispatch:MemoryError", "isolated:unregister:OSError",
+                   *READER_CLEANUP_MODES,
                    *STDERR_FLOOD_MODES,
                    "isolated:encode-empty:MemoryError", "isolated:encode-tail:MemoryError",
                    *(f"isolated:encode-{tail}-{site}:MemoryError"
@@ -668,17 +681,20 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     return unregister(selector, file)
 
                 patches.enter_context(patch.object(selectors.EpollSelector, "unregister", fail_console_eof))
-            elif operation.startswith("alloc-"):
-                target_code, target_offset = SUMMARY_ALLOCATION_SITES[operation.removeprefix("alloc-")]
+            elif operation.startswith(("alloc-", "reader-cleanup-")):
+                if operation.startswith("reader-cleanup-"):
+                    target_code, target_offset = READER_CLEANUP, int(operation.rsplit("-", 1)[1])
+                else:
+                    target_code, target_offset = SUMMARY_ALLOCATION_SITES[operation.removeprefix("alloc-")]
                 monitor = sys.monitoring
                 tool_id = monitor.DEBUGGER_ID
-                monitor.use_tool_id(tool_id, "probe summary allocation fault")
+                monitor.use_tool_id(tool_id, "probe diagnostic statement fault")
 
-                def inject_allocation(_code, offset):
+                def inject_statement(_code, offset):
                     if offset == target_offset:
                         diagnostic_failure()
 
-                monitor.register_callback(tool_id, monitor.events.INSTRUCTION, inject_allocation)
+                monitor.register_callback(tool_id, monitor.events.INSTRUCTION, inject_statement)
                 monitor.set_local_events(tool_id, target_code, monitor.events.INSTRUCTION)
             elif operation in {"encode-empty", "encode-tail"}:
                 iterencode = json.JSONEncoder.iterencode
@@ -1208,7 +1224,11 @@ os.execvp(sys.argv[1], sys.argv[1:])
         if mode in ISOLATION_MODES:
             operation = mode.split(":")[1]
             stalled = operation in {"dropped", "summary-timeout"}
-            assert (directory / "exit.json").is_file(), (mode, stderr.decode())
+            assert (directory / "exit.json").is_file(), (
+                mode, launcher.returncode, stderr.decode(),
+                (directory / "artifacts/verification.json").is_file(),
+                (directory / "teardown.json").is_file(), (root / "returns/active.json").is_file(),
+            )
             record, teardown = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
             assert record["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
             complete = operation == "complete" or (mode in STDERR_FLOOD_MODES and not mode.endswith("-fault"))
@@ -1377,11 +1397,74 @@ def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_t
 def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> None:
     baseline = cancelled_fixture("isolated:baseline")
     for mode in ISOLATION_MODES[1:]:
-        if mode in STDERR_FLOOD_MODES:
+        if mode in STDERR_FLOOD_MODES or mode in READER_CLEANUP_MODES:
             continue
         result = cancelled_fixture(mode)
         if mode.split(":")[1] not in {"dropped", "summary-timeout"}:
             assert result is not None and result == baseline, (mode, result, baseline)
+
+
+def test_serial_reader_cleanup_faults_preserve_the_committed_probe() -> None:
+    baseline = cancelled_fixture("isolated:complete")
+    for mode in READER_CLEANUP_MODES:
+        assert cancelled_fixture(mode) == baseline, mode
+
+
+def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
+    body = json.dumps({"schema": 1, "identity": asdict(IDENTITY), "network_denied": True}).encode()
+    frame = io.BytesIO()
+    encode(frame, [("verification.json", body)], IDENTITY)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "image").mkdir()
+        (root / "image/raw").touch()
+        wire = root / "wire"
+        wire.write_bytes(frame.getvalue())
+        helper = root / "image_guest.py"
+        helper.write_text(f"import sys\nsys.stdout.buffer.write(open({str(wire)!r}, 'rb').read())\n"
+                          "raise SystemExit(int(sys.argv[1]))\n")
+        observed = root / "poweroff"
+        for tool, command in (
+            ("modprobe", "exit 0"),
+            ("systemctl", f'[[ $* = poweroff ]] && cmp -s "{wire}" "{root / "returned"}"'
+                          f' && : >"{observed}"'),
+        ):
+            stub = root / tool
+            stub.write_text(f"#!/bin/bash\n{command}\n")
+            stub.chmod(0o700)
+        wrapper = (ROOT / "ci/kernel-runner/guest-job.sh").read_text()
+        wrapper = wrapper.replace("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive", str(root))
+        wrapper = wrapper.replace("/usr/local/lib/ceralive-kernel-runner/image_guest.py", f'"{helper}" "$1"')
+        master, slave = pty.openpty()
+        failures = []
+        try:
+            termios.tcflow(slave, termios.TCOOFF)
+            for status in (0, 1):
+                for sink in ("healthy", "stopped", "write-error"):
+                    observed.unlink(missing_ok=True)
+                    serial = {"healthy": str(root / "serial"), "stopped": os.ttyname(slave),
+                              "write-error": "/dev/full"}[sink]
+                    with (root / "returned").open("wb") as received, subprocess.Popen(
+                        ["/bin/bash", "-c", wrapper.replace("/dev/ttyS0", serial), "fixture", str(status)],
+                        env={"PATH": f"{root}:/usr/bin:/bin"}, start_new_session=True, stdout=received,
+                        stderr=subprocess.PIPE,
+                    ) as guest:
+                        try:
+                            _, stderr = guest.communicate(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(guest.pid, signal.SIGKILL)
+                            guest.communicate()
+                            failures.append((sink, status, "shutdown exceeded two seconds"))
+                        else:
+                            if not observed.is_file() or guest.returncode != status:
+                                failures.append((sink, status, observed.is_file(), guest.returncode, stderr))
+                    assert (root / "returned").read_bytes() == frame.getvalue()
+                    if sink == "healthy":
+                        assert (root / "serial").read_bytes() == f"\nCERALIVE_JOB_DONE={status}\n".encode()
+        finally:
+            os.close(slave)
+            os.close(master)
+        assert not failures, failures
 
 
 def test_probe_stderr_flood_does_not_depend_on_host_reads() -> None:
@@ -1452,7 +1535,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         ("lose_diagnostics", set(), set()),
         ("_close_console", {"getattr", "setattr"},
          {"optional(self.lose_diagnostics, os.close, fd)", "os.close(fd)"}),
-        ("close_console_reader", set(), {"self._close_console('console_read')"}),
+        ("close_console_reader", set(), {"self.probe_console_reader.close()"}),
     )
     for name, calls, exact in helpers:
         assert not (bad := unexpected(node_for(ImageJob, name), calls, exact)), (name, bad)

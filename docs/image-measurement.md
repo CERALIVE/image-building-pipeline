@@ -106,7 +106,20 @@ aborts before guest launch and leaves no `exit.json`. QEMU stderr goes to
 `/dev/null` for probes. The launcher reads serial markers into a fixed 4 KiB
 memory ring, discards ordinary console text and evicts the oldest complete
 stage lines when full. A console read error ends marker capture and marks it
-lost. The launcher closes the serial reader during normal teardown.
+lost. The probe's serial cleanup is best effort. A reader callback failure
+marks capture lost and the descriptor owner still closes the reader if the
+callback failed before close. Artifact teardown, active-journal removal,
+and the exit receipt proceed independently of the serial callback.
+
+The guest flushes and closes the artifact port before attempting
+`CERALIVE_JOB_DONE`. The image wrapper gives that write 250 ms and requests
+poweroff even if the write times out or fails. The image host uses QEMU's
+exit status and independently validates the artifact stream. It does not
+require the wrapper marker or any `STAGE` marker for the verdict. The
+separate kernel check and JIT runner still require `CERALIVE_JOB_DONE=0`.
+The offline PTY fixture checks the wrapper's poweroff request. It does not
+exercise the guest UART, systemd shutdown, or delivery of the final serial
+bytes during QEMU teardown.
 
 The probe's `exit.json` contains `last_observed_stage`, `sequence_complete`,
 `capture_lost`, the sanitized `console_tail` (at most 4 KiB), and
@@ -123,7 +136,7 @@ in the same atomic receipt. These fields report capture loss,
 an unknown last stage, and an empty tail. The launcher uses the same receipt
 commit for the summary and the exit status, with no separate diagnostic file.
 
-The image base embeds the guest helper, stage logger and stream writer at
+The image base embeds the guest wrapper, helper, stage logger and stream writer at
 `build-base --profile image` time. A newer launcher or source bundle does not
 update an earlier base. Prepare a new file from the reviewed helper revision,
 and independently approve its digest before using it for an attended probe.
