@@ -73,6 +73,10 @@ class ChildStatusError(RuntimeError):
     """The kernel did not give the launcher its owned child's exit status."""
 
 
+class ChildSetupError(RuntimeError):
+    """A spawned child could not be registered for I/O."""
+
+
 class Cancellation:
     """A one-way flag set by the main thread's signal handler."""
 
@@ -115,15 +119,62 @@ def child_environment(*, registration: bool = False) -> dict[str, str]:
     return environment
 
 
+def register_child_pipes(stack: ExitStack, process: subprocess.Popen) -> None:
+    for role, pipe in (("child-stdin", process.stdin), ("child-stdout", process.stdout),
+                       ("child-stderr", process.stderr)):
+        if pipe is not None:
+            register_close(stack, role, pipe.close)
+
+
 @contextmanager
-def child_pipes(process: subprocess.Popen):
-    """Close Popen's pipes without its context manager's implicit wait."""
-    with ExitStack() as stack:
-        for role, pipe in (("child-stdin", process.stdin), ("child-stdout", process.stdout),
-                           ("child-stderr", process.stderr)):
-            if pipe is not None:
-                register_close(stack, role, pipe.close)
-        yield process
+def spawn_owned(args: list[str], *, cancellation: Cancellation, registration: bool = False,
+                on_reaped: Callable[[int], None] | None = None,
+                on_loss: Callable[[], None] | None = None,
+                after_reap: Callable[[], None] | None = None, **options):
+    """Own every host spawn before registering its pipes or optional pidfd."""
+    children: list[subprocess.Popen] = []
+    process = handle = None
+    handle_registered = False
+    check_spawn_signals(cancellation)
+    with ExitStack() as pipes, ExitStack() as handles:
+        try:
+            try:
+                process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD,
+                                           env=child_environment(registration=registration), **options)
+                children.append(process)
+                register_child_pipes(pipes, process)
+            except (MemoryError, OSError) as error:
+                if process is None:
+                    raise
+                raise ChildSetupError(f"cannot register child {args[0]}") from error
+            if on_loss is not None:
+                try:
+                    handle = open_pidfd(process)
+                    register_close(handles, "qemu-pidfd", handle.close, on_loss, close_on_error=False)
+                    handle_registered = True
+                except (OSError, MemoryError):
+                    on_loss()
+            yield process
+        finally:
+            if process is not None:
+                try:
+                    # The local still owns the child if appending it failed.
+                    try:
+                        terminate(children.pop() if children else process, handle, on_reaped)
+                    finally:
+                        if after_reap is not None:
+                            after_reap()
+                finally:
+                    try:
+                        if handle is not None and not handle_registered:
+                            close_transport(handle.close, on_loss)
+                    finally:
+                        try:
+                            pipes.close()
+                        finally:
+                            for pipe in (process.stdin, process.stdout, process.stderr):
+                                if pipe is not None and not pipe.closed:
+                                    close_transport(pipe.close, ignore_cleanup_failure)
 
 
 def poll_owned(process: subprocess.Popen, on_reaped: Callable[[int], None] | None = None) -> int | None:
@@ -217,11 +268,11 @@ def signal_owned(process: subprocess.Popen, handle: FileIO | None, signum: signa
     if handle is not None and not handle.closed:
         try:
             signal.pidfd_send_signal(handle.fileno(), signum)
-        except ProcessLookupError:
-            return
         except OSError as error:
-            if error.errno != errno.EBADF:
-                raise
+            if error.errno == errno.ESRCH:
+                return
+        except MemoryError:
+            pass
         else:
             return
     try:
@@ -234,39 +285,36 @@ def signal_owned(process: subprocess.Popen, handle: FileIO | None, signum: signa
 def run(args: list[str], *, timeout: int, cancellation: Cancellation,
         capture_output: bool = False, registration: bool = False, **options) -> subprocess.CompletedProcess:
     """Like run(check=True), with cancellation checks during helper subprocesses."""
-    check_spawn_signals(cancellation)
     if capture_output:
         options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.monotonic() + timeout
-    process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD,
-                               env=child_environment(registration=registration), **options)
-    with child_pipes(process):
-        output = [bytearray(), bytearray()]
-        try:
-            with ExitStack() as owners:
+    with spawn_owned(args, cancellation=cancellation, registration=registration, **options) as process:
+        with ExitStack() as owners:
+            try:
+                output = [bytearray(), bytearray()]
                 events = selectors.PollSelector()
                 register_close(owners, "helper-selector", events.close)
                 if capture_output:
                     events.register(process.stdout, selectors.EVENT_READ, 0)
                     events.register(process.stderr, selectors.EVENT_READ, 1)
-                while events.get_map():
-                    cancellation.check()
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise subprocess.TimeoutExpired(args, timeout)
-                    try:
-                        for key, _ in events.select(timeout=min(POLL_SECONDS, remaining)):
-                            cancellation.check()
-                            data = os.read(key.fd, 65536)
-                            if data:
-                                output[key.data].extend(data)
-                            else:
-                                events.unregister(key.fileobj)
-                    except InterruptedError:
-                        continue
-            wait(process, deadline, cancellation)
-        finally:
-            terminate(process)
+            except (MemoryError, OSError) as error:
+                raise ChildSetupError(f"cannot register helper output {args[0]}") from error
+            while events.get_map():
+                cancellation.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    for key, _ in events.select(timeout=min(POLL_SECONDS, remaining)):
+                        cancellation.check()
+                        data = os.read(key.fd, 65536)
+                        if data:
+                            output[key.data].extend(data)
+                        else:
+                            events.unregister(key.fileobj)
+                except InterruptedError:
+                    continue
+        wait(process, deadline, cancellation)
     cancellation.check()
     stdout, stderr = map(bytes, output) if capture_output else (None, None)
     result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)

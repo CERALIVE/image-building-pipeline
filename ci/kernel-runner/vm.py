@@ -23,8 +23,7 @@ import time
 import yaml
 from image_lifecycle import job_disk, report_error
 from vm_process import (
-    CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
-    child_pipes, close_transport, open_pidfd, read_check_script, register_close, run, terminate, wait,
+    STOP_SIGNALS, Cancellation, close_transport, read_check_script, register_close, run, spawn_owned, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -99,53 +98,36 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if image_job and image_job.probe:
             artifact_writer = stdout = image_job.prepare_probe_transport(writers)
             stderr = subprocess.DEVNULL
-        check_spawn_signals(cancellation)
-        process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
-                                   preexec_fn=partial(die_with_parent, os.getpid()),
-                                   stdin=subprocess.DEVNULL,
-                                   stdout=stdout,
-                                   stderr=stderr,
-                                   restore_signals=True)
-        with child_pipes(process):
-            lines: list[bytes] = []
+        lines: list[bytes] = []
+        reader = None
 
-            def console() -> None:
-                for line in process.stdout:
-                    lines.append(line)
-                    if kind != "jit":
-                        sys.stdout.buffer.write(line)
-                        sys.stdout.buffer.flush()
+        def console() -> None:
+            for line in process.stdout:
+                lines.append(line)
+                if kind != "jit":
+                    sys.stdout.buffer.write(line)
+                    sys.stdout.buffer.flush()
 
-            reader = None
-            handle = None
-            handle_registered = False
+        def finish_capture() -> None:
             try:
-                if on_loss is not None:
-                    try:
-                        handle = open_pidfd(process)
-                        register_close(startup, "qemu-pidfd", handle.close, on_loss, close_on_error=False)
-                        handle_registered = True
-                    except (OSError, MemoryError):
-                        on_loss()
-                writers.close()
-                if image_job:
-                    image_job.capture(process, seconds)
-                else:
-                    reader = threading.Thread(target=console)
-                    reader.start()
-                    wait(process, time.monotonic() + seconds, cancellation)
+                if artifact_writer is not None:
+                    close_transport(artifact_writer.close, on_loss)
             finally:
-                try:
-                    terminate(process, handle, image_job.record_reaped if image_job else None)
-                finally:
-                    try:
-                        if handle is not None and not handle_registered:
-                            close_transport(handle.close, on_loss)
-                    finally:
-                        if artifact_writer is not None:
-                            close_transport(artifact_writer.close, on_loss)
                 if reader:
                     reader.join()
+
+        with spawn_owned(args, cancellation=cancellation, pass_fds=descriptors,
+                         preexec_fn=partial(die_with_parent, os.getpid()),
+                         stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, on_loss=on_loss,
+                         on_reaped=image_job.record_reaped if image_job else None,
+                         after_reap=finish_capture) as process:
+            writers.close()
+            if image_job:
+                image_job.capture(process, seconds)
+            else:
+                reader = threading.Thread(target=console)
+                reader.start()
+                wait(process, time.monotonic() + seconds, cancellation)
         cancellation.check()
         if image_job:
             if process.returncode:

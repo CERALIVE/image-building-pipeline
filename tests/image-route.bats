@@ -56,6 +56,18 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image profile post-spawn failures reap VM and helper children" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --process
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "kernel runner preparation and registration helpers share child cleanup" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --helper-process
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image profile shutdown signals preserve lifecycle guarantees" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --shutdown
   printf '%s\n' "$output"

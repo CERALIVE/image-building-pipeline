@@ -120,10 +120,17 @@ close an unrelated descriptor that later takes the same number. The parent
 releases its artifact writer before capture so it can see EOF, and teardown
 still owns the writer if that release fails.
 
+The host acquires QEMU and helper processes through the same cleanup scope.
+It takes ownership before registering the child's pipes. If registration fails,
+it stops and reaps the child and closes even the pipes whose registration
+never ran. A helper failure during an active image attempt records a failed
+outcome. Admission failures before an attempt still produce no attempt receipt.
+
 If pidfd registration fails, the launcher keeps the handle until it has
-collected QEMU's wait status. When a handle is unavailable or unusable, the
-launcher signals its own unreaped child by PID. It checks the child's status
-with `waitpid`, gives TERM up to 20 seconds, then sends KILL and collects the
+collected QEMU's wait status. If pidfd signalling is unavailable or fails,
+the launcher signals its own unreaped child by PID. ESRCH already means the
+child is gone. `waitpid` collects the status independently of the pidfd.
+The launcher gives TERM up to 20 seconds, then sends KILL and collects the
 exit status. Only collecting the wait status records a reap. Handle cleanup
 can mark capture lost without changing that status or the probe outcome.
 
