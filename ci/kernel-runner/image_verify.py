@@ -15,7 +15,7 @@ import subprocess
 import tarfile
 
 from image_capsule import Capsule, digest_file
-from image_stream import Identity, StreamError
+from image_stream import Identity, StreamError, positioned_open, read_input
 
 
 @contextmanager
@@ -38,7 +38,7 @@ def parent_fd(root: Path, name: str):
 def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
     """Bind file bytes, ownership, modes, links and special-file identities."""
     expected = set()
-    with tarfile.open(archive, "r:") as tar:
+    with positioned_open(archive, archive=True) as source, tarfile.open(fileobj=source, mode="r:") as tar:
         for member in tar:
             name = member.name.removeprefix("./").rstrip("/")
             if name in ("", "."):
@@ -61,8 +61,7 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                     content = tar.extractfile(member)
                     if content is None:
                         raise StreamError("unreadable returned tar file")
-                    handle = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-                    with content, os.fdopen(handle, "rb") as file:
+                    with content, positioned_open(leaf, dir_fd=fd, nofollow=True) as file:
                         if hashlib.file_digest(content, "sha256").digest() != hashlib.file_digest(file, "sha256").digest():
                             raise StreamError("slot file bytes differ from emitted tar")
                 elif member.issym():
@@ -87,7 +86,11 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                 else:
                     raise StreamError("unsupported returned tar member")
     actual_names = set()
-    for directory, dirs, files in os.walk(root, followlinks=False):
+
+    def unreadable(error: OSError) -> None:
+        raise error
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
         for name in (*dirs, *files):
             actual_names.add(str((Path(directory) / name).relative_to(root)))
     additions = set(boot) | {"usr/lib/ceralive/boot", "lost+found"}
@@ -100,8 +103,7 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
             actual = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
             if not stat.S_ISREG(actual.st_mode) or (stat.S_IMODE(actual.st_mode), actual.st_uid, actual.st_gid) != (0o644, 0, 0):
                 raise StreamError("slot boot payload metadata mismatch")
-            handle = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-            with os.fdopen(handle, "rb") as file:
+            with positioned_open(leaf, dir_fd=fd, nofollow=True) as file:
                 if hashlib.file_digest(file, "sha256").hexdigest() != digest_file(content):
                     raise StreamError("slot boot payload differs from trusted compilation")
 
@@ -115,13 +117,13 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
            "LC_ALL": "C", "SOURCE_DATE_EPOCH": str(identity.epoch),
            "APT_GPG_PUBLIC_B64": "sealed-public-trust", "CERALIVE_BUILD_MODE": "production"}
     params = resolve(source, capsule.board, env)
-    if json.loads(artifacts["resolved.json"].read_text()) != params:
+    if json.loads(read_input(artifacts["resolved.json"])) != params:
         raise StreamError("returned resolver output differs from approved source")
     subprocess.run(["bash", "-euo", "pipefail", "-c",
         'source "$1"; rauc_public_root_resolve "$2" "$3"', "_",
         str(source / "lib/rauc-pki-contract.sh"), str(inputs / capsule.device_root),
         job["trust"]["root_der_sha256"]], check=True, env=env, capture_output=True)
-    measurement = json.loads(artifacts["measurement.json"].read_text())
+    measurement = json.loads(read_input(artifacts["measurement.json"]))
     if measurement["public_root_der_sha256"] != job["trust"]["root_der_sha256"]:
         raise StreamError("returned public device trust identity mismatch")
     metadata = HOME / "released-kernel"
@@ -139,7 +141,8 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     released = verified_metadata("7.2.0-ceralive8", metadata)
     if identity.board not in released.boards:
         raise StreamError("board absent from released kernel validation")
-    with tarfile.open(artifacts["rootfs.tar"], "r:") as archive:
+    with positioned_open(artifacts["rootfs.tar"], archive=True) as tar_input, \
+            tarfile.open(fileobj=tar_input, mode="r:") as archive:
         if any(member.name.removeprefix("./").startswith("var/cache/apt/archives/")
                and member.name.endswith(".deb") for member in archive):
             raise StreamError("emitted tar retains downloaded package archives")
@@ -172,11 +175,11 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             'source "$1"; slot_reserve_assert_ext4 "$2" "$3"', "_",
             str(source / "lib/shared/slot-reserve.sh"), str(image), label],
             check=True, env=env, capture_output=True, text=True, timeout=60).stdout
-        if reserve != artifacts[label + ".reserve"].read_text():
+        if reserve != read_input(artifacts[label + ".reserve"]).decode():
             raise StreamError("returned reserve evidence disagrees with actual slot")
         header = subprocess.run(["dumpe2fs", "-h", str(image)], check=True, env=env,
                                 capture_output=True, text=True, timeout=60).stdout
-        if header.rstrip("\n") + "\n" != artifacts[label + ".header"].read_text():
+        if header.rstrip("\n") + "\n" != read_input(artifacts[label + ".header"]).decode():
             raise StreamError("returned clean filesystem header disagrees with actual slot")
         fields = dict(line.split(":", 1) for line in header.splitlines() if ":" in line)
         if fields.get("Filesystem volume name", "").strip() != label:
@@ -195,7 +198,7 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             compare_slot(mount, artifacts["rootfs.tar"], boot)
             subprocess.run(["bash", str(source / "lib/parity-check.sh"), str(mount)],
                            check=True, env=env, timeout=300, stdout=subprocess.DEVNULL)
-            lock = json.loads(artifacts["packages.lock.json"].read_text())
+            lock = json.loads(read_input(artifacts["packages.lock.json"]))
             parser = runpy.run_path(str(source / "lib/packages-lock.py"))["installed_packages"]
             installed = parser(mount / "var/lib/dpkg/status")
             if sorted((row["name"], row["version"], row["arch"]) for row in installed) != sorted(

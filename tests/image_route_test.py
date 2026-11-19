@@ -12,7 +12,7 @@ import pathlib
 import sys
 import tempfile
 import tarfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -321,6 +321,76 @@ def test_copy_reads_and_writes_survive_transient_errors() -> None:
                     assert (actual, reached) == (baseline, calls), (name, index, error)
             writes = [(name, index) for index, (name, _, _) in enumerate(calls) if name == "write"]
             run_fault((*writes[-1], errno.EIO), persistent=True)
+
+
+def test_guest_import_retries_archive_reads_and_preserves_object_hashes() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        archive_path = root / "input.tar"
+        bundle = bytes(range(256)) * 2561 + b"tail"
+        trust = b"synthetic public trust"
+        objects = {hashlib.sha256(data).hexdigest(): data for data in (bundle, trust)}
+        source_id, root_id = objects
+        inventory = {"schema": 1, "source_commit": IDENTITY.commit, "epoch": IDENTITY.epoch,
+                     "board": IDENTITY.board, "source_bundle": source_id, "device_root": root_id,
+                     "fetched_at": "2020-01-01T00:00:00Z", "repositories": {}, "objects": [
+                         {"sha256": digest, "length": len(data), "kind": kind, "urls": []}
+                         for (digest, data), kind in zip(objects.items(), ("source-bundle", "public-trust"))]}
+        with tarfile.open(archive_path, "w:") as archive:
+            for name, data in (("inventory.json", json.dumps(inventory).encode()),
+                               *((f"objects/{digest}", data) for digest, data in objects.items())):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        original = archive_path.read_bytes()
+        identity = replace(IDENTITY, input_sha256=hashlib.sha256(original).hexdigest())
+        pread = os.pread
+        sites = []
+
+        def run(site=None, error=errno.EIO, count=0):
+            seen = []
+            remaining = count
+            positions = []
+
+            def read_at(fd, size, offset):
+                nonlocal remaining
+                assert os.readlink(f"/proc/self/fd/{fd}") == str(archive_path)
+                if len(seen) == site and remaining:
+                    remaining -= 1
+                    positions.append(offset)
+                    raise OSError(error, "fixture capsule read")
+                seen.append(offset)
+                return pread(fd, min(size, 65535), offset)
+
+            with tempfile.TemporaryDirectory(dir=root) as attempt, patch.object(os, "pread", read_at):
+                target = pathlib.Path(attempt) / "objects"
+                if count == 3:
+                    try:
+                        unpack(archive_path, target, identity)
+                    except OSError as exc:
+                        assert exc.errno == error
+                    else:
+                        raise AssertionError("exhausted capsule read accepted")
+                else:
+                    assert unpack(archive_path, target, identity).source_bundle == source_id
+                    assert {digest: (target / digest).read_bytes() for digest in objects} == objects
+            assert remaining == 0 and positions == ([] if site is None else [sites[site]] * count)
+            return seen
+
+        sites = run()
+        assert sites.count(0) >= 2, sites  # The archive is rewound after the transport hash.
+        for site in range(len(sites)):
+            for error in (errno.EIO, errno.EINTR, errno.EAGAIN):
+                for count in (1, 2):
+                    assert run(site, error, count) == sites
+            run(site, count=3)
+        archive_path.write_bytes(original.replace(bundle, bytes(len(bundle))))
+        try:
+            unpack(archive_path, root / "rejected", identity)
+        except StreamError as exc:
+            assert "transport digest mismatch" in str(exc)
+        else:
+            raise AssertionError("tampered capsule accepted")
 
 
 def test_slot_comparison_rejects_changed_bytes_extra_files_and_root_metadata() -> None:

@@ -778,7 +778,18 @@ The launcher holds the flock through all of these steps:
 
 Every receipt is written to a mode-0600 temporary file in its own directory,
 file-synced after the unbuffered writes, atomically renamed into place, and followed by a
-directory sync. The final marker's **rename is the commit point**. A
+directory sync. A regular-file sync error can report lost writeback even
+when a later sync would return zero. The launcher never retries sync on a
+failed file descriptor. For EIO, ENOSPC, or EDQUOT it makes one fresh file,
+rewrites the prepared receipt bytes, and syncs the new inode before rename.
+Decoded artifacts replay from the captured envelope and recheck their member
+digest. Staging captures replay only if the bytes match the digest accumulated
+as the launcher read the guest pipe and the additional disk space is available.
+An exhausted required sync rejects the attempt. Teardown records the storage
+error when it can still be written. Unsupported sync errors continue to report
+`durability=unsupported`.
+
+The final marker's **rename is the commit point**. A
 publication failure before that rename leaves the marker absent and exits
 nonzero. Consumers treat a missing marker as failure. Cancellation before
 the final rename transaction produces a marker with `stop_reason` set to
@@ -820,6 +831,15 @@ orderly exit contract.
 After forced death, the next admission reconciles the exact owned overlay
 inode and process identities. A remaining holder blocks admission; no foreign
 process is killed. Forced destruction never claims that guest cleanup ran.
+The launcher completes the private-store inventory before starting an image
+helper or guest. It restarts the entire scan on EINTR or EAGAIN, up to three
+attempts. An incomplete scan refuses admission. Only a complete scan with a
+matching committed marker can account for a finished board.
+
+The guest checks the capsule transport SHA-256, then rewinds the same open
+input for tar parsing. Archive headers and members use positioned reads that
+retry at the failed byte offset. Each object still has to match its inventory
+length and SHA-256.
 
 The unchanged `ceralive-apt-credentials` package stays in the guest and returned
 rootfs/slots. Its shared `client-cf` identity is owner-accepted. **There is no

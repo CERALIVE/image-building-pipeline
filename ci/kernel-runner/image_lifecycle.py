@@ -6,6 +6,7 @@ from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
 import ctypes
 import errno
+import hashlib
 from functools import partial
 from io import FileIO, StringIO
 import json
@@ -23,8 +24,9 @@ import uuid
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
 from image_stream import (
-    CONTROL_LOG_LIMIT, IO_ATTEMPTS, ExclusiveFile, Identity, StreamError, create_file, report_error, retry_io,
-    sync_file, write_all,
+    CONTROL_LOG_LIMIT, IO_ATTEMPTS, WRITEBACK_ERRORS, ExclusiveFile, FileSyncError, Identity, Member,
+    StreamError, can_rewrite, create_file, list_directory, positioned_open, report_error, retry_io, rewrite_file, sync_file,
+    transfer, write_all,
 )
 from vm_process import (
     POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
@@ -79,7 +81,7 @@ def sync_directory(path: Path) -> None:
     fd = None
     try:
         fd = retry_io(os.open, path, os.O_DIRECTORY, recover=True)
-        sync_file(fd)
+        sync_file(fd, directory=True)
     finally:
         if fd is not None:
             try:
@@ -117,6 +119,7 @@ class Receipt:
         self.temporary = temporary or receipt_temporary(path)
         self.status = row["launcher_exit"] if outcome is not None else None
         self.file_fd: int | None = None  # -1 means the temporary is ours and closed.
+        self.payload: tuple[bytes, ...] = ()
         self.probe = probe
         self.directory_fd: int | None = None
         self.renamed = False
@@ -139,22 +142,45 @@ class Receipt:
             with StringIO() as text:
                 json.dump(self.row, text, sort_keys=True, indent=2)
                 text.write("\n")
-                write_all(fd, text.getvalue().encode("utf-8"))
-            return
-        # Encode the authoritative fields before trying optional diagnostics.
-        # On an encoding fault, both fragments are already available as bytes.
-        outcome = json.dumps(self.row, sort_keys=True, indent=2)[:-2].encode("ascii")
-        fields = self.probe.fallback_fields
-        try:
-            fields = encode_diagnostic_fields(self.probe.diagnostic_summary())
-        except Exception:
-            pass
-        write_all(fd, outcome)
-        write_all(fd, fields)
+                self.payload = (text.getvalue().encode("utf-8"),)
+        else:
+            # Encode the authoritative fields before trying optional diagnostics.
+            outcome = json.dumps(self.row, sort_keys=True, indent=2)[:-2].encode("ascii")
+            fields = self.probe.fallback_fields
+            try:
+                fields = encode_diagnostic_fields(self.probe.diagnostic_summary())
+            except Exception:
+                pass
+            self.payload = (outcome, fields)
+        self._write_payload(fd)
+
+    def _write_payload(self, fd: int) -> None:
+        for fragment in self.payload:
+            write_all(fd, fragment)
 
     def file_sync(self) -> None:
-        assert self.file_fd is not None and self.file_fd >= 0
-        sync_file(self.file_fd)
+        attempts = IO_ATTEMPTS
+        for attempt in range(IO_ATTEMPTS):
+            assert self.file_fd is not None and self.file_fd >= 0
+            try:
+                sync_file(self.file_fd)
+                return
+            except FileSyncError as error:
+                if error.errno in WRITEBACK_ERRORS:
+                    attempts = min(attempts, 2)
+                if not can_rewrite(error) or attempt + 1 >= attempts:
+                    raise
+                # Keep the failed inode linked until the fresh inode exists.
+                # This also prevents inode-number reuse across the two writes.
+                fresh = receipt_temporary(self.path)
+                with ExclusiveFile(fresh) as output:
+                    output.open()
+                    fd = output.fileno()
+                    self._write_payload(fd)
+                    self.file_close()
+                    self.temp_cleanup()
+                    self.temporary, self.file_fd = fresh, fd
+                    output.fd = None  # Receipt now owns the uncommitted file.
 
     def file_close(self) -> None:
         fd = self.file_fd
@@ -195,7 +221,7 @@ class Receipt:
 
     def dir_sync(self) -> None:
         if self.directory_fd is not None:
-            sync_file(self.directory_fd, recover=self.outcome is None)
+            sync_file(self.directory_fd, directory=True, recover=self.outcome is None)
 
     def dir_close(self) -> None:
         if self.directory_fd is not None:
@@ -254,32 +280,34 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
 
 def reconcile(store: Path) -> None:
     active = store / "active.json"
-    if not active.exists():
+    if active.name not in list_directory(store):
         return
+    if not stat.S_ISREG(active.lstat().st_mode):
+        raise AdmissionError("active journal is not a regular file")
     row = json.loads(active.read_text())
     for key in ("launcher", "qemu"):
         if key not in row:
             continue
         pid = int(row[key].split(":")[0])
-        try:
-            current = process_identity(pid)
-            status = (Path("/proc") / str(pid) / "stat").read_text()
-        except FileNotFoundError:
+        process = Path("/proc") / str(pid)
+        status = proc_if_present(process, (process / "stat").read_text)
+        if status is None:
             continue
+        current = f"{pid}:{status[status.rindex(')') + 2:].split()[19]}"
         if current == row[key] and status[status.rindex(")") + 2:].split()[0] != "Z":
             raise AdmissionError(f"previous owned {key} still running: {row[key]}")
     owned = tuple(row["overlay_inode"])
-    for process in Path("/proc").iterdir():
-        if not process.name.isdecimal():
+    for pid in list_directory(Path("/proc")):
+        if not pid.isdecimal():
             continue
-        try:
-            descriptors = list((process / "fd").iterdir())
-        except (FileNotFoundError, PermissionError):
+        process = Path("/proc") / pid
+        descriptors = proc_if_present(process, lambda: list_directory(process / "fd"), process=process)
+        if descriptors is None:
             continue
-        for descriptor in descriptors:
-            try:
-                info = descriptor.stat()
-            except (FileNotFoundError, PermissionError):
+        for number in descriptors:
+            descriptor = process / "fd" / number
+            info = proc_if_present(descriptor, descriptor.stat, process=process)
+            if info is None:
                 continue
             if (info.st_dev, info.st_ino) == owned:
                 raise AdmissionError(f"previous owned overlay still held by {descriptor}")
@@ -289,6 +317,35 @@ def reconcile(store: Path) -> None:
     })
     retry_io(active.unlink, missing_ok=True, recover=True)
     sync_directory(store)
+
+
+def proc_if_present(path: Path, operation, *, process: Path | None = None):
+    """Distinguish a disappearing proc entry from an incomplete owned scan."""
+    try:
+        return operation()
+    except FileNotFoundError:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        try:
+            return operation()
+        except FileNotFoundError:
+            if path.parent.name == "fd":
+                # A procfs FD symlink can outlive its referent.
+                return None
+            raise
+    except PermissionError as error:
+        if process is None or error.errno != errno.EACCES:
+            raise
+        try:
+            return operation()
+        except PermissionError as denied:
+            if denied.errno != errno.EACCES:
+                raise
+            # procfs denies unrelated processes under ptrace policy. The
+            # journal's specific launcher and QEMU PIDs were checked above.
+            return None
 
 
 def retire_journal(cancellation: Cancellation) -> None:
@@ -426,14 +483,18 @@ class ImageJob:
 
     def __exit__(self, _type, error, _traceback) -> None:
         containment_unknown = isinstance(error, ChildContainmentError)
+        sync_error = None
         try:
             # Attempt every descriptor close even if an earlier close or sync fails.
-            with self.outputs:
-                try:
-                    self.capture_scope.close()
-                finally:
-                    self.inputs.close()
-                self.state["input_descriptor_closed"] = True
+            try:
+                with self.outputs:
+                    try:
+                        self.capture_scope.close()
+                    finally:
+                        self.inputs.close()
+                    self.state["input_descriptor_closed"] = True
+            except FileSyncError as exc:
+                sync_error = error = exc
             if not containment_unknown:
                 try:
                     self.state["ended_at"] = time.time()
@@ -441,7 +502,12 @@ class ImageJob:
                     pass  # The preallocated null timestamp records unavailable timing.
                 if error is not None:
                     self.state["stop_reason"] = type(error).__name__
+                    cause = error if isinstance(error, FileSyncError) else error.__cause__
+                    if isinstance(cause, FileSyncError):
+                        self.state["storage_errno"] = cause.errno
                 receipt(self.teardown, self.state, temporary=self.teardown_temporary)
+            if sync_error is not None:
+                raise sync_error
         finally:
             # A failed receipt must not pin a safely closed attempt in the journal.
             if (not containment_unknown and self.state["overlay_descriptor_closed"]
@@ -544,11 +610,14 @@ class ImageJob:
             self.probe_events = events
         on_loss = self.lose_diagnostics if self.probe else None
         self.capture_counts = {"stream": 0, "console": 0, "diagnostic": 0}
+        self.capture_hashes = {}
         self.capture_files = {}
         for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
             output = self._open_log(self.directory / (name + ".partial"))
+            digest = hashlib.sha256()
+            self.capture_hashes[name] = digest
             register_close(self.outputs, name + "-capture", output.close, on_loss,
-                           before_close=partial(sync_output, output))
+                           before_close=partial(sync_output, output, digest, self.cancellation.check))
             output.open()
             self.capture_files[name] = output
 
@@ -639,6 +708,7 @@ class ImageJob:
                                 or counts["console"] + counts["diagnostic"] > CONTROL_LOG_LIMIT):
                             raise StreamError("image return stream or log budget exceeded")
                         files[name].write(chunk)
+                        self.capture_hashes[name].update(chunk)
                     # Fixed caps bound growth between these observations.
                     overlay = Path(f"/proc/self/fd/{self.state['overlay_fd']}")
                     remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
@@ -654,9 +724,23 @@ class ImageJob:
                 self.state["stream_bytes"] = counts["stream"]
 
 
-def sync_output(output) -> None:
+def sync_output(output: ExclusiveFile, digest, checkpoint: Callable[[], None]) -> None:
     """Sync output only after the child has been stopped and reaped."""
     if output.fileno() < 0:
         return
     retry_io(output.flush, recover=True)
-    sync_file(output.fileno())
+    try:
+        sync_file(output.fileno())
+    except FileSyncError as error:
+        if not can_rewrite(error):
+            raise
+        info = retry_io(os.fstat, output.fileno(), recover=True)
+        disk_headroom(((output.path.parent, info.st_size),))
+        member = Member(output.path.name, info.st_size, digest.hexdigest())
+        with positioned_open(output.path) as source:
+            def replay(fd: int) -> None:
+                transfer(source, fd, member, checkpoint, decoding=True)
+                if source.read(1):
+                    raise StreamError("capture length changed during sync recovery")
+
+            rewrite_file(output.path, replay)

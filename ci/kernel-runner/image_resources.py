@@ -10,6 +10,7 @@ from pathlib import Path
 import resource
 from typing import Final, TypedDict
 
+from image_stream import list_directory
 from vm_process import Cancellation
 
 GIB: Final = 1024**3
@@ -82,20 +83,18 @@ def cgroup_limits(pid: int | str) -> int:
     swaps = []
     weights = []
     for path in roots:
+        fields = set(list_directory(path))
         for field, values in (("memory.max", memory), ("memory.swap.max", swaps)):
-            file = path / field
-            if file.is_file():
-                value = file.read_text().strip()
+            if field in fields:
+                value = (path / field).read_text().strip()
                 if value != "max":
                     values.append(int(value))
-        cpu = path / "cpu.max"
-        if cpu.is_file():
-            quota, period = cpu.read_text().split()
+        if "cpu.max" in fields:
+            quota, period = (path / "cpu.max").read_text().split()
             if quota != "max":
                 quotas.append(int(quota) / int(period))
-        io = path / "io.weight"
-        if io.is_file():
-            for line in io.read_text().splitlines():
+        if "io.weight" in fields:
+            for line in (path / "io.weight").read_text().splitlines():
                 if line.startswith("default "):
                     weights.append(int(line.split()[1]))
     if not memory or min(memory) != CAPS.memory_max:
@@ -107,7 +106,11 @@ def cgroup_limits(pid: int | str) -> int:
     if not weights or min(weights) > 10:
         raise AdmissionError("image profile needs effective IOWeight <= 10")
     cpu_weight = group / "cpu.weight"
-    if not cpu_weight.is_file() or not 1 <= (weight := int(cpu_weight.read_text())) <= MAX_CPU_WEIGHT:
+    try:
+        weight = int(cpu_weight.read_text())
+    except FileNotFoundError as error:
+        raise AdmissionError("image profile could not verify its CPU weight") from error
+    if not 1 <= weight <= MAX_CPU_WEIGHT:
         raise AdmissionError(f"image profile needs CPUWeight <= {MAX_CPU_WEIGHT} on its cgroup")
     return weight
 

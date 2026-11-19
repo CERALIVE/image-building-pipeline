@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+import errno
 import hashlib
 import json
 import os
@@ -26,7 +27,9 @@ from image_lifecycle import (
 )
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
-from image_stream import Identity, StreamError, decode, positioned_open, retry_io, verify_sidecar
+from image_stream import (
+    IO_ATTEMPTS, FileSyncError, Identity, StreamError, decode, list_directory, positioned_open, retry_io, verify_sidecar,
+)
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, MemoryError, AdmissionError,
@@ -60,7 +63,8 @@ def validate_base(base: Path, expected_sha256: str,
                   cancellation: Cancellation | None = None) -> None:
     """Require the selected immutable base to reference no additional host file."""
     cancellation = cancellation or Cancellation()
-    if (base.is_symlink() or not base.is_file() or base.stat().st_mode & 0o222
+    mode = base.lstat().st_mode
+    if (not stat.S_ISREG(mode) or mode & 0o222
             or digest_file(base, cancellation.check) != expected_sha256):
         raise AdmissionError("image base must be independently verified and read-only")
     info = run(["qemu-img", "info", "--output=json", str(base.absolute())],
@@ -72,16 +76,26 @@ def validate_base(base: Path, expected_sha256: str,
             or specific.get("data-file-raw") or specific.get("corrupt")):
         raise AdmissionError("image profile requires a dedicated unbacked 128 GiB base")
 
-def completed_acceptance(path: Path) -> dict | None:
+def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict | None:
     """Validate the final marker before consuming a pair's acceptance candidate."""
+    if entries is not None and "exit.json" not in entries:
+        return None
+    marker_path = path.parent / "exit.json"
+    if entries is not None and not stat.S_ISREG(marker_path.lstat().st_mode):
+        raise AdmissionError("private pair marker is not a regular file")
     try:
-        marker = json.loads(retry_io((path.parent / "exit.json").read_text, recover=True))
+        marker = json.loads(marker_path.read_text() if entries is not None else
+                            retry_io(marker_path.read_text, recover=True))
     except FileNotFoundError:
+        if entries is not None:
+            raise
         return None
     if (marker["schema"] != 1 or type(marker["launcher_exit"]) is not int
             or marker["launcher_exit"] != 0 or marker.get("pair_complete") is not True):
         return None
-    raw = retry_io(path.read_bytes, recover=True)
+    if entries is not None and not stat.S_ISREG(path.lstat().st_mode):
+        raise AdmissionError("private pair acceptance is not a regular file")
+    raw = path.read_bytes() if entries is not None else retry_io(path.read_bytes, recover=True)
     row = json.loads(raw)
     if (marker["acceptance_sha256"] != hashlib.sha256(raw).hexdigest()
             or marker["identity"] != row["identity"] or row["schema"] != 1
@@ -92,10 +106,27 @@ def completed_acceptance(path: Path) -> dict | None:
 
 def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
     """Only a verified other board reduces the remaining pair allocation."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            return scan_retained_outputs(store, identity, trust_identity)
+        except OSError as error:
+            if error.errno not in (errno.EINTR, errno.EAGAIN) or attempt + 1 == IO_ATTEMPTS:
+                raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
+
+
+def scan_retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
     retained = 0
     boards = set()
-    for accepted in store.glob("*/acceptance.json"):
-        row = completed_acceptance(accepted)
+    for name in list_directory(store):
+        attempt = store / name
+        mode = attempt.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise AdmissionError("private output store contains a symbolic link")
+        if not stat.S_ISDIR(mode):
+            continue
+        names = set(list_directory(attempt))
+        accepted = attempt / "acceptance.json"
+        row = completed_acceptance(accepted, entries=names)
         if row is None:
             continue
         previous = Identity(**row["identity"])
@@ -105,10 +136,13 @@ def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str,
         if previous.board == identity.board or previous.board in boards:
             raise AdmissionError("private pair already contains this board; select a new reviewed store")
         boards.add(previous.board)
-        for file in (accepted.parent / "build/artifacts").iterdir():
-            if file.is_symlink() or not file.is_file():
+        artifacts = accepted.parent / "build/artifacts"
+        for name in list_directory(artifacts):
+            file = artifacts / name
+            info = file.lstat()
+            if not stat.S_ISREG(info.st_mode):
                 raise AdmissionError("retained pair contains an unexpected object")
-            retained += file.stat().st_blocks * 512
+            retained += info.st_blocks * 512
     return retained
 
 def validate_return(job: ImageJob, verifier: bool) -> None:
@@ -253,6 +287,13 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             if retry_commit and allocation_fault:
                 retry_commit = False
                 continue
+            if isinstance(build, ImageJob) and isinstance(exc.__cause__, FileSyncError):
+                try:
+                    receipt(build.teardown, build.state | {"stop_reason": "receipt fsync failed",
+                                                           "storage_errno": exc.__cause__.errno},
+                            temporary=build.teardown_temporary)
+                except (OSError, MemoryError) as teardown_error:
+                    report_error(teardown_error)
             report_error(exc)
             return 1
 
@@ -277,21 +318,39 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     cgroup_admission()
     identity = Identity(args.attempt, args.board, args.source_commit, args.source_epoch,
                         args.input_sha256)
-    validate_base(args.base, args.base_sha256, cancellation)
-    base = args.base.resolve()
-    if (args.input_capsule.is_symlink() or not stat.S_ISREG(args.input_capsule.stat().st_mode)
-            or args.input_capsule.stat().st_size > INPUT_LIMIT
+    base = args.base.resolve(strict=True)
+    input_info = args.input_capsule.lstat()
+    if (not stat.S_ISREG(input_info.st_mode)
+            or input_info.st_size > INPUT_LIMIT
             or digest_file(args.input_capsule, cancellation.check) != identity.input_sha256):
         raise AdmissionError("input capsule transport identity mismatch")
-    store = args.output_dir.resolve()
-    create_directory(store, parents=True)
+    store = args.output_dir.absolute()
+    try:
+        store_info = store.stat()
+    except FileNotFoundError:
+        # Confirm absence before taking the no-store path, which can spawn
+        # qemu-img without checking for a recorded duplicate.
+        try:
+            store_info = store.stat()
+        except FileNotFoundError:
+            store_info = None
+    if store_info is None:
+        validate_base(args.base, args.base_sha256, cancellation)
+        create_directory(store, parents=True)
+        store_info = store.stat()
+        base_checked = True
+    else:
+        base_checked = False
     cancellation.check()
-    if store.stat().st_uid != os.getuid() or store.stat().st_mode & 0o077:
+    if not stat.S_ISDIR(store_info.st_mode) or store_info.st_uid != os.getuid() or store_info.st_mode & 0o077:
         raise AdmissionError("image return store must be owned by the launcher and mode 0700")
+    store = store.resolve(strict=True)
     reconcile(store)
     trust = asdict(load_policy(args.trust_policy))
     retained = retained_outputs(store, identity, (args.base_sha256, trust["root_der_sha256"]))
     disk_admission(base.parent, store, retained)
+    if not base_checked:
+        validate_base(args.base, args.base_sha256, cancellation)
     directory = store / identity.attempt
     create_directory(directory)
     probe = args.image_mode == "probe"
@@ -320,7 +379,7 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     request = {"capsule": capsule, "base_sha256": args.base_sha256,
                "deadline": time.monotonic() + CAPS.verify_seconds,
                "retained_bytes": retained + capsule.stat().st_blocks * 512
-                   + sum(file.stat().st_blocks * 512 for file in artifacts.iterdir()),
+                   + sum((artifacts / name).stat().st_blocks * 512 for name in list_directory(artifacts)),
                "payload": {"schema": 1, "identity": asdict(verification), "operation": "verify",
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)

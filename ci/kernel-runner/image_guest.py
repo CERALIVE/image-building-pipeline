@@ -17,7 +17,9 @@ import time
 
 from image_capsule import Capsule, unpack
 from image_stages import StageLog, stage_marker
-from image_stream import BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode
+from image_stream import (
+    BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode, list_directory, positioned_open, read_input,
+)
 
 HOME = Path("/opt/ceralive-image-job")
 
@@ -76,9 +78,9 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     for field, variable in (("addon_public_object", "ADDON_KEYRING_B64"),
                             ("paseto_public_object", "PASETO_PUBLIC_KEY_B64")):
         if trust[field]:
-            env[variable] = __import__("base64").b64encode((directory / trust[field]).read_bytes()).decode()
+            env[variable] = __import__("base64").b64encode(read_input(directory / trust[field])).decode()
     env["APT_GPG_PUBLIC_B64"] = __import__("base64").b64encode(
-        (directory / trust["repositories"]["firstparty"]["keyring"]).read_bytes()).decode()
+        read_input(directory / trust["repositories"]["firstparty"]["keyring"])).decode()
     env["ARMBIAN_APT_KEYRING"] = str(directory / trust["repositories"]["bsp"]["keyring"])
     shutil.copyfile(directory / trust["repositories"]["debian-source"]["keyring"],
                     "/usr/share/keyrings/debian-archive-keyring.gpg")
@@ -162,7 +164,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     if (directory / "missing-object").exists():
         raise StreamError("guest requested an object absent from the sealed inventory")
     out = source / "images" / capsule.board
-    receipts = list(out.glob("*.measurement.json"))
+    receipts = [out / name for name in list_directory(out) if name.endswith(".measurement.json")]
     if len(receipts) != 1:
         raise StreamError("build did not emit exactly one measurement receipt")
     prefix = receipts[0].name.removesuffix(".measurement.json")
@@ -190,7 +192,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
 
 def main() -> int:
     raw = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw")
-    with raw.open("rb") as payload:
+    with positioned_open(raw) as payload:
         data = payload.read(1024 * 1024 + 1)
     if len(data) > 1024 * 1024:
         raise StreamError("oversized image job")

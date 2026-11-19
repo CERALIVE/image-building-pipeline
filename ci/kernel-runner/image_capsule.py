@@ -13,7 +13,7 @@ import stat
 import tarfile
 from typing import BinaryIO, Callable, Final
 
-from image_stream import ExclusiveFile, Identity, StreamError, positioned_open, retry_io, unique_object
+from image_stream import ExclusiveFile, Identity, StreamError, list_directory, positioned_open, retry_io, unique_object
 from image_urls import InputURLError, canonical_url
 
 INPUT_LIMIT: Final = 32 * 1024**3
@@ -67,10 +67,18 @@ def original_url(value: str) -> str:
 
 def unpack(capsule: Path, directory: Path, expected: Identity) -> Capsule:
     """Guest-only import; paths and archive link semantics never cross this boundary."""
-    if capsule.stat().st_size > INPUT_LIMIT or digest_file(capsule) != expected.input_sha256:
-        raise StreamError("input capsule length or transport digest mismatch")
+    with positioned_open(capsule, archive=True) as source:
+        if retry_io(os.fstat, source.fd, recover=True).st_size > INPUT_LIMIT:
+            raise StreamError("input capsule length or transport digest mismatch")
+        if hashlib.file_digest(source, "sha256").hexdigest() != expected.input_sha256:
+            raise StreamError("input capsule length or transport digest mismatch")
+        source.seek(0)
+        return unpack_archive(source, directory, expected)
+
+
+def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Capsule:
     retry_io(directory.mkdir, mode=0o700, recover=True)
-    with tarfile.open(capsule, "r:") as archive:
+    with tarfile.open(fileobj=source, mode="r:") as archive:
         entries = archive.getmembers()
         if (len(entries) > 20000 or len({entry.name for entry in entries}) != len(entries)
                 or any(not entry.isfile() or entry.issparse() for entry in entries)):
@@ -135,8 +143,9 @@ def unpack(capsule: Path, directory: Path, expected: Identity) -> Capsule:
     # Public repository trust is selected independently in the host job payload.
     # This document only describes deliveries; fetch/sealed.sh rechecks signatures.
     config = directory / "inventory.json"
-    config.write_text(json.dumps(row) + "\n")
-    config.chmod(0o400)
+    with ExclusiveFile(config, 0o400) as destination:
+        destination.open()
+        destination.write((json.dumps(row) + "\n").encode())
     return Capsule(row["source_commit"], row["epoch"], row["board"], tuple(objects),
                    row["source_bundle"], row["device_root"], directory, row["fetched_at"])
 
@@ -145,7 +154,7 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
                          checkpoint: Callable[[], None] | None = None) -> dict[str, str]:
     """Host packs only selected regular data; no pathname or extraction from the guest."""
     selected = {}
-    with positioned_open(original) as capsule, tarfile.open(fileobj=capsule, mode="r:") as source:
+    with positioned_open(original, archive=True) as capsule, tarfile.open(fileobj=capsule, mode="r:") as source:
         header = source.getmember("inventory.json")
         if not header.isfile() or header.size > 1024 * 1024:
             raise StreamError("oversized verification input inventory")
@@ -157,7 +166,8 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
         objects = {item["sha256"]: item for item in row["objects"]
                    if item["kind"] in ("source-bundle", "public-trust", "apt-metadata", "kernel-metadata")}
         files = {}
-        for file in retry_io(lambda: list(artifacts.iterdir()), recover=True):
+        for name in retry_io(list_directory, artifacts, recover=True):
+            file = artifacts / name
             info = retry_io(file.lstat, recover=True)
             if not stat.S_ISREG(info.st_mode):
                 raise StreamError("returned artifact is not a controller-owned regular file")

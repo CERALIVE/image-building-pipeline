@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 from dataclasses import asdict, dataclass
 import errno
 import hashlib
@@ -11,7 +12,9 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 from typing import BinaryIO, Callable, Final, Iterable, TypeAlias
+import uuid
 
 JSONValue: TypeAlias = str | bool | int | float | None | list["JSONValue"] | dict[str, "JSONValue"]
 
@@ -25,6 +28,13 @@ IO_ATTEMPTS: Final = 3
 RETRYABLE_IO: Final = frozenset((errno.EACCES, errno.EPERM, errno.EBUSY, errno.EIO, errno.ENOSPC,
                                errno.EBADF, errno.ENOSYS, errno.EAGAIN, errno.EDQUOT))
 UNSUPPORTED_SYNC: Final = frozenset((errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EROFS))
+WRITEBACK_ERRORS: Final = frozenset((errno.EIO, errno.ENOSPC, errno.EDQUOT))
+_FSYNC = ctypes.CDLL(None, use_errno=True).fsync
+_FSYNC.argtypes = (ctypes.c_int,)
+_FSYNC.restype = ctypes.c_int
+_GETDENTS = ctypes.CDLL(None, use_errno=True).getdents64
+_GETDENTS.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
+_GETDENTS.restype = ctypes.c_ssize_t
 ARTIFACTS: Final = frozenset((
     "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
     "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -66,18 +76,65 @@ def report_error(error: BaseException | str) -> None:
         if fd is not None:
             try:
                 os.close(fd)
-            except OSError:
+            except (OSError, MemoryError):
                 pass
 
 
-def sync_file(fd: int, *, recover: bool = True) -> None:
-    """Attempt durability, or report that the filesystem cannot provide it."""
+def list_directory(path: Path) -> list[str]:
+    """Return a complete Linux directory scan, preserving ENOENT from getdents."""
+    # glibc readdir treats an ENOENT from getdents as end of directory.
+    # A safety check must distinguish a dead directory from normal EOF.
+    buffer = ctypes.create_string_buffer(32 * 1024)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
+        names = []
+        while (length := _GETDENTS(fd, buffer, len(buffer))) > 0:
+            batch = buffer.raw[:length]
+            offset = 0
+            while offset < length:
+                record_size = struct.unpack_from("=H", batch, offset + 16)[0]
+                if record_size < 20 or offset + record_size > length:
+                    raise OSError(errno.EIO, "invalid getdents record", path)
+                name = batch[offset + 19:offset + record_size].split(b"\0", 1)[0]
+                if name not in (b".", b".."):
+                    names.append(os.fsdecode(name))
+                offset += record_size
+        if length < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), path)
+        return names
+    finally:
+        os.close(fd)
+
+
+class FileSyncError(OSError):
+    """The file may have lost data and cannot be synced again as recovery."""
+
+
+def sync_once(fd: int) -> None:
+    """Expose even EINTR so a regular file is never synced twice."""
+    if _FSYNC(fd) == -1:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def sync_file(fd: int, *, directory: bool = False, recover: bool = True) -> None:
+    """Sync regular files once. Directory syncing has no payload to replay."""
+    try:
+        if directory:
+            retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
+        else:
+            sync_once(fd)
     except OSError as error:
         if error.errno not in UNSUPPORTED_SYNC:
-            raise
+            if directory:
+                raise
+            raise FileSyncError(error.errno, f"fsync failed: {error}") from error
         report_error(f"durability=unsupported ({error})")
+
+
+def can_rewrite(error: FileSyncError) -> bool:
+    return error.errno in RETRYABLE_IO or error.errno == errno.EINTR
 
 
 class PositionedReader(RawIOBase):
@@ -109,19 +166,30 @@ class PositionedReader(RawIOBase):
         return self.offset
 
     def readinto(self, buffer) -> int:
-        data = retry_io(os.pread, self.fd, len(buffer), self.offset, recover=True)
-        buffer[:len(data)] = data
-        self.offset += len(data)
-        return len(data)
+        read = 0
+        while read < len(buffer):
+            data = retry_io(os.pread, self.fd, len(buffer) - read, self.offset + read, recover=True)
+            if not data:
+                break
+            buffer[read:read + len(data)] = data
+            read += len(data)
+        self.offset += read
+        return read
 
 
 @contextmanager
-def positioned_open(path: Path):
+def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = None,
+                    nofollow: bool = False):
     """Own a regular input while exposing buffered reads over retry-safe pread."""
     fd = None
     try:
-        fd = retry_io(os.open, path, os.O_RDONLY | os.O_CLOEXEC, recover=True)
-        with BufferedReader(PositionedReader(fd)) as stream:
+        flags = os.O_RDONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
+        if dir_fd is None:
+            fd = retry_io(os.open, path, flags, recover=True)
+        else:
+            fd = retry_io(os.open, path, flags, dir_fd=dir_fd, recover=True)
+        raw = PositionedReader(fd)
+        with (raw if archive else BufferedReader(raw)) as stream:
             yield stream
     finally:
         if fd is not None:
@@ -142,6 +210,12 @@ def write_all(destination: BinaryIO | int, data: bytes) -> None:
         if not written:
             raise OSError(errno.EIO, "file write made no progress")
         remaining = remaining[written:]
+
+
+def read_input(path: Path) -> bytes:
+    """Read a small seekable input using the same raw retry boundary."""
+    with positioned_open(path) as source:
+        return source.read()
 
 
 def create_file(path: Path, mode: int = 0o600) -> int:
@@ -197,6 +271,16 @@ class ExclusiveFile:
                 raise
             else:
                 self.fd = -1
+
+
+def rewrite_file(path: Path, replay: Callable[[int], None]) -> None:
+    """Replace an already-owned name only after a fresh inode has been synced."""
+    temporary = path.with_name(f".rewrite-{path.name}-" + retry_io(uuid.uuid4, recover=True).hex)
+    with ExclusiveFile(temporary) as output:
+        output.open()
+        replay(output.fileno())
+        sync_file(output.fileno())
+        retry_io(os.replace, temporary, path, recover=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,11 +407,19 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
         if member.id == "rootfs.tar" and member.length > 3_500_000_000:
             raise StreamError("rootfs tar exceeds unchanged size ceiling")
         seen.add(member.id)
-        with ExclusiveFile(directory / member.id) as output:
+        start = source.tell()
+        path = directory / member.id
+        with ExclusiveFile(path) as output:
             output.open()
             fd = output.fileno()
             transfer(source, fd, member, checkpoint, decoding=True)
-            sync_file(fd)
+            try:
+                sync_file(fd)
+            except FileSyncError as error:
+                if not can_rewrite(error):
+                    raise
+                source.seek(start)
+                rewrite_file(path, lambda fresh: transfer(source, fresh, member, checkpoint, decoding=True))
         members.append(member)
 
 

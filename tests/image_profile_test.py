@@ -25,6 +25,7 @@ import runpy
 import select
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -647,7 +648,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         for location, stage in ((root, "parent-sync"), (directory / "stream.partial", "capture-sync"),
                                 (directory / "artifacts/verification.json", "artifact-sync"),
                                 (directory / "artifacts", "artifact-dir-sync")):
-            if path == location:
+            if path == location or path.parent == location.parent and path.name.startswith(f".rewrite-{location.name}-"):
                 tail_fault(stage)
                 fault_at(stage)
         final = (terminal_entered and path == directory.parent and pair
@@ -1593,7 +1594,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                          else checked_exit if check_descriptors else real_exit),
             patch.object(os, "replace", publish),
             patch.object(signal, "pthread_sigmask", mask),
-            patch.object(os, "fsync", sync),
+             patch.object(os, "fsync", sync), patch("image_stream.sync_once", sync),
             patch.object(pathlib.Path, "unlink", remove),
             patch.object(tempfile, "TemporaryFile", overlay),
             patch.object(pathlib.Path, "read_text", read_result),
@@ -2006,7 +2007,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
         if mode.startswith("tail-io:"):
             point, error, count, *_ = mode.removeprefix("tail-io:").split("/")
             marker = directory / "exit.json"
-            required_exhaustion = point in {"verification-read", "exit-file-fsync"} and int(count) == 3
+            required_exhaustion = (point in {"verification-read", "exit-file-fsync"} and int(count) == 3
+                                   or point == "exit-file-fsync" and int(count) == 2
+                                   and error in {"EIO", "ENOSPC", "EDQUOT"})
             required_memory_fault = error == "MemoryError" and (
                 point == "verification-read" or point.startswith(("teardown-", "validation-")))
             checkpoint_cancelled = mode == "tail-io:exit-mask/EINTR/0/checkpoint"
@@ -2037,7 +2040,9 @@ os.execvp(sys.argv[1], sys.argv[1:])
             if point.endswith("-allocation") or int(count) == 0:
                 assert not (root / "tail-fault-count").exists(), (mode, stderr)
             else:
-                assert int((root / "tail-fault-count").read_text()) == int(count), (mode, stderr)
+                expected_count = (2 if point == "exit-file-fsync" and error in {"EIO", "ENOSPC", "EDQUOT"}
+                                  and required_exhaustion else int(count))
+                assert int((root / "tail-fault-count").read_text()) == expected_count, (mode, stderr)
             active = root / "returns/active.json"
             if point == "journal-unlink" and int(count) == 3:
                 assert active.exists() and b"journal_removed=false" in stderr
@@ -2975,6 +2980,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
                      "sum", "time.monotonic", "time.time", "wait"}
     capture_exact = (
         "files[name].write(chunk)", "self.read_console(event.fd)",
+        "self.capture_hashes[name].update(chunk)",
         "events.unregister(event.fileobj)", "events.unregister(event.fileobj)",
         "self.probe_events.unregister(self.console_read)",
         "self.drain(events)", "close_transport(self.console_writer.close, on_loss)",
@@ -3015,6 +3021,10 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         "hashlib.sha256(retry_io(acceptance[0].read_bytes, recover=True)).hexdigest()",
         "hashlib.sha256(retry_io(acceptance[0].read_bytes, recover=True))",
         "retry_io(acceptance[0].read_bytes, recover=True)",
+        "isinstance(build, ImageJob)",
+        "isinstance(exc.__cause__, FileSyncError)",
+        "receipt(build.teardown, build.state | {'stop_reason': 'receipt fsync failed', "
+        "'storage_errno': exc.__cause__.errno}, temporary=build.teardown_temporary)",
     }
     assert not (bad := unexpected(node_for(image_vm, "run_image"), run_calls, run_exact)), bad
 
@@ -3391,6 +3401,42 @@ def test_unsupported_durability_preserves_published_outcome() -> None:
             assert row == baseline, (path, error, baseline, row)
     for error in ("EIO", "ENOSPC", "EDQUOT"):
         assert cancelled_fixture(f"tail-io:exit-file-fsync/{error}/3") is None
+        assert cancelled_fixture(f"tail-io:exit-file-fsync/{error}/2") is None
+
+
+def test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode() -> None:
+    fsync = os.fsync
+    for error in (errno.EIO, errno.ENOSPC, errno.EDQUOT):
+        for failures in (1, 2):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                marker = root / "exit.json"
+                row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
+                attempts = []
+
+                def lose_writeback(fd):
+                    info = os.fstat(fd)
+                    if stat.S_ISDIR(info.st_mode):
+                        return fsync(fd)
+                    attempts.append((info.st_ino, pathlib.Path(f"/proc/self/fd/{fd}").read_bytes()))
+                    if len(attempts) <= failures:
+                        os.ftruncate(fd, 0)
+                        raise OSError(error, "modeled writeback loss")
+                    return fsync(fd)
+
+                with patch("image_stream.sync_once", lose_writeback):
+                    try:
+                        image_lifecycle.receipt(marker, row)
+                    except image_lifecycle.ReceiptError as exc:
+                        assert failures == 2 and exc.__cause__.errno == error
+                    else:
+                        assert failures == 1
+                assert len(attempts) == 2 and attempts[0][0] != attempts[1][0]
+                assert attempts[0][1] == attempts[1][1]
+                assert json.loads(attempts[1][1]) == row
+                assert list(root.iterdir()) == ([marker] if failures == 1 else [])
+                if failures == 1:
+                    assert marker.read_bytes() == attempts[1][1]
 
 
 def test_attempt_preparation_and_journal_survive_transient_io() -> None:
@@ -3605,7 +3651,8 @@ def test_pair_publication_failure_and_signal_matrix() -> None:
                         with patch.object(image_vm, "measure_image", measure), \
                                 patch.object(image_vm, "receipt", publish), \
                                 patch.object(os, "open", open_file), patch.object(json, "dump", dump), \
-                                patch.object(os, "fsync", sync), patch.object(os, "replace", replace_file):
+                                 patch.object(os, "fsync", sync), patch("image_stream.sync_once", sync), \
+                                 patch.object(os, "replace", replace_file):
                             with fixture_signal_mask():
                                 status = image_vm.run_image(SimpleNamespace(image_mode="measure"), None, cancellation)
                     finally:
@@ -3926,8 +3973,14 @@ def test_image_admission_requires_effective_cgroup_caps() -> None:
         snapshot = files.copy()
         if field:
             snapshot["/sys/fs/cgroup/image/" + field] = invalid
-        with patch.object(pathlib.Path, "read_text", lambda path: snapshot[str(path)]), \
-                patch.object(pathlib.Path, "is_file", lambda path: str(path) in snapshot), \
+        def read_text(path):
+            if str(path) not in snapshot:
+                raise FileNotFoundError(path)
+            return snapshot[str(path)]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
+                patch.object(image_resources, "list_directory", lambda path: [p.name for key in snapshot
+                             if (p := pathlib.Path(key)).parent == path]), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
                 patch.object(image_resources.os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
                 patch.object(image_resources.os, "getpriority", return_value=10):
@@ -3955,8 +4008,14 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
                                     (9, "memory.swap.max", False)):
         snapshot = {path: value for path, value in files.items()
                     if pathlib.Path(path).name != missing}
-        with patch.object(pathlib.Path, "read_text", lambda path: snapshot[str(path)]), \
-                patch.object(pathlib.Path, "is_file", lambda path: str(path) in snapshot), \
+        def read_text(path):
+            if str(path) not in snapshot:
+                raise FileNotFoundError(path)
+            return snapshot[str(path)]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
+                patch.object(image_resources, "list_directory", lambda path: [p.name for key in snapshot
+                             if (p := pathlib.Path(key)).parent == path]), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
                 patch.object(image_resources.os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
                 patch.object(image_resources.os, "getpriority", return_value=nice):
@@ -4037,6 +4096,64 @@ def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
             "acceptance_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
         }))
         assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == allocated
+
+
+def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        store = root / "returns"
+        prior = store / "previous"
+        prior.mkdir(parents=True, mode=0o700)
+        store.chmod(0o700)
+        (store / "unfinished").mkdir()
+        base, capsule = root / "base", root / "input"
+        base.write_bytes(b"base")
+        capsule.write_bytes(b"capsule")
+        digest = hashlib.sha256(b"capsule").hexdigest()
+        args = SimpleNamespace(image_mode="probe", base=base, input_capsule=capsule, input_sha256=digest,
+                               base_sha256="c" * 64, trust_policy=root / "policy", output_dir=store,
+                               attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                               source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None, group_id=None)
+        identity = asdict(replace(IDENTITY, attempt="previous", input_sha256=digest))
+        acceptance = json.dumps({"schema": 1, "identity": identity, "content_verified": True,
+                                 "base_sha256": "c" * 64, "public_root_der_sha256": "d" * 64}).encode()
+        (prior / "acceptance.json").write_bytes(acceptance)
+        (prior / "exit.json").write_text(json.dumps({"schema": 1, "launcher_exit": 0, "pair_complete": True,
+                                                    "identity": identity,
+                                                    "acceptance_sha256": hashlib.sha256(acceptance).hexdigest()}))
+        listdir = os.listdir
+
+        for error in (errno.EIO, errno.EINTR, errno.EAGAIN, errno.EPERM, errno.ENOENT):
+            for failures in (1, 3):
+                scans = 0
+                injected = 0
+                diagnostics = []
+
+                def scan(path):
+                    nonlocal scans, injected
+                    if path == store:
+                        scans += 1
+                        return ["unfinished", "previous"]
+                    if path == store / "unfinished" and injected < failures:
+                        injected += 1
+                        raise OSError(error, "fixture scan failure")
+                    return listdir(path)
+
+                with patch.object(image_vm, "list_directory", scan), \
+                        patch.object(image_vm, "require_host_lock"), patch.object(image_vm, "cgroup_admission"), \
+                        patch.object(image_vm, "load_policy", return_value=SimpleNamespace()) as policy, \
+                        patch.object(image_vm, "asdict", side_effect=lambda value: {"root_der_sha256": "d" * 64}
+                                     if value is policy.return_value else asdict(value)), \
+                        patch.object(image_vm, "report_error", side_effect=diagnostics.append), \
+                        patch.object(image_vm, "run") as launch, patch.object(image_vm, "execute") as execute:
+                    assert image_vm.run_image(args, None, vm.Cancellation()) == 1
+                launch.assert_not_called()
+                execute.assert_not_called()
+                recovered = error in (errno.EINTR, errno.EAGAIN) and failures == 1
+                assert scans == (2 if recovered else 3 if error in (errno.EINTR, errno.EAGAIN) else 1)
+                assert len(diagnostics) == 1
+                assert ("already contains this board" if recovered else "cannot complete") in str(diagnostics[0])
+                assert not (store / IDENTITY.attempt).exists()
 
 
 class TransportCases:
@@ -4120,6 +4237,7 @@ class PairAndAdmissionCases:
         test_reconciliation_holds_admission_until_owned_overlay_descriptors_close,
         test_image_base_rejects_backing_and_nested_external_data_files,
         test_quarantined_outputs_do_not_reduce_future_pair_disk_admission,
+        test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty,
     )
 
 
@@ -4135,7 +4253,8 @@ if __name__ == "__main__":
                             test_exclusive_file_creation_has_one_owner),
         "--terminal-fallback": (test_finalization_disposition_fallback_preserves_receipt_and_exit,),
         "--read-and-sync": (test_large_frame_retries_each_read_at_the_same_offset,
-                            test_unsupported_durability_preserves_published_outcome),
+                            test_unsupported_durability_preserves_published_outcome,
+                            test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,
