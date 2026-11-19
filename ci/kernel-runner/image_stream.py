@@ -145,6 +145,35 @@ def retry_check(operation, *args, errors: frozenset[int] = CHECK_RETRY):
                 raise
 
 
+def checked_open(path: Path, *, directory: bool = False, private: bool = False,
+                 writable: bool = False, immutable: bool = False, limit: int | None = None) -> int:
+    """Open the exact observed inode without following the last path component."""
+    def observe() -> int:
+        before = path.lstat()
+        kind = stat.S_ISDIR if directory else stat.S_ISREG
+        if not kind(before.st_mode):
+            raise StreamError(f"unexpected input type: {path}")
+        flags = os.O_RDWR if writable else os.O_RDONLY
+        flags |= os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        fd = os.open(path, flags | (os.O_DIRECTORY if directory else 0))
+        try:
+            after = os.fstat(fd)
+            if (not kind(after.st_mode) or not os.path.samestat(before, after)
+                    or (before.st_mode, before.st_uid, before.st_nlink) !=
+                    (after.st_mode, after.st_uid, after.st_nlink) or after.st_nlink < 1
+                    or (immutable and after.st_mode & 0o222)
+                    or (limit is not None and after.st_size > limit)
+                    or (private and (after.st_uid != os.getuid() or after.st_mode & 0o077
+                                     or (not directory and after.st_nlink != 1)))):
+                raise StreamError(f"input identity or ownership not established: {path}")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    return retry_check(observe)
+
+
 def listed_entry(root: Path, relative: str) -> os.stat_result | None:
     """Prove absence by listing the parent, including each intermediate path."""
     parts = Path(relative).parts

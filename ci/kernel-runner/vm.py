@@ -19,7 +19,7 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import job_disk, report_error, sync_directory
+from image_lifecycle import job_disk, report_error, sync_directory, unlink_observed
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
     child_pipes, read_check_script, run, terminate, wait,
@@ -60,10 +60,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
             "-m", "20480" if image_job or image_base else "16384", "-display", "none", "-monitor", "none",
             "-serial", f"file:/proc/self/fd/{image_job.console_write}" if image_job else "stdio",
             "-no-reboot",
-            "-drive", f"file={disk},format=qcow2,if=none,id=system",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
             "-fw_cfg", f"name=opt/ceralive/{kind},file=/proc/self/fd/{fd}",
         ]
+        base_fd = image_job.base_fd if image_job else None
+        if base_fd is not None:
+            args += [
+                "-add-fd", f"fd={base_fd},set=1", "-add-fd", f"fd={disk_fd},set=2",
+                "-blockdev", "driver=file,node-name=base-file,read-only=on,filename=/dev/fdset/1",
+                "-blockdev", "driver=qcow2,node-name=base-image,read-only=on,file=base-file",
+                "-blockdev", "driver=qcow2,node-name=system,file.driver=file,file.filename=/dev/fdset/2,backing=base-image",
+            ]
+        else:
+            args += ["-drive", f"file={disk},format=qcow2,if=none,id=system"]
         if image_job:
             from image_vm import image_arguments
             args += image_arguments(image_job)
@@ -78,6 +87,8 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
         if image_job:
             descriptors += (image_job.capsule_fd, image_job.console_write)
+        if base_fd is not None:
+            descriptors += (base_fd,)
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         check_spawn_signals(cancellation)
@@ -171,7 +182,7 @@ def main(cancellation: Cancellation) -> int:
     die_with_parent(parent)
     cancellation.check()
     child_setup = partial(die_with_parent, os.getpid())
-    base = args.base.resolve()
+    base = args.base.absolute() if args.operation == "image" else args.base.resolve()
     if "," in str(base):
         parser.error("commas are not supported in VM disk paths")
     if args.operation == "image":
@@ -311,8 +322,7 @@ def exit_launcher() -> None:
                 # Final receipt publication keeps signals blocked through this exit.
                 try:
                     if cancellation.committed_exit is not None and cancellation.safe_journal is not None:
-                        cancellation.safe_journal.unlink(missing_ok=True)
-                        sync_directory(cancellation.safe_journal.parent)
+                        unlink_observed(*cancellation.safe_journal)
                 except BaseException as exc:
                     report_error(exc)
                 try:

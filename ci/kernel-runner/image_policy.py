@@ -8,11 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 from urllib.parse import urlsplit
 
 from image_capsule import object_id, original_url
-from image_stream import StreamError, unique_object
+from image_stream import StreamError, checked_open, retry_check, unique_object
 
 
 FIRSTPARTY_ORIGIN = "https://apt.ceralive.tv"
@@ -114,13 +113,11 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
 
 def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolicy:
     limit = 1024 * 1024
-    if not stat.S_ISREG(path.lstat().st_mode):
-        raise StreamError("missing or oversized public trust policy")
-    with open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)) as source:
-        info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-            raise StreamError("missing or oversized public trust policy")
-        data = source.read(limit + 1)
+    def read_policy() -> bytes:
+        with os.fdopen(checked_open(path, limit=limit), "rb") as source:
+            return source.read(limit + 1)
+
+    data = retry_check(read_policy)
     if len(data) > limit:
         raise StreamError("missing or oversized public trust policy")
     row = json.loads(data, object_pairs_hook=unique_object)

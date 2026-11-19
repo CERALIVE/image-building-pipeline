@@ -148,11 +148,11 @@ def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Cap
                    row["source_bundle"], row["device_root"], directory, row["fetched_at"])
 
 
-def verification_capsule(original: Path, artifacts: Path, destination: Path,
+def verification_capsule(original: BinaryIO, artifacts: Path, destination: Path,
                          checkpoint: Callable[[], None] | None = None) -> dict[str, str]:
     """Host packs only selected regular data; no pathname or extraction from the guest."""
     selected = {}
-    with tarfile.open(original, "r:") as source:
+    with tarfile.open(fileobj=original, mode="r:") as source:
         header = source.getmember("inventory.json")
         if not header.isfile() or header.size > 1024 * 1024:
             raise StreamError("oversized verification input inventory")

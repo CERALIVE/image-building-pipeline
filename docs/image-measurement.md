@@ -1,7 +1,7 @@
 # Offline rootfs measurement [PARTIAL: execution qualification pending]
 
-`ci/kernel-runner/vm.py image` reuses the kernel launcher's anonymous overlay,
-parent-death containment, direct `flock --exclusive --close` parent and bounded
+`ci/kernel-runner/vm.py image` reuses the kernel launcher's parent-death
+containment, direct `flock --exclusive --close` parent and bounded
 shutdown. It runs an unregistered image job with **no NIC**. The existing
 kernel `run` and `check` defaults remain 16 vCPUs, 16 GiB and user networking.
 This route is engineering measurement tooling; it does not publish an image,
@@ -88,11 +88,15 @@ plan lock second; keep the innermost direct parent as literal
 locks. Confirm that any preceding heavy unit has finished teardown or adopted
 the same host lock before queueing a measurement.
 
-If an active journal remains, admission requires a complete process and
-descriptor inventory before certifying overlay closure. An inaccessible
-entry refuses admission and leaves the journal in place. A disappearance
-or interrupt restarts the inventory from the beginning, up to three total
-observations. Only a complete scan without a holder can retire the journal.
+If an active journal remains, admission must acquire the recorded overlay
+inode's exclusive `flock` without waiting. The image launcher and QEMU
+share the locked open file description, including when a child inherits it.
+A busy lease, missing inode or unreadable journal refuses admission.
+For a legacy anonymous overlay or missing lease, keep the journal and use
+manual recovery. Under the host-heavy lock, use an operator-verified host
+restart to establish that the anonymous overlay is gone, then archive
+`active.json` outside the attempt store and use a fresh reviewed store.
+Do not retire the journal on the basis of a process listing.
 
 For an independently prepared and approved base, capsule and public policy,
 the example assumes a shell at nice 0. `nice -n 10` is a relative adjustment.
@@ -111,8 +115,9 @@ systemd-run --user --scope \
     --source-commit "${IMAGE_SOURCE_COMMIT:?}" --source-epoch "${IMAGE_SOURCE_EPOCH:?}"
 ```
 
-The output store must be launcher-owned and mode 0700. All returned files and
-receipts are mode 0600 and created under a new attempt directory. Run Rock 5B+
+The output store must be launcher-owned and mode 0700. Its filesystem must fit
+both the 144 GiB overlay allocation and the return-store budget. All returned
+files and receipts are mode 0600 and created under a new attempt directory. Run Rock 5B+
 first, including its independent verifier and teardown, then Orange Pi 5 Plus.
 There is no image matrix or `--all` path. `--image-mode probe` performs a small
 network-denial/artifact-return probe; an actual probe and attended cancellation
@@ -123,8 +128,10 @@ check remain prerequisites for admitting expensive measurements.
 A capsule is an uncompressed regular tar containing exactly `inventory.json`
 and unique regular `objects/<sha256>` members. No links, sparse members or
 guest-selected destination paths are accepted. The guest hashes and imports
-the capsule from the same open descriptor. The host reads the approved public
-trust policy from a regular file without following a final symlink.
+the capsule from the same open descriptor. The host opens the base, capsule
+and policy without following a final symlink and checks the opened inode
+against the observed path. The QEMU disk and verifier inputs use the pinned
+descriptors.
 Inventory is at most 1 MiB;
 each member's exact length and SHA-256 are checked during guest import.
 
@@ -633,11 +640,12 @@ responsive host.
 
 The launcher holds the flock through all of these steps:
 
-1. Create private directories and sync their parent entries. Journal the
-   overlay in `active.json` before it can be inherited. Publish `started.json`
+1. Create private directories and sync their parent entries. Lock the private
+   `overlay.qcow2` and record its inode in `active.json` before handing its
+   descriptor to a child. Publish `started.json`
    and update `active.json` with the QEMU process identity when it starts.
-2. Reap QEMU and close its pipes, the payload and the anonymous overlay.
-   Closing the last overlay descriptor removes the overlay. Flush and sync
+2. Reap QEMU and close its pipes, the payload and the launcher overlay handle.
+   Acquire an independent lease before removing the overlay. Flush and sync
    the captured output before decoding. Validate and sync the decoded files
    and artifact directory before publishing their `transport-validation.json`.
    Discard the captured stream after transport validation.
@@ -681,13 +689,13 @@ If the launcher cannot commit a receipt, it exits nonzero and retains the
 journal. The CLI uses a direct process exit so Python
 shutdown hooks cannot replace the result. The external flock releases its
 lock when the launcher exits. The launcher has already reaped QEMU and
-closed the guest descriptors and anonymous overlay before committing success.
+closed the guest descriptors and removed the leased overlay before committing success.
 SIGKILL, power loss and external termination of the flock are outside the
 orderly exit contract.
 
-After forced death, the next admission reconciles the exact owned overlay
-inode and process identities. A remaining holder blocks admission; no foreign
-process is killed. Forced destruction never claims that guest cleanup ran.
+After forced death, the next admission checks the recorded overlay inode and
+lease. A remaining holder blocks admission. Forced destruction never claims
+that guest cleanup ran.
 
 The unchanged `ceralive-apt-credentials` package stays in the guest and returned
 rootfs/slots. Its shared `client-cf` identity is owner-accepted. **There is no

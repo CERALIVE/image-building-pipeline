@@ -31,7 +31,7 @@ import image_resources
 import image_verify
 import image_vm
 import vm
-from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
+from image_stream import Identity, Member, StreamError, decode, encode, exact_json, verify_sidecar
 from image_capsule import unpack
 from image_policy import load_policy
 from image_verify import compare_slot
@@ -496,7 +496,7 @@ def test_real_guest_probe_emits_only_the_frame_for_its_outcome() -> None:
             expected = {"schema": 1, "identity": asdict(IDENTITY)}
             expected.update({"network_denied": True} if expected_error is None else
                             {"failure": expected_error.__name__, "exit": None})
-            assert json.loads((target / name).read_text()) == expected
+            assert exact_json(json.loads((target / name).read_text()), expected)
 
 
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:
