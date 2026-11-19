@@ -22,7 +22,7 @@ import yaml
 from image_lifecycle import job_disk, report_error, sync_directory, unlink_observed
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
-    child_pipes, read_check_script, run, terminate, wait,
+    child_pipes, poll_owned, read_check_script, run, spawn_gate, terminate, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -97,7 +97,7 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
             # Both execs keep the same PID. Check the race before setpriv armed parent death.
             args = ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
                     'test "$PPID" = "$1" || exit 125; shift; exec "$@"', "runner-child", str(parent), *args]
-        process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
+        process = spawn_gate(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
                                    preexec_fn=None if image_job else partial(die_with_parent, parent),
                                    start_new_session=image_job is not None,
                                    stdin=subprocess.DEVNULL,
@@ -127,18 +127,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                 terminate(process)
                 if reader:
                     reader.join()
+                code = poll_owned(process)
                 if image_job:
-                    image_job.state.update(qemu_reaped=True, qemu_exit=process.returncode)
+                    image_job.state.update(qemu_reaped=True, qemu_exit=code)
         cancellation.check()
         if image_job:
-            if process.returncode:
-                raise RuntimeError(f"image guest exited ({process.returncode})")
+            if code != 0:
+                raise RuntimeError(f"image guest exited ({code})")
             return
         # Never relay runner logs: an untrusted job could print the JIT credential.
         expected = b"CERALIVE_BASE_READY" if seed else b"CERALIVE_JOB_DONE=0"
         output = b"".join(lines)
-        if process.returncode or expected not in output.splitlines():
-            raise RuntimeError(f"guest failed or timed out ({process.returncode})")
+        if code != 0 or expected not in output.splitlines():
+            raise RuntimeError(f"guest failed or timed out ({code})")
         print(expected.decode())
     finally:
         os.close(fd)

@@ -22,7 +22,7 @@ from image_stream import (
     BUILD_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, encode, list_directory, listed_entry,
     retry_check, retry_io, write_all,
 )
-from vm_process import poll_owned, wait
+from vm_process import child_pipes, poll_owned, reset_child_status, run as run_gate, spawn_gate, wait
 
 HOME = Path("/opt/ceralive-image-job")
 MIRROR_READY_SECONDS = 600
@@ -32,8 +32,8 @@ UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
 
 
 def command(args: list[str], env: dict[str, str]) -> str:
-    return subprocess.run(args, check=True, env=env, stdout=subprocess.PIPE,
-                          text=True, timeout=180).stdout.strip()
+    return run_gate(args, env=env, stdout=subprocess.PIPE,
+                    text=True, timeout=180).stdout.strip()
 
 
 def check_route(env: dict[str, str]) -> None:
@@ -117,8 +117,8 @@ def ready_mirror(mirror: subprocess.Popen):
                 if written != 1:
                     raise StreamError("sealed mirror shutdown request was not written")
             mirror_marker(response, output, b"CERALIVE_SEALED_MIRROR_STOPPED\n", deadline)
-            retry_io(wait, mirror, deadline, recover=True)
-            if mirror.returncode != 0 or mirror_io(response, deadline, os.read, output, 1):
+            code = retry_io(wait, mirror, deadline, recover=True)
+            if code != 0 or mirror_io(response, deadline, os.read, output, 1):
                 raise StreamError("sealed guest mirror did not shut down cleanly")
     finally:
         if retry_io(poll_owned, mirror, recover=True) is None:
@@ -209,28 +209,27 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
         archive = directory / builder["object"]
         if not any(row.sha256 == builder["object"] and row.kind == "builder-image" for row in capsule.objects):
             raise StreamError("missing reviewed builder archive")
-        subprocess.run(["docker", "load", "-i", str(archive)], check=True, env=env, timeout=600,
-                       stdout=subprocess.DEVNULL)
+        run_gate(["docker", "load", "-i", str(archive)], env=env, timeout=600,
+                 stdout=subprocess.DEVNULL)
         inspected = json.loads(command(["docker", "image", "inspect", builder["tag"]], env))[0]
         if (inspected["Id"], inspected["Architecture"]) != (builder["image_id"], builder["arch"]):
             raise StreamError("loaded builder image differs from approved closure")
     params = resolve(source, capsule.board, env)
     swap = HOME / "swap"
-    subprocess.run(["fallocate", "-l", "4G", str(swap)], check=True, env=env, timeout=60)
+    run_gate(["fallocate", "-l", "4G", str(swap)], env=env, timeout=60)
     swap.chmod(0o600)
-    subprocess.run(["mkswap", str(swap)], check=True, env=env, timeout=60, stdout=subprocess.DEVNULL)
-    subprocess.run(["swapon", str(swap)], check=True, env=env, timeout=60)
-    subprocess.run(["bash", str(source / "ci/check-builder-resources.sh")],
-                   check=True, env=env, cwd=source, timeout=60)
+    run_gate(["mkswap", str(swap)], env=env, timeout=60, stdout=subprocess.DEVNULL)
+    run_gate(["swapon", str(swap)], env=env, timeout=60)
+    run_gate(["bash", str(source / "ci/check-builder-resources.sh")], env=env, cwd=source, timeout=60)
     log = HOME / "build.log"
     with log.open("xb") as output:
-        with subprocess.Popen(["python3", str(Path(__file__).with_name("sealed-inputs.py")), "serve-managed"],
+        with child_pipes(spawn_gate(["python3", str(Path(__file__).with_name("sealed-inputs.py")), "serve-managed"],
                               env=env | {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=output) as mirror:
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=output)) as mirror:
             with ready_mirror(mirror):
                 args = ["bash", str(source / "build"), capsule.board, "--rootfs-measurement"]
-                with subprocess.Popen(args, env=env, cwd=source, stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT, start_new_session=True) as build:
+                with child_pipes(spawn_gate(args, env=env, cwd=source, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, start_new_session=True)) as build:
                     try:
                         deadline = time.monotonic() + 21000
                         written = 0
@@ -248,17 +247,17 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
                                     if written > BUILD_LOG_LIMIT:
                                         raise StreamError("guest build log exceeded its 1 GiB budget")
                                     write_all(output, chunk)
-                        code = build.wait(timeout=20)
+                        code = wait(build, time.monotonic() + 20)
                         if code:
                             raise subprocess.CalledProcessError(code, args)
                     finally:
-                        if build.poll() is None:
+                        if poll_owned(build) is None:
                             os.killpg(build.pid, signal.SIGTERM)
                             try:
-                                build.wait(timeout=20)
+                                wait(build, time.monotonic() + 20)
                             except subprocess.TimeoutExpired:
                                 os.killpg(build.pid, signal.SIGKILL)
-                                build.wait()
+                                wait(build, None)
     if retry_check(listed_entry, directory, "missing-object") is not None:
         raise StreamError("guest requested an object absent from the sealed inventory")
     out = source / "images" / capsule.board
@@ -289,6 +288,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
 
 
 def main() -> None:
+    reset_child_status()
     raw = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw")
     with raw.open("rb") as payload:
         data = payload.read(1024 * 1024 + 1)

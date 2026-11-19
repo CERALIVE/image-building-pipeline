@@ -1124,30 +1124,28 @@ def test_startup_verification_failure_refuses_before_spawning() -> None:
 def test_echild_cannot_be_reported_as_guest_or_helper_success() -> None:
     popen = subprocess.Popen
 
-    def fake_qemu(_args, **kwargs):
+    def lose_status_at_spawn(_args, **kwargs):
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
         return popen([sys.executable, "-c", 'print("CERALIVE_JOB_DONE=0"); raise SystemExit(37)'], **kwargs)
 
-    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
-    try:
-        def boot_fake():
-            with patch.object(subprocess, "Popen", fake_qemu):
-                vm.boot(pathlib.Path("/unused"), b"", "check", 2)
-
-        for operation in (
-            lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
-                        cancellation=Cancellation(), capture_output=True),
-            lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
-                        cancellation=Cancellation()),
-            boot_fake,
-        ):
-            try:
+    for operation in (
+        lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
+                    cancellation=Cancellation(), capture_output=True),
+        lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
+                    cancellation=Cancellation()),
+        lambda: vm.boot(pathlib.Path("/unused"), b"", "check", 2),
+    ):
+        previous = signal.getsignal(signal.SIGCHLD)
+        try:
+            with patch.object(subprocess, "Popen", lose_status_at_spawn):
                 operation()
-            except vm_process.ChildStatusError as error:
-                assert "exit status unavailable for owned child PID" in str(error)
-            else:
-                raise AssertionError("ECHILD turned a known failure into success")
-    finally:
-        signal.signal(signal.SIGCHLD, previous)
+        except vm_process.ChildStatusError as error:
+            assert "exit status unavailable for owned child PID" in str(error)
+            assert error.__cause__.errno == errno.ECHILD
+        else:
+            raise AssertionError("ECHILD turned a known failure into success")
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
 
 
 def test_no_qemu_or_helper_spawn_under_terminal_mask() -> None:

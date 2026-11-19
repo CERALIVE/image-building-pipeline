@@ -655,6 +655,16 @@ helpers have default dispositions for the tracked signals. The launcher
 reaps only the owned PID with `waitpid` and rejects an unavailable exit
 status. Child creation is forbidden after terminal finalization begins.
 
+The guest and verifier reset `SIGCHLD` to its default disposition at startup.
+The shared gate waiter rejects an ignored `SIGCHLD`, `ECHILD`, or a cached
+return code that it did not observe itself. This covers QEMU and disk tools,
+the guest build and mirror, filesystem and mount checks, and transport
+downloads and validators. Shell gates retain their own checked child waits
+for the tools they call, including resize and reserve checks and public
+trust verification with OpenSSL and gpgv. The host tooling checks the actual
+exit of the shell gate. The image wrapper’s serial marker and poweroff
+request are best effort. Their status does not authorize artifact acceptance.
+
 Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
 idle I/O loop checks for cancellation at least once per second. The launcher
 stops draining pipes and sends TERM to the owned QEMU process, then sends KILL

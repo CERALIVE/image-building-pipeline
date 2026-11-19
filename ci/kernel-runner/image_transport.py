@@ -23,6 +23,7 @@ from urllib.parse import urljoin, urlsplit
 from image_capsule import original_url
 from image_policy import ArchivePolicy, require_client_origin
 from image_stream import StreamError, unique_object
+from vm_process import run as run_gate
 
 ROOT = Path(__file__).resolve().parents[2]
 SEALED = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
@@ -139,10 +140,10 @@ def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
         if max_redirects:
             # Raw Location preserves forbidden spellings that curl may normalize away.
             args += ["--dump-header", "-"]
-        result = subprocess.run(args + ["--url", current], env=env, input=config,
+        result = run_gate(args + ["--url", current], env=env, input=config,
                                 stdin=None if client else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                timeout=remaining + 5, start_new_session=True,
+                                timeout=remaining + 5, start_new_session=True, check=False,
                                 preexec_fn=lambda: child_limit(length))
         headers, status = result.stdout[:-3], result.stdout[-3:]
         if result.returncode or status != b"200" and (
@@ -190,10 +191,10 @@ def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
 
 def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
     """Run only the repository's data validators, never package code."""
-    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(ROOT),
+    result = run_gate(["bash", "-euo", "pipefail", "-c", script, "_", str(ROOT),
                              *arguments], env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                            timeout=120, preexec_fn=lambda: child_limit(INDEX_LIMIT))
+                            timeout=120, check=False, preexec_fn=lambda: child_limit(INDEX_LIMIT))
     if result.returncode:
         raise StreamError("signed package lookup or control identity rejected")
     return result.stdout.strip()

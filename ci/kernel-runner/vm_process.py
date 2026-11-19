@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+import errno
 import os
 from pathlib import Path
 import selectors
@@ -22,8 +23,8 @@ class Cancelled(RuntimeError):
     """The launcher was asked to stop."""
 
 
-class ChildStatusError(RuntimeError):
-    """The kernel did not give the launcher its owned child's exit status."""
+class ChildStatusError(RuntimeError, subprocess.SubprocessError):
+    """A gate could not establish its owned child's exit status."""
 
 
 class Cancellation:
@@ -59,6 +60,22 @@ def check_spawn_signals(cancellation: Cancellation) -> None:
         raise RuntimeError("cannot spawn a child with blocked signals or ignored stop signals")
 
 
+def require_child_status() -> None:
+    if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+        raise ChildStatusError("child status unavailable: SIGCHLD is ignored")
+
+
+def reset_child_status() -> None:
+    """Set the guest's inherited child disposition before running gates."""
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    require_child_status()
+
+
+def spawn_gate(args: list[str], **options) -> subprocess.Popen:
+    require_child_status()
+    return subprocess.Popen(args, **options)
+
+
 def child_environment(*, registration: bool = False) -> dict[str, str]:
     """Keep host configuration only for the explicit runner-registration command."""
     environment = {key: value for key, value in os.environ.items()
@@ -82,20 +99,25 @@ def child_pipes(process: subprocess.Popen):
 
 def poll_owned(process: subprocess.Popen) -> int | None:
     """Collect an actual wait status. ECHILD cannot be reported as exit zero."""
-    if process.returncode is None:
-        while True:
-            try:
-                pid, status = os.waitpid(process.pid, os.WNOHANG)
-                break
-            except InterruptedError:
-                continue
-            except ChildProcessError as error:
-                raise ChildStatusError(f"exit status unavailable for owned child PID {process.pid}") from error
-        if pid == 0:
-            return None
-        if pid != process.pid or not (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
-            raise ChildStatusError(f"invalid exit status for owned child PID {process.pid}")
-        process.returncode = os.waitstatus_to_exitcode(status)
+    if (observed := getattr(process, "_ceralive_observed_exit", None)) is not None:
+        return observed
+    if process.returncode is not None:
+        raise ChildStatusError(f"child status unavailable: unobserved returncode for PID {process.pid}")
+    while True:
+        try:
+            pid, status = os.waitpid(process.pid, os.WNOHANG)
+            break
+        except OSError as error:
+            if error.errno == errno.ECHILD:
+                raise ChildStatusError(
+                    f"child status unavailable: exit status unavailable for owned child PID {process.pid}") from error
+            if error.errno != errno.EINTR:
+                raise
+    if pid == 0:
+        return None
+    if pid != process.pid or not (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+        raise ChildStatusError(f"child status unavailable: invalid wait status for PID {process.pid}")
+    process.returncode = process._ceralive_observed_exit = os.waitstatus_to_exitcode(status)
     return process.returncode
 
 
@@ -123,14 +145,14 @@ def read_check_script(path: Path, cancellation: Cancellation) -> bytes:
 
 
 def wait(process: subprocess.Popen, deadline: float | None,
-         cancellation: Cancellation | None = None) -> None:
-    """Retry interruptions without restarting the deadline or losing cancellation."""
+         cancellation: Cancellation | None = None) -> int:
+    """Return the observed exit code without restarting the deadline on interruption."""
     delay = 0.001
     while True:
         if cancellation is not None:
             cancellation.check()
-        if poll_owned(process) is not None:
-            return
+        if (code := poll_owned(process)) is not None:
+            return code
         remaining = POLL_SECONDS if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -163,42 +185,78 @@ def terminate(process: subprocess.Popen) -> None:
         os.close(pidfd)
 
 
-def run(args: list[str], *, timeout: int, cancellation: Cancellation,
-        capture_output: bool = False, registration: bool = False, **options) -> subprocess.CompletedProcess:
-    """Like run(check=True), with cancellation checks during helper subprocesses."""
-    check_spawn_signals(cancellation)
+def run(args: list[str], *, timeout: float | None = None, cancellation: Cancellation | None = None,
+        capture_output: bool = False, registration: bool = False, check: bool = True,
+        input: bytes | None = None, **options) -> subprocess.CompletedProcess:
+    """Run a gate using only the child's observed wait status, including for captured commands."""
+    if cancellation is not None:
+        check_spawn_signals(cancellation)
+        options.setdefault("cwd", CHILD_CWD)
+        options.setdefault("env", child_environment(registration=registration))
     if capture_output:
         options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    deadline = time.monotonic() + timeout
-    process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD,
-                               env=child_environment(registration=registration), **options)
+    if input is not None:
+        options["stdin"] = subprocess.PIPE
+    deadline = None if timeout is None else time.monotonic() + timeout
+    process = spawn_gate(args, restore_signals=True, **options)
+    output = [bytearray(), bytearray()]
+    pipes = (process.stdout, process.stderr)
     with child_pipes(process):
-        output = [bytearray(), bytearray()]
         try:
             with selectors.PollSelector() as events:
-                if capture_output:
-                    events.register(process.stdout, selectors.EVENT_READ, 0)
-                    events.register(process.stderr, selectors.EVENT_READ, 1)
+                for index, pipe in enumerate(pipes):
+                    if pipe is not None:
+                        events.register(pipe, selectors.EVENT_READ, index)
+                if input is not None:
+                    pending = memoryview(input)
+                    os.set_blocking(process.stdin.fileno(), False)
+                    events.register(process.stdin, selectors.EVENT_WRITE, None)
                 while events.get_map():
-                    cancellation.check()
-                    remaining = deadline - time.monotonic()
+                    if cancellation is not None:
+                        cancellation.check()
+                    remaining = POLL_SECONDS if deadline is None else deadline - time.monotonic()
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(args, timeout)
                     try:
                         for key, _ in events.select(timeout=min(POLL_SECONDS, remaining)):
-                            cancellation.check()
-                            data = os.read(key.fd, 65536)
-                            if data:
-                                output[key.data].extend(data)
-                            else:
+                            if cancellation is not None:
+                                cancellation.check()
+                            if key.data is None:
+                                try:
+                                    if pending:
+                                        pending = pending[os.write(key.fd, pending[:4096]):]
+                                    if pending:
+                                        continue
+                                except BrokenPipeError:
+                                    pass
+                                except BlockingIOError as error:
+                                    if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                                        continue
+                                    raise
                                 events.unregister(key.fileobj)
+                                key.fileobj.close()
+                            else:
+                                data = os.read(key.fd, 65536)
+                                if data:
+                                    output[key.data].extend(data)
+                                else:
+                                    events.unregister(key.fileobj)
                     except InterruptedError:
                         continue
-            wait(process, deadline, cancellation)
-        finally:
+            code = wait(process, deadline, cancellation)
+        except ChildStatusError:
+            # A lost wait status is terminal. The PID is no longer ours to signal.
+            raise
+        except BaseException:
             terminate(process)
-    cancellation.check()
-    stdout, stderr = map(bytes, output) if capture_output else (None, None)
-    result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
-    result.check_returncode()
+            raise
+    if cancellation is not None:
+        cancellation.check()
+    values = [None if pipe is None else bytes(data) for pipe, data in zip(pipes, output)]
+    if options.get("text"):
+        values = [None if pipe is None else data.decode(pipe.encoding, pipe.errors).replace("\r\n", "\n").replace("\r", "\n")
+                  for pipe, data in zip(pipes, output)]
+    result = subprocess.CompletedProcess(args, code, *values)
+    if check:
+        result.check_returncode()
     return result

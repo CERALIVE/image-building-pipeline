@@ -29,6 +29,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_urls import InputURLError, canonical_url
+from vm_process import run as run_gate
 
 INDEX_LIMIT = 256 * 1024**2
 CONTROL_ATTEMPTS = 3
@@ -230,11 +231,11 @@ index_verify_digest "$9" "$expected" sealed-mirror
         with tempfile.TemporaryDirectory(prefix=".metadata-", dir=directory) as temporary:
             release = Path(temporary) / "Release"
             try:
-                subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(library),
+                run_gate(["bash", "-euo", "pipefail", "-c", script, "_", str(library),
                                 str(repo.keyring), str(repo.inrelease), str(release), repo.suite,
                                 repo.component, repo.arch, repo.index_path, str(repo.index),
                                 repo.codename, *repo.fingerprints],
-                               check=True, capture_output=True, text=True, timeout=60,
+                               capture_output=True, text=True, timeout=60,
                                env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "TMPDIR": temporary})
             except subprocess.SubprocessError as exc:
                 raise SealedError(f"sealed {name} signature/index/identity verification rejected") from exc

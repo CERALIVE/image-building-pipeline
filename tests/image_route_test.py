@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unprivileged image transport regressions; never start QEMU or read credentials."""
 
+import ast
 import base64
 import errno
 import fcntl
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import tarfile
 import time
+import threading
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -36,6 +38,7 @@ from image_capsule import unpack
 from image_policy import load_policy
 from image_verify import compare_slot
 from image_urls import InputURLError, canonical_url
+from vm_process import ChildStatusError, wait
 
 
 IDENTITY = Identity("fixture-attempt", "rock-5b-plus", "a" * 40, 123, "b" * 64)
@@ -327,6 +330,163 @@ def test_slot_content_read_error_restarts_the_comparison() -> None:
         assert injected == [0] and attempts == [archive, archive]
 
 
+def test_verifier_requires_observed_e2fsck_exit() -> None:
+    class ReserveReached(Exception):
+        pass
+
+    spawn, waitpid = subprocess.Popen, os.waitpid
+    for code, fault in ((8, "normal"), (4, "normal"), (1, "normal"), (0, "normal"),
+                        (8, "premature-reap"), (8, "ignored-during-spawn"), (0, "echild"),
+                        (8, "inherited-ignore")):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            home = root / "home"
+            home.mkdir()
+            fsck = root / "e2fsck"
+            fsck.write_text(f"#!/bin/sh\nexit {code}\n")
+            fsck.chmod(0o700)
+            metadata = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
+            artifacts = {name: name for name in ("resolved.json", "measurement.json", "rootfs.tar",
+                "kernel-artifact.json", "resolved.config", "built-modules.txt", "kernel.SHA256SUMS",
+                "boot.scr", "boot.scr.sha256", "rootfs_a.ext4")}
+            trust = {"root_der_sha256": "fixture-root", "kernel_metadata": dict.fromkeys(metadata, "approved")}
+            for name in (*artifacts, "approved"):
+                (root / name).touch()
+            params = {"BOARD_ID": IDENTITY.board, "DTB_NAME": "fixture", "SERIAL_CONSOLE": "fixture"}
+            (root / "resolved.json").write_text(json.dumps(params))
+            (root / "measurement.json").write_text(json.dumps({"public_root_der_sha256": "fixture-root"}))
+            with tarfile.open(root / "rootfs.tar", "w"):
+                pass
+            capsule = SimpleNamespace(directory=root, board=IDENTITY.board, device_root="approved")
+            kernel = SimpleNamespace(verified_metadata=lambda *_: SimpleNamespace(boards=[IDENTITY.board]))
+            seen, reaped = [], []
+
+            def start(args, **options):
+                if "slot_reserve_assert_ext4" in " ".join(args):
+                    seen.append("reserve")
+                    raise ReserveReached
+                if args[0] != "e2fsck":
+                    if "boot-payload" in args:
+                        for name in ("boot.scr", "boot.scr.sha256"):
+                            (home / "compiled-boot" / name).touch()
+                    return spawn(["/bin/true"], **options)
+                seen.append("e2fsck")
+                assert args == ["e2fsck", "-fn", str(root / "rootfs_a.ext4")]
+                if fault == "ignored-during-spawn":
+                    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+                child = spawn([str(fsck), *args[1:]], **options)
+                if fault == "premature-reap":
+                    waiter = threading.Thread(target=lambda: reaped.append(waitpid(child.pid, 0)))
+                    waiter.start()
+                    waiter.join(timeout=3)
+                    assert not waiter.is_alive() and reaped == [(child.pid, code << 8)]
+                if fault == "echild":
+                    assert waitpid(child.pid, 0) == (child.pid, code << 8)
+                    faults.add(child.pid)
+                return child
+
+            faults = set()
+
+            def wait_with_fault(pid, flags):
+                if pid in faults:
+                    raise ChildProcessError(errno.ECHILD, "fixture wait status unavailable")
+                return waitpid(pid, flags)
+
+            inherited = signal.getsignal(signal.SIGCHLD)
+            before_path = sys.path[:]
+            try:
+                if fault == "inherited-ignore":
+                    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+                with patch.object(image_guest, "HOME", home), patch.object(image_guest, "resolve", return_value=params), \
+                        patch.dict(sys.modules, {"kernel_release": kernel}), patch.object(subprocess, "Popen", start), \
+                        patch.object(os, "waitpid", wait_with_fault):
+                    try:
+                        image_verify.verify(root, capsule, {"build_identity": asdict(IDENTITY),
+                                                           "artifacts": artifacts, "trust": trust})
+                    except ReserveReached:
+                        assert (code, fault) == (0, "normal"), (code, fault, "unverified success")
+                    except subprocess.CalledProcessError as error:
+                        assert fault in ("normal", "inherited-ignore") and error.returncode == code != 0
+                    except ChildStatusError as error:
+                        assert fault in ("premature-reap", "ignored-during-spawn", "echild"), (fault, error)
+                        assert isinstance(error.__cause__, ChildProcessError) and error.__cause__.errno == errno.ECHILD
+                    else:
+                        raise AssertionError("verifier returned before checking reserve")
+                    if fault == "inherited-ignore":
+                        assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
+            finally:
+                sys.path[:] = before_path
+                signal.signal(signal.SIGCHLD, inherited)
+            assert seen == (["e2fsck", "reserve"] if (code, fault) == (0, "normal") else ["e2fsck"])
+
+
+def test_guest_gate_refuses_ignored_sigchld_before_spawn() -> None:
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with patch.object(subprocess, "Popen", side_effect=AssertionError("spawned with SIGCHLD ignored")) as spawn:
+            try:
+                image_guest.command(["/bin/true"], {})
+            except ChildStatusError as error:
+                assert "SIGCHLD is ignored" in str(error)
+            else:
+                raise AssertionError("gate ran with SIGCHLD ignored")
+            spawn.assert_not_called()
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+
+
+def test_gate_rejects_popen_echild_fallback_zero() -> None:
+    spawn = subprocess.Popen
+
+    def with_unobserved_zero(args, **options):
+        child = spawn(args, **options)
+        assert os.waitpid(child.pid, 0) == (child.pid, 8 << 8)
+        assert child.poll() == 0  # CPython's ECHILD fallback has no actual exit status.
+        return child
+
+    with patch.object(subprocess, "Popen", with_unobserved_zero):
+        try:
+            image_guest.command(["/bin/sh", "-c", "exit 8"], {})
+        except ChildStatusError as error:
+            assert "unobserved returncode" in str(error)
+        else:
+            raise AssertionError("gate accepted a fallback zero")
+
+
+def test_gate_transfers_input_and_observes_captured_command_exit() -> None:
+    # Pipe more than the buffer can hold to ensure input and output drain together.
+    from vm_process import run
+
+    data = b"x\r\n" * 65536
+    result = run([sys.executable, "-c", "import sys; sys.stderr.write('ready\\r\\n'); "
+                  "sys.stdout.buffer.write(sys.stdin.buffer.read()); raise SystemExit(7)"],
+                 input=data, capture_output=True, text=True, timeout=5, check=False)
+    assert (result.returncode, result.stdout, result.stderr) == (7, "x\n" * 65536, "ready\n")
+
+
+def test_image_verdicts_do_not_use_subprocess_convenience_waiters() -> None:
+    root = pathlib.Path(__file__).resolve().parents[1]
+    violations = []
+    forbidden = {"run", "check_call", "check_output", "call", "getstatusoutput", "getoutput"}
+    for path in (*sorted((root / "ci/kernel-runner").rglob("*.py")), root / "lib/sealed-inputs.py"):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        modules = {alias.asname or alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                   for alias in node.names if alias.name == "subprocess"}
+        functions = {alias.asname or alias.name for node in ast.walk(tree)
+                     if isinstance(node, ast.ImportFrom) and node.module == "subprocess"
+                     for alias in node.names if alias.name in forbidden or alias.name == "*"}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id in modules and node.attr in forbidden
+                    or isinstance(node, ast.Name) and node.id in functions):
+                violations.append(f"{path.relative_to(root)}:{node.lineno}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {
+                    "wait", "poll", "communicate"}:
+                violations.append(f"{path.relative_to(root)}:{node.lineno}")
+        assert "*" not in functions, path
+    assert not violations, f"Image verdicts must use the owned-child waiter: {violations}"
+
+
 def test_mirror_requires_readiness_and_owned_clean_shutdown() -> None:
     child = """
 import os, signal, sys
@@ -359,7 +519,7 @@ while True:
                     entered = True
                     if mode in ("foreign-term", "kill"):
                         os.kill(mirror.pid, signal.SIGTERM if mode == "foreign-term" else signal.SIGKILL)
-                        mirror.wait(timeout=2)
+                        wait(mirror, time.monotonic() + 2)
                     if mode == "full-control":
                         fd = mirror.stdin.fileno()
                         capacity = fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
@@ -778,7 +938,7 @@ serve(objects, managed=True)
                 with patch.object(image_guest, "HOME", home), patch.object(image_guest.shutil, "copyfile"), \
                         patch.object(image_guest, "command", return_value="data"), \
                         patch.object(image_guest, "resolve", return_value={}), \
-                        patch.object(image_guest.subprocess, "run"), \
+                        patch.object(image_guest, "run_gate"), \
                         patch.object(image_guest.subprocess, "Popen", start):
                     try:
                         records = image_guest.measure(source, capsule, job)
