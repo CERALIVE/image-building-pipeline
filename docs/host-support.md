@@ -51,6 +51,14 @@ chroot ⇒ `CAP_SYS_ADMIN`) — **not** for assembly.
 
 ## Host support matrix
 
+The optional [offline image measurement profile](image-measurement.md) instead
+contains privileged mkosi, binfmt, Docker and read-only slot verification mounts
+inside one disposable KVM guest. The workstation launcher only handles owned
+VM disks, a read-only input capsule, bounded pipes and regular output files.
+It requires the documented cgroup/affinity/memory/disk limits and shared host
+lock. This profile is implementation-tested with Python stand-ins; a real
+network-denial/return/cancellation probe and board builds remain unrun.
+
 | Host | Status | Build mode | Live-tested here | Notes |
 |---|---|---|---|---|
 | **Ubuntu/Debian (CI)** | ✅ Fully supported | container *(or native)* | by parity¹ | Canonical CI builder. |

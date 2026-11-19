@@ -1,0 +1,2 @@
+hardware_policy:
+  exclude_module_classes: [unknown-class]

@@ -38,6 +38,16 @@ tests/pin_currency_test.py	tool	unit	invoked-by-suite	Driven by first-party-pin-
 tests/generate-dev-rauc-pki.sh	tool	support	default-fixture	materializes the ignored NON-PRODUCTION RAUC signing fixture every RAUC contract below needs
 
 # --- bats suites (run order) ---------------------------------------------
+tests/image-route.bats	bats	unit	default-bats	offline image profile, bounded transport, sealed authentication and measurement-purpose contracts
+tests/image_route_test.py	tool	unit	invoked-by-suite	artifact framing and capsule contracts driven by image-route.bats
+tests/image_profile_test.py	tool	unit	invoked-by-suite	Python-child launcher and resource admission contracts driven by image-route.bats
+tests/sealed_inputs_test.py	tool	unit	invoked-by-suite	synthetic signed-index import boundaries driven by image-route.bats
+tests/rootfs_measurement_test.py	tool	unit	invoked-by-suite	shipping-content purpose and raw-assembly split driven by image-route.bats
+tests/parity_noexec_test.py	tool	unit	invoked-by-suite	noexec X_OK syscall-denial parity regression driven by image-route.bats
+tests/bootstrap_metadata_test.py	tool	unit	invoked-by-suite	original bootstrap metadata authentication and validity driven by image-route.bats
+tests/capsule-producer.bats	bats	unit	default-bats	host package prefetch with throwaway TLS credentials and original archive signatures
+tests/capsule_producer_test.py	tool	unit	invoked-by-suite	local HTTPS capsule producer boundaries driven by capsule-producer.bats
+tests/metadata_discovery_test.py	tool	unit	invoked-by-suite	metadata-only discovery and unchanged inventory integration driven by capsule-producer.bats
 tests/manifest-schema.bats	bats	unit	default-bats	manifest/board/family schema validation
 tests/package-contract.bats	bats	unit	default-bats	package sets, staging classification, debug delta, kernel freeze
 tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators
@@ -68,6 +78,7 @@ tests/kernel-bench-report.test.sh	shell	unit	default-shell	canonical two-board a
 tests/kernel-artifact-reuse.test.sh	shell	integration	default-shell	authenticated APT kernels, release metadata reuse, board gates and unpublished local source builds
 tests/lib/kernel-release-fixtures.sh	helper	support	invoked-by-suite	offline kernel release metadata, package, git history and compiler-boundary fixtures
 tests/lib/clear-workflow-env.sh	helper	support	invoked-by-suite	clear ambient GitHub Actions and runner context before defining offline scenarios
+tests/lib/pipewire-clock-contract.py	tool	support	invoked-by-suite	PipeWire clock contract checker invoked by runtime-services.bats
 tests/fixtures/kernel-firmware-v7.2.json	fixture	support	not-executed	real pinned v7.2 module metadata and full-firmware 26.8.3 file inventory, no blobs
 tests/lib/kernel-boot-fixtures.bash	helper	support	invoked-by-suite	offline dpkg-deb and tree-manifest fixtures for kernel-boot-staging.bats
 tests/kernel-config-fragment.bats	bats	unit	default-bats	Kconfig fragment survival gate and required/forbidden symbol manifests
@@ -80,6 +91,7 @@ tests/packaging-hygiene.bats	bats	unit	default-bats	absence guards for removed s
 tests/mkosi-contract.bats	bats	unit	default-bats	build-log census signatures and the lint that governs them
 
 # --- shell suites (run order) --------------------------------------------
+tests/audio-card-reprobe.test.sh	shell	unit	default-shell	Selected sound card reprobe, input refusal, per-card throttle and bounded udev failures
 tests/brand-assets-integrity.test.sh	shell	unit	default-shell	vendored brand mark matches brand-assets.lock.json; notice and installer wiring
 tests/fetch-debs-apt-chain.test.sh	shell	integration	default-shell	first-party apt chain: gpg, mTLS, curl fallback, fatal failure legs
 tests/fetch-debs-retry.test.sh	shell	unit	default-shell	fetch retry bounds and backoff
@@ -96,6 +108,7 @@ tests/rauc-transition-contract.test.sh	shell	unit	default-shell	verity migration
 tests/verity-bundle.test.sh	shell	integration	default-shell	real RAUC (whatever is on PATH) verity adaptive fixture plus shipped producer contract
 tests/rauc-bundle-arch.test.sh	shell	unit	default-shell	Stage-4 bundle install uses a host-native rauc pair, never the target-arch one, on both Stage-4 adapters
 tests/rauc-post-install-label.test.sh	shell	unit	default-shell	post-install relabel reads each target's own GPT label and fails closed on missing metadata
+tests/slot-image-identity.test.sh	shell	unit	default-shell	factory slots and the OTA image of one tree differ only in superblocks (shared checksum seed, per-slot UUID after)
 tests/update-capabilities.test.sh	shell	unit	default-shell	build-generated update capability schema, UID identities and complete feature set
 tests/release-candidate-contract.test.sh	shell	integration	default-shell	candidate sealing, loader handoff, bounded cleanup, interrupt safety
 tests/publish-release.test.sh	shell	integration	default-shell	stubbed R2 publisher and CMS signature, serial, promotion, refresh, retention contracts
@@ -125,9 +138,12 @@ tests/apt-first-party-origin.test.sh	shell	integration	default-shell	real offlin
 tests/prune-paths-removefiles.test.sh	shell	integration	default-shell	single-source prune-paths.list generates a real mkosi RemoveFiles= merge (Todo 29)
 tests/reprune-hook.test.sh	shell	integration	default-shell	device reprune hook + apt cache writer, real glob/doc pruning, never fails dpkg (Todo 29)
 tests/apt-mtls-and-dedupe.test.sh	shell	unit	default-shell	_apt-readable client key, one Debian source, arch-qualified URI
+tests/app-apt-archives-clean.test.sh	shell	unit	default-shell	final rootfs ships no downloaded .deb: app-layer clean ignores the device /data cache redirect and fails on leftovers
+tests/app-build-logs-dropped.test.sh	shell	unit	default-shell	final rootfs carries no build-time apt/dpkg/alternatives logs; unrelated logs and /var/log/apt stay
 tests/kernel-freeze-guardrails.test.sh	shell	integration	default-shell	holds plus pin block a real apt-get -s upgrade, first-party still upgrades
 tests/edge-test-variant.test.sh	shell	unit	default-shell	edge-test sibling-variant inheritance, ordered defconfig fragments, and the release refusal for a debug kernel
 tests/firmware-prune.test.sh	shell	unit	default-shell	firmware is pruned only where an installed-module sweep proves no consumer
+tests/firmware-closure-gate.test.sh	shell	unit	default-shell	final rootfs CLI and source-stage firmware closure, complete inventories, exceptions and rootfs-contained symlinks
 tests/full-firmware-bluetooth-closure.test.sh	shell	unit	default-shell	Bluetooth static/runtime closure, closed hardware gaps and prune mutation proof
 tests/slot-reserve.test.sh	shell	unit	default-shell	populated ext4 bavail and inode floors, exact boundary and reserved-block mutations
 tests/mpp-dev-runtime-contract.test.sh	shell	unit	default-shell	the librockchip-mpp-dev REMOVE verdict stays removed
@@ -175,6 +191,7 @@ tests/real-rauc-cleanup-contract.test.sh	shell	privileged	opt-in	same RAUC servi
 # --- driven by a default row, never standalone ---------------------------
 tests/manifest-helpers.bash	helper	support	invoked-by-suite	shared bats setup and fixture helpers; must never define an @test or the split counts stop summing
 tests/lib/assertions.sh	helper	support	invoked-by-suite	the one ok/bad/assert_eq/assert_contains library for the collecting shell harnesses
+tests/lib/x86-slot-image-identity.sh	helper	support	invoked-by-suite	real native/container x86 factory p2 identity against OTA, driven by slot-image-identity.test.sh
 tests/lib/kernel-stage-fixture.sh	helper	support	invoked-by-suite	directory-backed slots and real kernel archive for kernel staging
 tests/kernel-stage-contract-fixtures.sh	tool	support	invoked-by-suite	real producer serialization for self-contained consumer fixture copies
 tests/fixtures/kernel-stage-contract/staged-state.json	fixture	support	not-executed	byte-identical real producer staged record for the adopted consumer contract
@@ -224,6 +241,16 @@ tests/manifests/fixtures/invalid-family-missing-arch.yaml	fixture	support	not-ex
 tests/manifests/fixtures/valid-board-interfaces.yaml	fixture	support	not-executed	positive board manifest fixture
 tests/manifests/fixtures/valid-board.yaml	fixture	support	not-executed	positive board manifest fixture
 tests/manifests/fixtures/valid-family.yaml	fixture	support	not-executed	positive family manifest fixture
+tests/manifests/fixtures/hardware-policy/unknown-class.yaml	fixture	support	not-executed	unknown family exclusion rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/preserved-prefix.yaml	fixture	support	not-executed	preserved class prefix rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/bluetooth-parent.yaml	fixture	support	not-executed	Bluetooth parent prefix rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/bluetooth-child.yaml	fixture	support	not-executed	Bluetooth child prefix rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/unexcluded-include.yaml	fixture	support	not-executed	invalid board add-back rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/board-exclude.yaml	fixture	support	not-executed	board exclusion rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/attachable.yaml	fixture	support	not-executed	attachable exclusion rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/preserved-candidate.yaml	fixture	support	not-executed	nested preserved sweep candidate rejected by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/valid-excludes.yaml	fixture	support	not-executed	family exclusions and duplicate sweep prefix exercised by manifest-schema.bats
+tests/manifests/fixtures/hardware-policy/valid-include.yaml	fixture	support	not-executed	board add-back exercised by manifest-schema.bats
 tests/manifests/fixtures/production-baseline/orange-pi-5-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/rock-5b-plus.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved
 tests/manifests/fixtures/production-baseline/x86-minipc.params	fixture	support	not-executed	frozen production resolve output; a diff here means the production path moved

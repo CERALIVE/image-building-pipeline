@@ -70,14 +70,18 @@ it), so it cannot simply move to read-only `/usr`. Split it:
   **or** a `ConditionPathExists=!` `ExecStartPre=` seed step that copies the default
   on first boot if the operator config is absent.
 
-> **HARD BLOCKER — confext needs systemd ≥ 253.** `systemd-confext` shipped in
-> **systemd v253 (Feb 2023)**. The device base OS is **Debian bookworm, which ships
-> systemd v252** — confext is **NOT available**. So the confext route requires
-> **upgrading the base OS beyond bookworm** (e.g. trixie / a systemd ≥253 backport)
-> first. Until the base is upgraded, only the first-boot-seed fallback (no `/etc`
-> overlay) is workable, and `/etc/ceralive/config.json` cannot be delivered by the
-> extension at all — it must be seeded at runtime. This is the single largest reason
-> the sysext migration is deferred and not "just a path move".
+> **confext is available in the base OS.** `systemd-confext` needs systemd ≥ 253
+> (Feb 2023). The image is Debian 13 (trixie) with systemd 257 and ships
+> `/usr/bin/systemd-confext` and `systemd-confext.service`, so the OS version no
+> longer rules the confext route out. This repository has not merged a confext on a
+> device image, so treat it as available, not as exercised.
+>
+> The requirement that remains is the relocation in items 1, 2 and 4: the
+> application's units, udev rules and web root must leave `/etc` and `/var` for
+> `/usr` or `/opt`. A sysext cannot carry them where they are today, and confext does
+> not change that. That relocation, not the OS version, is why the sysext migration
+> is deferred and not "just a path move". Whichever route item 3 takes — confext or
+> the first-boot seed — it only covers the mutable config.
 
 ### 4. web root → `/usr/share/ceralive/www/` (or `/opt/ceralive/www/`)
 
@@ -99,7 +103,7 @@ Once relocated, the CeraUI sysext build follows the same `sysext.sh` contract as
 srtla (and historically ceracoder, retired 2026-06-11):
 
 - The build writes `/usr/lib/extension-release.d/extension-release.ceraui` with
-  `ID=<os-id>` + `VERSION_ID=<os-version>` matching the (upgraded) host os-release,
+  `ID=<os-id>` + `VERSION_ID=<os-version>` matching the host os-release,
   or the kernel refuses to merge it.
 - `refresh_app_layer` already restarts `ceralive.service` after a sysext refresh —
   unchanged and still required, because CeraUI holds **in-process native FFI** to
@@ -119,8 +123,8 @@ the runtime OS slot's `/usr/lib`.
 - [ ] units in `/usr/lib/systemd/system/`, not `/etc/systemd/system/`
 - [ ] udev rules in `/usr/lib/udev/rules.d/`, not `/etc/udev/rules.d/`
 - [ ] default config at `/usr/share/ceralive/config.json.default`
-- [ ] live `/etc/ceralive/config.json` delivered via confext (**requires base OS
-      systemd ≥ 253 — base upgrade beyond bookworm**) or first-boot seed
+- [ ] live `/etc/ceralive/config.json` delivered via confext (the base OS ships
+      `systemd-confext`; not yet exercised on a device image) or first-boot seed
 - [ ] web root at `/usr/share/ceralive/www/` (or `/opt/ceralive/www/`)
 - [ ] backend static-serve root + unit `WorkingDirectory`/`ExecStart` updated to the
       new `/usr` paths

@@ -2,6 +2,31 @@
 
 ## KEY FACTS
 
+**Runtime test timing [EXISTS: host fixtures, not hardware qualification].**
+The hostname fixture keeps the production 120-second ownership deadline and
+still bounds each candidate to four probes; a four-second deadline incorrectly
+treated scheduler delays in synchronous command stubs as Avahi failures.
+Hostname values, collision handling and consumer restart assertions are unchanged.
+Malformed-response fixtures explicitly retain their existing four-second failure
+budget; they must not busy-poll a deliberately unready fake for 120 seconds.
+
+The recent Rock Type-C correction test fixes `date +%s` at marker mtime plus
+nine seconds. The existing older-than-ten-seconds case still permits a new
+cycle. Time spent scheduling fixture commands cannot change the attachment age.
+
+Fan tests drive fake-governor transitions at the real monitor's poll-sleep
+boundary, after priming and after the preceding tick has consumed its state.
+They sample the actual `cur_state` file at each sleep boundary, including after
+the boost write, and retain the real kick sleep. A mid-kick governor decision
+runs after that observation and before the timer returns. No background writer
+or sampler can outrun the monitor, miss a transient kick, or outlive the test.
+Production discovery, edge detection, writes, timers and restoration are unchanged.
+
+The hung-Git fixture sleeps indefinitely, so only the real `timeout(1)` timer
+can terminate it and permit the retry. Both attempts use the normal 30-second
+fixture deadline; a one-second deadline also killed healthy stubs on loaded
+runners. The test still requires exactly two attempts and the pinned tree.
+
 **Kernel releases [PARTIAL: owner settings/publication pending].**
 `ci/kernel-release.py` retains the immutable local candidate engine. Its
 `--publish` adapter requires the exact master workflow, first attempt, approved
@@ -636,6 +661,7 @@ Each `[N/9]` stage BODY lives in one module under `lib/stages/`:
 | `[6/9]` | `tar-emit.sh` | `emit_artifact` |
 | `[6b/9]` | `boot-verify.sh` | — |
 | `[6c/9]` | `size-gate.sh` | `compare_size_against_baseline` |
+| `[6c-firmware/9]` | `firmware-closure-gate.sh` | shared sweep collector via `lib/check-firmware-closure.sh`; [contract](../firmware-closure.md) |
 | `[7/9]` | `parity.sh` | — |
 | `[8/9]` | `assemble.sh` | both bootloader-adapter branches |
 
@@ -1128,7 +1154,14 @@ never about the file share.
 **Build entry point** [EXISTS]
 
 The **container build is the canonical path.** The orchestrator runs mkosi v26
-inside a pinned `debian:trixie-slim` builder (`ci/Dockerfile`). Native builds
+inside a pinned `debian:trixie-slim` builder (`ci/Dockerfile`). The Dockerfile
+fetches the full upstream commit behind v26 and verifies `HEAD` before
+installation. Pip verifies the wheels from `ci/mkosi-build-requirements.txt`
+both at download and when installing them into a disposable build venv. The
+runtime venv installs the locally built mkosi wheel against its recorded
+SHA-256. Both installs disable the package index. The Dockerfile and lock
+both affect builder cache identity.
+`.mkosi-version` tracks the release version. Native builds
 (`--native` / `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12
 on a Debian trixie+ host. See [`docs/host-support.md`](../host-support.md)
 for the full host matrix.
@@ -1563,6 +1596,15 @@ same-PR requirement).
   unusable primary/subkey states, and keyring parsing or normalization failures
   fail before apt runs. Source pins and the stdin-only secret rotation procedure
   are in [`docs/RELEASE-PROCESS.md`](../RELEASE-PROCESS.md) §4.
+- **Sealed BSP redirects [EXISTS: fixture-qualified]** — discovery and capsule
+  preparation share an optional `bsp.max_redirects` policy (integer 0-3,
+  default 0). Only uncredentialed BSP requests may follow manually validated
+  HTTPS hops. Keep `https://apt.armbian.com` as the logical origin and retain
+  original signed bytes and signed-index hashes/sizes; mirror URLs belong only
+  in discovery/capsule receipts, never authenticated inventory rows. Each hop
+  shares the object's deadline and size bound. See
+  [`image measurement`](../image-measurement.md). Live build transports and
+  kernel-scoped `bsp-provenance.json` are separate contracts.
 - **Non-Armbian package staging is fail-closed** — a family with
   `armbian_branch: none` emits no Armbian fetch in DRY_RUN and a real `fetch_bsp`
   invocation fails until an authenticated, exact-versioned Debian BSP source is
@@ -2483,12 +2525,37 @@ cases; the vendor cases were removed with the retired track).
 **Firmware is pruned only where an installed-module sweep proves no consumer**
 [EXISTS]
 
-`prune_irrelevant_rk3588_firmware` used to delete six directories by NAME. It now
-reads every installed module with `modinfo -F firmware`, builds the real consumer
-set, and KEEPS — naming the exact blocking reference — any candidate a module can
-request. The candidate list is an input to that check, not the decision, which is
-what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
-`r8a779x_usb3_rom.mem` safe.
+`mkosi/customize/firmware-sweep.sh::firmware_sweep <root>` reads the resolver's
+`FIRMWARE_SWEEP_PREFIXES`, `FIRMWARE_SWEEP_FILES` and `FIRMWARE_PRESERVED_ROOTS`.
+Its `firmware_sweep_module_refs` reads `modinfo -F firmware` on every installed
+module and the NUL-separated `firmware=` entries in `modules.builtin.modinfo`.
+That is a second reader on purpose: the device stager's copy is a hashed kernel
+build input, so changing it under the released package version fails the
+immutable candidate-identity gate; the next kernel revision bump owns the move.
+The scan is all-or-nothing: both `find` walks must complete, every discovered
+module must answer `modinfo`, and every built-in metadata file must be read.
+`modules.builtin.modinfo` is parsed as the kernel emits it — NUL-terminated
+`<module>.<key>=<value>` records from the vmlinux `.modinfo` section, ending in
+one NUL. Truncated or malformed records, and a driver listed in
+`modules.builtin` without a matching record, void the proof; non-firmware
+records such as `license` are normal. Any failure leaves the consumer set
+unprovable, prints the warning and removes NOTHING. An explicit empty
+`modules.builtin` is a valid empty inventory; an orphan empty metadata file is
+absence of proof.
+A kept candidate names its driver and reference;
+nested candidates such as `intel/ipu` are checked independently of their parent.
+Preserved candidates fail before any deletion. Bluetooth candidate and retained
+object assertions still surround the sweep.
+
+The call remains after the platform firmware-package install. The function has
+no architecture gate: an empty prefix list logs `no sweep candidates for this
+family` before inspecting the root and leaves all files intact. **x86 bring-up
+must install its firmware in this platform layer and call `firmware_sweep` after
+that install.** Today's non-arm64 pass-through is unchanged; no x86 image is
+qualified by the synthetic i915 consumer test.
+
+The device stager's `firmware-refs` output is unchanged: sorted, deduplicated
+paths from the installed modules of the selected release.
 
 - **`brcm/`, `rtl_bt/`, `rtw88/`, `rtw89/` and `rockchip/` are never candidates** —
   they carry the two boards' own Wi-Fi, Bluetooth and SoC blobs. `mediatek/` and
@@ -2551,10 +2618,10 @@ what makes adding `microchip`, `nvidia`, `tegra`, `renesas` and the top-level
 - **Nothing is removed as a PACKAGE by this firmware prune.** The independent
   Todo-48 AP drill removes `hostapd` from the future image package list, not here.
 
-Guard: `tests/firmware-prune.test.sh` (42 checks — the two added ones assert the
-builder image installs `kmod` and fails its own build without `modinfo`, because
-every synthetic-tree case above passes vacuously on a builder that cannot run the
-sweep).
+Guards: `tests/firmware-prune.test.sh` and
+`tests/full-firmware-bluetooth-closure.test.sh`. The firmware suite also pins builder
+`modinfo` provisioning and rejects a scratch postinst with the sweep moved
+before the firmware install.
 
 **A Kconfig fragment SYMBOL is not a Kconfig fragment RESULT — `merge_config.sh -m`
 will not tell you the difference** [EXISTS]
@@ -3546,9 +3613,19 @@ reads their recorded filename/version/architecture/SHA-256 from
 `first-party` provenance. All other first-party names still require the index.
 The ext4 rootfs image CONTENT is reproducible with fixed inputs and
 `SOURCE_DATE_EPOCH` (env override → HEAD commit time → frozen fallback, via
-`common.sh::resolve_source_date_epoch`). Factory assembly and the OS-bundle
-producer share `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
+`common.sh::resolve_source_date_epoch`). RK3588 and x86 factory assembly and the shared
+OS-bundle producer use `lib/disk/slot-image.sh::make_slot_image`: frozen 4096 MiB geometry,
 deterministic UUID/hash seed, `mkfs.ext4 -d`, and the 512 MiB/inode reserve check.
+Images made through that writer use ONE label-independent checksum and hash seed
+(`slot_image_seed_uuid`, `metadata_csum_seed`) and get their label-derived UUID from
+`tune2fs -U` afterwards, so factory slots and the OTA image of one tree differ only
+in superblock blocks (`tests/slot-image-identity.test.sh`); that is what lets RAUC
+adaptive `block-hash-index` updates reuse the slot's inode tables and directories.
+The x86 factory assembler uses that same writer for its frozen 4096 MiB rootfs_a
+partition, including the host and unreadable-tree container paths.
+`tests/lib/x86-slot-image-identity.sh` compares the real GPT partition with OTA
+bytes and checks its label, UUID and surrounding disk bytes. This is host fixture
+coverage; x86 hardware and real adaptive-transfer qualification remain pending.
 Factory slots start with their own labels; the bundle's neutral-labelled image is
 relabelled after install from the written partition's own GPT PARTLABEL. The signed
 verity `.raucb` container is **not bit-reproducible**: native RAUC signing produces
@@ -3853,6 +3930,9 @@ generate_prune_local_conf()` runs at the top of `stage_mkosi()` (real builds
 only — `DRY_RUN` exits before this stage), reads the manifest via
 `lib/shared/prune-paths-lib.sh`, and writes a GITIGNORED
 `mkosi.images/runtime/mkosi.local.conf` with `[Content]\nRemoveFiles=<csv>`.
+The CSV reader propagates a missing-manifest error, and generation returns
+non-zero before creating either the output or a temporary file. An existing
+empty manifest remains a valid empty policy.
 The file exists ONLY while the owning mkosi invocation runs: before any fetch
 or DRY_RUN, the orchestrator removes a stale copy only if its complete four-line
 generated signature matches; a symlink, malformed file or operator config is
@@ -3911,6 +3991,14 @@ same glob list.
 `partial/` subdir), so downloaded `.deb`s persist across reboots and future
 software updates instead of the rootfs slot's own (small, RAUC-swapped)
 `/var/cache/apt/archives`.
+The runtime layer downloads `shared.list` BEFORE it writes that file, so those
+packages land in the slot's `/var/cache/apt/archives`, and the app layer inherits the
+redirect: a bare `apt-get clean` there cleans the `/data` path and exits 0. The app
+layer's `clean_apt_archives` therefore names `/var/cache/apt/archives` explicitly and
+fails the build if a `.deb` remains (`tests/app-apt-archives-clean.test.sh`).
+The same layer removes the build's apt/dpkg/alternatives logs from `/var/log` after its
+last transaction (`drop_build_package_logs`, `tests/app-build-logs-dropped.test.sh`):
+nothing reads them, and first boot would otherwise seed them onto `/data/log`.
 
 **Third-party RK3588 MPP runtime joins the kernel-freeze hold set — gated on
 RESOLVED package membership, never a blind architecture check.**
@@ -4998,8 +5086,22 @@ has never carried this rule, sat flat at 49 fds for 2 h 30 m on the same engine.
 **The trade is stated rather than buried.** Removing the floor restores PR #180's
 original defect IN THE DEGRADED SET ONLY — a board probed with no HDMI audio parks
 the card at `off` and `hw:CARD=HDMIIN` leaves `list-devices` until something
-re-enumerates it. That is an operator-visible limitation, and it is strictly better
-than the alternative: the floor's benefit in that same degraded set was never
+re-enumerates it. The image now installs
+`/usr/libexec/ceralive/ceralive-audio-reprobe` from
+`mkosi/runtime/ceralive-audio-reprobe.sh` during `setup_pipewire_system_mode`.
+The root-run installer gives it mode 0755. The coordinated engine caller requests
+one re-enumeration only when a selected kernel card has no live PipeWire node.
+The helper accepts one `^[A-Za-z0-9_-]{1,32}$` id, matches it exactly against
+`/sys/class/sound/card*/id`, and sends sound remove/add events for that card alone.
+An exclusive nonblocking card lock and
+`/run/ceralive/audio-reprobe-<id>.stamp` enforce 30 seconds between attempts,
+including failed attempts. Malformed or future stamps refuse the request.
+Each udev command is bounded to one second; a failed remove never sends add.
+`CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, and installer destination
+`CERALIVE_LIBEXEC_DIR` support offline fixtures. The helper and installer are
+host-tested; physical no-signal-boot recovery still needs receiver qualification.
+
+This keeps the safe profile policy: the floor's benefit in the degraded set was never
 demonstrated (the node it publishes cannot start without a signal), while its cost is
 a proven fleet-wide engine death.
 
@@ -6104,7 +6206,7 @@ deliberately puts `pwm-fan` at `cooling_device6` with `max_state` **6** — not 
 reference board's `cooling_device4`/`max_state 4` — behind a decoy CPUFreq
 `cooling_device2` that must never be written, so any hardcoded index and any
 hand-invented kick value fails the suite. It pins the kick→restore round trip against
-an independently sampled `cur_state` timeline, the bounded window, all three
+a `cur_state` timeline sampled at the monitor's sleep boundaries, the bounded window, all three
 never-fire edges, startup priming, the mid-kick governor-re-assert race, a
 second cooldown/reheat cycle firing again (the property that makes a oneshot wrong),
 the `max_state`-is-READ-never-a-literal contract, the no-`pwm1`/`mode`/trip rule, the

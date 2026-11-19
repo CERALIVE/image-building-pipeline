@@ -130,6 +130,11 @@ dtb_packages: []
 firmware_packages:
   - armbian-firmware-full
 
+hardware_policy:
+  exclude_module_classes: [discrete-gpu, x86-igpu, datacenter-net, camera-ipu]
+  sweep_candidates: [qcom, intel, ath10k, ath11k, ath12k, updates, microchip, nvidia, tegra, renesas]
+  sweep_candidate_files: [r8a779x_usb3_rom.mem]
+
 # Decision D3: the staged U-Boot has no persistent fw_setenv → raw GPT bootcount
 # approach. Unchanged by the kernel retirement.
 rauc_bootloader_adapter: custom

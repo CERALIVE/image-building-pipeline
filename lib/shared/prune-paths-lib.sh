@@ -46,8 +46,10 @@ prune_paths_read() {
 # shape). Empty input yields an empty string, never a trailing/leading comma.
 prune_paths_csv() {
   local file="${1:-$(prune_paths_manifest_file)}"
+  local paths
+  paths="$(prune_paths_read "${file}")" || return 1
   local -a globs=()
-  mapfile -t globs < <(prune_paths_read "${file}")
+  [[ -z "${paths}" ]] || mapfile -t globs <<<"${paths}"
   (( ${#globs[@]} > 0 )) || { printf '\n'; return 0; }
   local IFS=,
   printf '%s\n' "${globs[*]}"

@@ -56,6 +56,7 @@ ensure_builder_image() {
   if "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
     return 0
   fi
+  [[ -z "${CERALIVE_SEALED_INPUTS:-}" ]] || die "sealed input capsule lacks the pinned mkosi builder image"
   [[ -f "${MKOSI_BUILDER_DOCKERFILE}" ]] \
     || die "canonical builder Dockerfile missing: ${MKOSI_BUILDER_DOCKERFILE}"
   log_info "builder image ${MKOSI_BUILDER_IMAGE} absent — building from ${MKOSI_BUILDER_DOCKERFILE} (mkosi ${MKOSI_VERSION_PIN} + Python ${MKOSI_PYTHON_FLOOR}+)"
@@ -195,7 +196,7 @@ generate_prune_local_conf() {
   local out
   out="$(prune_local_conf_path)"
   local csv
-  csv="$(prune_paths_csv)"
+  csv="$(prune_paths_csv)" || return 1
   [[ ! -e "${out}" && ! -L "${out}" ]] || die "mkosi local config already exists: ${out}"
   PRUNE_CONF_TEMP="$(mktemp "${out}.XXXXXX")"
   {
@@ -328,9 +329,14 @@ mkosi_invoke() {
 
   local -a cache_host_args=()
   mapfile -t cache_host_args < <(apt_proxy_container_host_args)
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    # This is the disposable guest's network namespace, with no external NIC.
+    cache_host_args+=(--network host)
+  fi
   "${runtime}" run --rm --privileged \
     "${cache_host_args[@]}" \
     "${env_flags[@]}" \
+    -e "CERALIVE_SEALED_INPUTS=${CERALIVE_SEALED_INPUTS:-}" \
     -e "CERALIVE_PIPELINE_DIR=/work" \
     -v "${PIPELINE_DIR}:/work" \
     -v "${bsp_dir}:/run/ceralive-bsp:ro" \
@@ -358,10 +364,15 @@ mkosi_invoke() {
         echo "mkosi: nested runtime Debian cache at ${CERALIVE_BUILD_APT_PROXY} (build-only)"
       fi
       cd /work/mkosi
+      sealed_proxy_args=()
+      if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+        sealed_proxy_args=(--proxy-url http://127.0.0.1:3142)
+      fi
       mkosi \
         --architecture='"${mkosi_arch}"' \
         --release='"${RELEASE}"' \
         --with-network=yes \
+        "${sealed_proxy_args[@]}" \
         --workspace-directory=/work/'"${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"' \
         '"${env_cli_str}"' \
         --environment CERALIVE_PIPELINE_DIR \

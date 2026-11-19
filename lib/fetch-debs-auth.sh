@@ -41,30 +41,48 @@ auth_keyring_has_exact_fingerprints() {
 }
 
 auth_lookup_package() {
-  local index="$1" package="$2" version="$3" arch="$4" rows
-  rows="$(awk -v want_pkg="${package}" -v want_version="${version}" -v want_arch="${arch}" '
+  # identity output adds exact Architecture/Size for metadata-only discovery.
+  local index="$1" package="$2" version="$3" arch="$4" format="${5:-legacy}" rows
+  rows="$(awk -v want_pkg="${package}" -v want_version="${version}" -v want_arch="${arch}" \
+      -v format="${format}" '
     BEGIN { RS=""; FS="\n" }
     {
-      pkg=""; ver=""; a=""; filename=""; sha="";
+      pkg=""; ver=""; a=""; filename=""; sha=""; size=""; delete fields
       for (i=1; i<=NF; i++) {
-        if ($i ~ /^Package: /) pkg=substr($i,10)
-        else if ($i ~ /^Version: /) ver=substr($i,10)
-        else if ($i ~ /^Architecture: /) a=substr($i,15)
-        else if ($i ~ /^Filename: /) filename=substr($i,11)
-        else if ($i ~ /^SHA256: /) sha=substr($i,9)
+        if ($i ~ /^[ \t]/ || index($i, ":")==0) continue
+        key=tolower(substr($i, 1, index($i, ":")-1))
+        value=$i; sub(/^[^:]*:[ \t]*/, "", value)
+        fields[key]++
+        if (key=="package") pkg=value
+        else if (key=="version") ver=value
+        else if (key=="architecture") a=value
+        else if (key=="filename") filename=value
+        else if (key=="sha256") sha=value
+        else if (key=="size") size=value
       }
-      if (pkg==want_pkg && (a==want_arch || a=="all") && (want_version=="" || ver==want_version) && filename!="" && sha!="")
+      if (format=="identity")
+        for (key in fields) if (fields[key]>1) invalid=1
+      if (pkg==want_pkg && (a==want_arch || a=="all") && (want_version=="" || ver==want_version) && filename!="" && sha!="") {
+        if (format=="identity") {
+          if (sha !~ /^[0-9a-f]{64}$/ || size !~ /^[1-9][0-9]*$/ ||
+              filename ~ /[[:space:]]/) invalid=1
+          printf "%s\t%s\t%s\t%s\t%s\n", filename, sha, ver, a, size
+        } else
         printf "%s\t%s\t%s\n", filename, sha, ver
+      }
     }
-  ' "${index}")"
+    END { if (invalid) exit 1 }
+  ' "${index}")" || return 1
   [[ "$(grep -c . <<<"${rows}")" -eq 1 ]] || return 1
   printf '%s\n' "${rows}"
 }
 
 auth_release_has_identity() {
-  local release="$1" suite="$2" component="$3" arch="$4"
-  awk -v want_suite="${suite}" -v want_component="${component}" -v want_arch="${arch}" '
-    $1=="Suite:" { suite_count++; suite=$2 }
+  local release="$1" suite="$2" component="$3" arch="$4" codename="${5:-}"
+  awk -v want_suite="${suite}" -v want_component="${component}" -v want_arch="${arch}" \
+      -v want_codename="${codename}" '
+    $1=="Suite:" { suite_count++; suite=$2; suite_fields=NF }
+    $1=="Codename:" { codename_count++; codename=$2; codename_fields=NF }
     $1=="Architectures:" {
       architectures_count++
       for (i=2; i<=NF; i++) if ($i==want_arch) has_arch=1
@@ -75,7 +93,9 @@ auth_release_has_identity() {
     }
     END {
       exit !(suite_count==1 && architectures_count==1 && components_count==1 &&
-             suite==want_suite && has_arch && has_component)
+             suite==want_suite && suite_fields==2 && has_arch && has_component &&
+             (want_codename=="" ||
+              (codename_count==1 && codename_fields==2 && codename==want_codename)))
     }
   ' "${release}"
 }

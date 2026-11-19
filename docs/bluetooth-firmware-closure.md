@@ -340,6 +340,22 @@ place future missing blobs get filed.
 
 ### What the prune may and may not delete
 
+The platform calls `firmware_sweep` from `mkosi/customize/firmware-sweep.sh`
+after installing firmware packages. Its candidate prefixes, single files and preserved roots
+come from the resolved hardware policy. Nested prefixes are checked using
+`<candidate>/`, so removing `intel/ipu` cannot remove the kept `intel/ibt-*`
+siblings. The reference collector includes installed modules and built-in
+`modules.builtin.modinfo` entries; each kept candidate logs its driver and path.
+The scan is all-or-nothing: an unreadable module, a failed tree walk, or a
+built-in inventory without usable metadata makes the consumer set unprovable and
+keeps every candidate. Built-in metadata is validated as NUL-terminated
+`<module>.<key>=<value>` records, and every driver listed in `modules.builtin`
+must have its record; truncated or malformed data voids the proof. An explicit
+empty `modules.builtin` is a valid empty inventory; an orphan empty metadata
+file is not, and an empty module tree never authorises deletion on its own.
+A preserved candidate is fatal before any deletion. An empty family prefix
+list is an explicit no-op, including when no firmware directory exists.
+
 The platform postinstall snapshots every declared object **before** pruning,
 protects it from candidate deletion, and re-checks survival afterwards. Retained
 by name with their blocking reference cited: TI's `ti-connectivity/TIInit_*.bts`,
@@ -359,8 +375,8 @@ Guards: registered `tests/full-firmware-bluetooth-closure.test.sh` (28 cases —
 a synthetic third missing object, an unknown-but-present static reference, a
 missing root or object, duplicate/traversal/broad globs, unapproved exceptions,
 candidate deletion, absent `modinfo`, zero parsed modules, recursion outside the
-Bluetooth directory, and production preflight ordering) plus the unchanged
-`tests/firmware-prune.test.sh` (42 cases). The mutation legs are the evidence
+Bluetooth directory, and production preflight ordering) plus
+`tests/firmware-prune.test.sh`. The mutation legs are the evidence
 that matters: deleting a real `rtl_bt/rtl8852bu_fw.bin` made the checker exit
 non-zero naming `module=btrtl`, that exact path and `missing static object`, and
 restoring it returned GREEN with only the two approved gap diagnostics.

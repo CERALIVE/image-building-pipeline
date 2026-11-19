@@ -41,13 +41,24 @@ INDEX_LOOKUP_UNUSABLE=2
 # in its place.
 # ---------------------------------------------------------------------------
 index_release_digest() {
-  local verified_release="$1" path="$2" digest
+  # identity output also authenticates Size and rejects duplicate checksum rows.
+  local verified_release="$1" path="$2" format="${3:-digest}" digest
   [[ -s "${verified_release}" ]] || return 1
-  digest="$(awk -v path="${path}" '
-    /^SHA256:/ { inside=1; next }
+  digest="$(awk -v path="${path}" -v format="${format}" '
+    /^SHA256:/ { inside=1; blocks++; next }
     /^[A-Za-z0-9-]+:/ { inside=0 }
-    inside && $3 == path { print $1; exit }
-  ' "${verified_release}")"
+    inside && $3 == path {
+      count++
+      if (count==1) { digest=$1; size=$2; fields=NF }
+    }
+    END {
+      if (format=="identity") {
+        if (blocks!=1 || count!=1 || fields!=3 ||
+            digest !~ /^[0-9a-f]{64}$/ || size !~ /^[1-9][0-9]*$/) exit 1
+        printf "%s\t%s", digest, size
+      } else if (count) printf "%s", digest
+    }
+  ' "${verified_release}")" || return 1
   [[ -n "${digest}" ]] || return 1
   printf '%s' "${digest}"
 }

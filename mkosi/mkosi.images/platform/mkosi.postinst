@@ -50,104 +50,8 @@ install_kernel_source_boot_artifacts() {
   )
 }
 
-# prune_irrelevant_rk3588_firmware — remove firmware families that NO installed
-# module can ask for, and refuse to remove anything that one can.
-#
-# THE SWEEP IS THE AUTHORISATION, not documentation of a decision already made.
-# Every candidate directory is checked against the real consumer set above and
-# is kept — loudly — if any installed module references a file inside it. That
-# is what makes adding a family to the candidate list safe: a wrong entry fails
-# the build instead of silently disabling a radio on a shipped device.
-#
-# PRESERVED FAMILIES ARE NEVER CANDIDATES. brcm/, rtl_bt/, rtw88/, rtw89/ and
-# rockchip/ carry the two shipped boards' own Wi-Fi, Bluetooth and SoC blobs.
-# mediatek/ and iwlwifi/ are preserved for a different reason: no dual-board
-# module/firmware inventory exists yet to judge them, and "probably unused" is
-# not the standard this function is held to.
-#
-# If `modinfo` is unavailable the prune does NOT fall back to deleting by name —
-# it declines entirely and says so. Removing firmware with no proof is exactly
-# the failure mode the sweep exists to prevent.
-prune_irrelevant_rk3588_firmware() {
-  local root="${BUILDROOT:?BUILDROOT is required by mkosi postinstall}"
-  local fw="${root}/usr/lib/firmware"
-
-  [[ -d "${fw}" ]] || { log "no ${fw} — nothing to prune"; return 0; }
-
-  if ! command -v modinfo >/dev/null 2>&1; then
-    log "WARNING: modinfo is unavailable — cannot prove a firmware family has no consumer, so NOTHING is pruned"
-    return 0
-  fi
-
-  local -a candidates=(
-    qcom intel ath10k ath11k ath12k updates
-    microchip nvidia tegra renesas
-  )
-  # Single files rather than directories: the Renesas R-Car USB3 ROM images ship
-  # at the firmware root, so a directory-only candidate list would never see them.
-  local -a candidate_files=(
-    r8a779x_usb3_rom.mem
-  )
-
-  if declare -F bluetooth_firmware_assert_candidates >/dev/null; then
-    bluetooth_firmware_assert_candidates "${candidates[@]}" "${candidate_files[@]}" || exit 1
-  fi
-
-  local refs
-  if ! refs="$(installed_module_firmware_refs "${root}")"; then
-    log "WARNING: no installed module could be read by modinfo — the consumer set is unprovable, so NOTHING is pruned"
-    return 0
-  fi
-
-  local -a pruned=() kept=()
-  local name ref blocked
-  for name in "${candidates[@]}"; do
-    [[ -e "${fw}/${name}" ]] || continue
-    blocked=""
-    for ref in "${BT_FW_OBJECTS[@]}"; do
-      if [[ "${ref}" == "${name}/"* ]]; then blocked="${ref}"; break; fi
-    done
-    while IFS= read -r ref; do
-      [[ -n "${ref}" ]] || continue
-      if [[ "${ref}" == "${name}/"* ]]; then blocked="${ref}"; break; fi
-    done <<<"${refs}"
-    if [[ -n "${blocked}" ]]; then
-      kept+=("${name} (referenced by an installed module: ${blocked})")
-      continue
-    fi
-    rm -rf "${fw:?}/${name}"
-    pruned+=("${name}")
-  done
-
-  for name in "${candidate_files[@]}"; do
-    [[ -e "${fw}/${name}" ]] || continue
-    if grep -qxF -- "${name}" <<<"${refs}"; then
-      kept+=("${name} (referenced by an installed module)")
-      continue
-    fi
-    rm -f "${fw:?}/${name}"
-    pruned+=("${name}")
-  done
-
-  log "firmware prune: removed ${#pruned[@]} family/families with zero installed consumers${pruned[0]+: ${pruned[*]}}"
-  if (( ${#kept[@]} > 0 )); then
-    local k
-    for k in "${kept[@]}"; do
-      log "firmware prune: KEPT ${k}"
-    done
-  fi
-
-  local preserved
-  for preserved in brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi; do
-    if [[ " ${candidates[*]} " == *" ${preserved} "* ]]; then
-      log "FATAL: ${preserved} firmware is a preserved family and must never be a prune candidate"
-      exit 1
-    fi
-  done
-  if declare -F bluetooth_firmware_assert_retained >/dev/null; then
-    bluetooth_firmware_assert_retained "${fw}" || exit 1
-  fi
-}
+# shellcheck source=mkosi/customize/firmware-sweep.sh
+source "${SRCDIR:-mkosi}/customize/firmware-sweep.sh"
 
 # Collect the always-on HW-accel GStreamer set (parity-relevant) from env.
 read -r -a hw_gst <<<"${HW_ACCEL_GSTREAMER_PLUGINS:-}"
@@ -259,7 +163,7 @@ if [[ "${INSTALL_BOOT_BSP}" == "1" && ${#boot_bsp[@]} -gt 0 ]]; then
       "${BUILDROOT}/usr/lib/firmware" \
       "${SRCDIR}/.staging/${CERALIVE_BOARD:?}/rk3588-bluetooth-firmware-roots.txt"
   fi
-  prune_irrelevant_rk3588_firmware
+  firmware_sweep "${BUILDROOT}"
 else
   log "INSTALL_BOOT_BSP!=1 — boot BSP (kernel/DTB/U-Boot/firmware) deferred to the bootable/HW build (task 17)."
 fi

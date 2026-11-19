@@ -99,11 +99,12 @@ _fetch_first_party_curl_one() {
   fi
   tmp="$(mktemp "${_FIRST_PARTY_DEBS}/.tmp-firstparty-XXXXXX")"
   log_info "first-party fetch (curl): ${spec} resolved=${version}"
+  # Credentialed requests never follow redirects: a Location must not receive the client certificate.
   # -C -/retry_transient: see lib/fetch/bsp.sh for the reproduced slow-link
   # failure this fixes and why the two env overrides are needed alongside it.
   FETCH_RETRY_TIMEOUT=0 FETCH_RETRY_DEADLINE=3600 retry_transient \
     "first-party curl fetch ${spec}" \
-    curl -fsSL --retry 3 --retry-all-errors -C - "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
+    curl -fsS --proto '=https' --max-redirs 0 --retry 3 --retry-all-errors -C - "${CURL_TIMEOUT_OPTS[@]}" "${_FIRST_PARTY_CURL_AUTH[@]}" -o "${tmp}" "${url}"
   actual="$(sha256sum "${tmp}" | awk '{print $1}')"
   [[ "${actual}" == "${sha256}" ]] \
     || die "first-party package checksum mismatch for ${spec}: expected ${sha256}, got ${actual}"
@@ -134,14 +135,14 @@ _fetch_first_party_curl() {
   fi
 
   log_info "apt-get not found (non-Debian host) — fetching first-party packages via verified curl from ${repo_base}"
-  curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
+  curl -fsS --proto '=https' --max-redirs 0 --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${inrelease}" "${repo_base}/InRelease"
   auth_verify_release_to_file "${keyring}" "${inrelease}" "${verified_release}" \
     || die "first-party InRelease signature verification failed for ${repo_base}"
 
   expected_sha="$(index_release_digest "${verified_release}" Packages.gz)" \
     || die "first-party InRelease does not list Packages.gz SHA256 for ${repo_base}"
 
-  curl -fsSL --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
+  curl -fsS --proto '=https' --max-redirs 0 --retry 3 --retry-all-errors "${CURL_TIMEOUT_OPTS[@]}" "${curl_auth[@]}" -o "${packages_gz}" "${repo_base}/Packages.gz"
   index_verify_digest "${packages_gz}" "${expected_sha}" "first-party Packages.gz" \
     || die "first-party Packages.gz checksum mismatch"
   index_decompress_gz "${packages_gz}" "${packages}"
@@ -281,12 +282,32 @@ fetch_first_party() {
     log_info "  ${r} = $(get_pin "${r}")"
   done
 
-  log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    log_info "first-party sealed import: original origin ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (signed metadata; offline delivery)"
+  else
+    log_info "first-party source: ${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}/ (GPG Signed-By + mTLS)"
+  fi
   log_info "first-party packages: ${FIRST_PARTY_APT_PKGS[*]}"
   local -a download_specs=()
   mapfile -t download_specs < <(first_party_download_specs)
   log_info "first-party apt specs: ${download_specs[*]}"
   local -a staged_specs=("${download_specs[@]}")
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" && -z "${DRY_RUN}" ]]; then
+    sealed_repository firstparty "${debs}/.sealed-firstparty" || return 1
+    _FIRST_PARTY_INDEX="${_SEALED_INDEX}"
+    _SEALED_BASE="${APT_CERALIVE_URL}/dists/${CHANNEL}/binary-${ARCH}"
+    _SEALED_DEBS="${debs}"
+    local spec all_ok
+    for spec in "${download_specs[@]}"; do
+      all_ok=""
+      first_party_arch_all_ok "${spec%%=*}" && all_ok=--arch-all-ok
+      sealed_stage_deb "${spec}" "${all_ok}" || return 1
+    done
+    printf '[]\n' >"${DEST}/first-party-local-override.json"
+    validate_first_party_staged_debs "${debs}" "${staged_specs[@]}"
+    bsp_fetch_kernel "${debs}"
+    return
+  fi
   if [[ -z "${DRY_RUN}" ]]; then
     if [[ -n "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR:-}" ]]; then
       first_party_local_overrides "${debs}" "${CERALIVE_FIRST_PARTY_LOCAL_DEBS_DIR}"

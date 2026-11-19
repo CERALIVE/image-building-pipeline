@@ -189,7 +189,10 @@ globs = [
     fragment.strip().strip("'")
     for fragment in source_key_expr.split("hashFiles(", 1)[1].rsplit(")", 1)[0].split(",")
 ]
-assert globs == ["build", "lib/**/*.sh", "mkosi/**/*", "manifests/**/*", "ci/Dockerfile"], globs
+assert globs == [
+    "build", "lib/**/*.sh", "mkosi/**/*", "manifests/**/*", "ci/Dockerfile",
+    "ci/mkosi-build-requirements.txt",
+], globs
 
 tracked = subprocess.run(
     ["git", "-C", str(pipeline_dir), "ls-files"],
@@ -225,7 +228,8 @@ def hash_files(overrides: dict[str, bytes]) -> str:
 baseline = hash_files({})
 
 # A real build input changing MUST rotate the key…
-for changed in ("build", "lib/orchestrate.sh", "mkosi/mkosi.conf", "ci/Dockerfile"):
+for changed in ("build", "lib/orchestrate.sh", "mkosi/mkosi.conf", "ci/Dockerfile",
+                "ci/mkosi-build-requirements.txt"):
     assert changed in tracked, changed
     mutated = hash_files({changed: (pipeline_dir / changed).read_bytes() + b"\n# rotate\n"})
     assert mutated != baseline, f"BUG: changing {changed} does not rotate the mkosi cache key"
@@ -239,7 +243,8 @@ assert hash_files({outsider: b"unrelated"}) == baseline, (
 
 # The builder image key must rotate on its own inputs, independently.
 builder_expr = meta["env"]["BUILDER_SOURCE_KEY"]
-for required in ("ci/Dockerfile", "ci/requirements-ci.txt", ".mkosi-version"):
+for required in ("ci/Dockerfile", "ci/mkosi-build-requirements.txt",
+                 "ci/requirements-ci.txt", ".mkosi-version"):
     assert f"'{required}'" in builder_expr, (
         f"BUG: the builder cache key does not cover {required}"
     )

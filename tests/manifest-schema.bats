@@ -13,6 +13,128 @@ bats_require_minimum_version 1.5.0
 
 load manifest-helpers
 
+hardware_fixture() {
+  local kind="$1" fixture="$2"
+  HARDWARE_MANIFESTS="$BATS_TEST_TMPDIR/manifests"
+  cp -a "$PIPELINE_DIR/manifests" "$HARDWARE_MANIFESTS"
+  case "$kind" in
+    family)
+      cp "$FIXTURES/valid-family.yaml" "$HARDWARE_MANIFESTS/families/rk3588.yaml"
+      cat "$FIXTURES/hardware-policy/$fixture.yaml" >>"$HARDWARE_MANIFESTS/families/rk3588.yaml"
+      ;;
+    board)
+      cp "$FIXTURES/valid-family.yaml" "$HARDWARE_MANIFESTS/families/rk3588.yaml"
+      cp "$FIXTURES/valid-board.yaml" "$HARDWARE_MANIFESTS/boards/policy-board.yaml"
+      cat "$FIXTURES/hardware-policy/$fixture.yaml" >>"$HARDWARE_MANIFESTS/boards/policy-board.yaml"
+      ;;
+    class)
+      mkdir -p "$HARDWARE_MANIFESTS/hardware"
+      cp "$FIXTURES/hardware-policy/$fixture.yaml" "$HARDWARE_MANIFESTS/hardware/module-classes.yaml"
+      ;;
+  esac
+}
+
+reject_hardware_fixture() {
+  hardware_fixture "$1" "$2"
+  run python3 "$VALIDATE_PY" --manifests "$HARDWARE_MANIFESTS"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$3"* ]]
+}
+
+@test "hardware: registry schema is valid draft-2020-12" {
+  run check_schema_metaschema "$SCHEMA_DIR/module-classes.schema.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCHEMA-OK"* ]]
+}
+
+@test "hardware: validator accepts the complete production manifest tree" {
+  run python3 "$VALIDATE_PY"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"0 errors"* ]]
+}
+
+@test "hardware: family rejects unknown excluded class with its key" {
+  reject_hardware_fixture family unknown-class exclude_module_classes
+}
+
+@test "hardware: registry rejects preserved firmware prefix" {
+  reject_hardware_fixture class preserved-prefix firmware_prefixes
+}
+
+@test "hardware: registry rejects prefix containing Intel Bluetooth objects" {
+  reject_hardware_fixture class bluetooth-parent firmware_prefixes
+}
+
+@test "hardware: registry rejects prefix under Marvell Bluetooth root" {
+  reject_hardware_fixture class bluetooth-child firmware_prefixes
+}
+
+@test "hardware: board cannot include a class its family does not exclude" {
+  reject_hardware_fixture board unexcluded-include include_module_classes
+}
+
+@test "hardware: board cannot declare excluded classes" {
+  reject_hardware_fixture board board-exclude exclude_module_classes
+}
+
+@test "hardware: family cannot exclude an attachable class" {
+  reject_hardware_fixture class attachable exclude_module_classes
+}
+
+@test "hardware: family sweep cannot descend into a preserved root" {
+  reject_hardware_fixture family preserved-candidate sweep_candidates
+}
+
+@test "hardware: RK3588 boards resolve the same expanded firmware policy" {
+  local board prefixes
+  local expected="qcom intel ath10k ath11k ath12k updates microchip nvidia tegra renesas amdgpu radeon i915 xe mellanox netronome bnx2x intel/ipu intel/vsc"
+  for board in rock-5b-plus orange-pi-5-plus; do
+    run "$RESOLVE_SH" "$board"
+    [ "$status" -eq 0 ]
+    prefixes="$(printf '%s\n' "$output" | grep '^FIRMWARE_SWEEP_PREFIXES=')"
+    [ "$prefixes" = "FIRMWARE_SWEEP_PREFIXES='$expected'" ]
+    [[ "$prefixes" != *"mrvl/prestera"* ]]
+    [[ "$output" == *"FIRMWARE_SWEEP_FILES='r8a779x_usb3_rom.mem'"* ]]
+    [[ "$output" == *"FIRMWARE_PRESERVED_ROOTS='brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi'"* ]]
+  done
+}
+
+@test "hardware: x86 resolves empty exclusion and sweep lists" {
+  run "$RESOLVE_SH" x86-minipc
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FIRMWARE_SWEEP_PREFIXES=''"* ]]
+  [[ "$output" == *"FIRMWARE_SWEEP_FILES=''"* ]]
+  [[ "$output" == *"HARDWARE_EXCLUDED_MODULE_GLOBS=''"* ]]
+  [[ "$output" == *"HARDWARE_EXCLUDED_KCONFIG=''"* ]]
+}
+
+@test "hardware: board add-back subtracts classes and deduplicates candidates" {
+  hardware_fixture family valid-excludes
+  cp "$FIXTURES/valid-board.yaml" "$HARDWARE_MANIFESTS/boards/policy-board.yaml"
+  cat "$FIXTURES/hardware-policy/valid-include.yaml" >>"$HARDWARE_MANIFESTS/boards/policy-board.yaml"
+  run python3 "$RESOLVE_PY" merge \
+    --family "$HARDWARE_MANIFESTS/families/rk3588.yaml" \
+    --board "$HARDWARE_MANIFESTS/boards/policy-board.yaml" \
+    --family-schema "$FAMILY_SCHEMA" --board-schema "$BOARD_SCHEMA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'FIRMWARE_SWEEP_PREFIXES\tqcom i915 xe'* ]]
+  [[ "$output" == *$'FIRMWARE_SWEEP_FILES\tfixture.bin'* ]]
+  [[ "$output" == *$'HARDWARE_EXCLUDED_MODULE_GLOBS\tkernel/drivers/gpu/drm/i915/** kernel/drivers/gpu/drm/xe/**'* ]]
+  [[ "$output" == *$'HARDWARE_EXCLUDED_KCONFIG\tDRM_I915 DRM_XE'* ]]
+  [[ "$output" != *"HARDWARE_POLICY_"* ]]
+}
+
+@test "hardware: resolver refuses an invalid board add-back before emitting params" {
+  hardware_fixture board unexcluded-include
+  run python3 "$RESOLVE_PY" merge \
+    --family "$HARDWARE_MANIFESTS/families/x86_64.yaml" \
+    --board "$HARDWARE_MANIFESTS/boards/policy-board.yaml" \
+    --family-schema "$FAMILY_SCHEMA" --board-schema "$BOARD_SCHEMA"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"include_module_classes"* ]]
+  [[ "$output" != *$'ARCH\t'* ]]
+}
+
 # ===========================================================================
 # 1. Schema self-validation — the schemas are legal draft-2020-12 documents.
 # ===========================================================================

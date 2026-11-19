@@ -283,14 +283,21 @@ PY
   [ "$status" -eq 0 ]
 
   # The prune is no longer a literal list of absolute paths — it is a candidate
-  # list gated on a `modinfo -F firmware` sweep of the installed modules, so the
-  # firmware ROOT and the candidate NAME are asserted separately.
+  # list gated on a `modinfo -F firmware` sweep of the installed modules. The
+  # sweep is sourced from the policy-driven customisation layer, so the firmware
+  # ROOT, the wiring and the policy inputs are asserted where they now live.
   run grep -F 'usr/lib/firmware' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
-  run grep -E '^\s+qcom intel ath10k' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  run grep -F 'source "${SRCDIR:-mkosi}/customize/firmware-sweep.sh"' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
-  run grep -F 'modinfo' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  run grep -E '^  firmware_sweep "\$\{BUILDROOT\}"$' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
   [ "$status" -eq 0 ]
+  run grep -F 'FIRMWARE_SWEEP_PREFIXES' "$PIPELINE_DIR/mkosi/customize/firmware-sweep.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'modinfo' "$PIPELINE_DIR/mkosi/customize/firmware-sweep.sh"
+  [ "$status" -eq 0 ]
+  run grep -E '^[[:space:]]+qcom intel ath10k' "$PIPELINE_DIR/mkosi/mkosi.images/platform/mkosi.postinst"
+  [ "$status" -ne 0 ]
 
   run grep -F '/usr/lib/firmware/intel' "$PIPELINE_DIR/mkosi/mkosi.images/app/mkosi.postinst.chroot"
   [ "$status" -ne 0 ]
@@ -430,12 +437,14 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "builder image: the auto-built mkosi tag is content-addressed over ci/Dockerfile" {
+@test "builder image: the auto-built mkosi tag covers the recipe and Python lock" {
   # ensure_builder_image skips `docker build` when the tag already exists, so a
   # constant tag pins every host to whatever layers it first built — an edit to
   # ci/Dockerfile would then silently never take effect on the machine that cuts
   # the artifacts. Same defect the kernel builder already fixed.
-  run bash -c "grep -n 'ceralive-mkosi-builder:\${MKOSI_VERSION_PIN}-\$(sha256sum' '$PIPELINE_DIR/lib/orchestrate.sh'"
+  run grep -F 'sha256sum Dockerfile mkosi-build-requirements.txt' "$PIPELINE_DIR/lib/orchestrate.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'ceralive-mkosi-builder:${MKOSI_VERSION_PIN}-$(sha256sum <<<"${builder_inputs}"' "$PIPELINE_DIR/lib/orchestrate.sh"
   [ "$status" -eq 0 ]
 
   local plan_a plan_b

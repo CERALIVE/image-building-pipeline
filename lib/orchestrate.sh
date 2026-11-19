@@ -17,6 +17,7 @@
 #   [6/9]  tar-emit      normalized <timestamp>.rootfs.tar   stages/tar-emit.sh
 #   [6b/9] boot-verify   /boot is complete and loadable      stages/boot-verify.sh
 #   [6c/9] size-gate     rootfs is within its size budget    stages/size-gate.sh
+#   [6c-firmware/9] firmware-closure final driver firmware  stages/firmware-closure-gate.sh
 #   [6d/9] packages-lock exact installed .deb provenance    stages/packages-lock.sh
 #   [7/9]  parity        parity vs the v2 package manifests  stages/parity.sh
 #   [8/9]  assemble      Stage-4 .raw + signed .raucb        stages/assemble.sh
@@ -92,6 +93,8 @@ BUILD_LOCK_FD=""
 INSTALL_BOOT_BSP="${INSTALL_BOOT_BSP:-1}"
 # shellcheck source=lib/rauc-pki-contract.sh
 source "${RAUC_PKI_CONTRACT_SH}"
+# shellcheck source=lib/rootfs-measurement.sh
+source "${HERE}/rootfs-measurement.sh"
 CERALIVE_BUILD_MODE="${CERALIVE_BUILD_MODE:-development}"
 export CERALIVE_BUILD_MODE
 CHANNEL="${CHANNEL:-stable}"
@@ -133,8 +136,7 @@ if [[ -n "${MKOSI_BUILDER_IMAGE:-}" ]]; then
 else
   MKOSI_BUILDER_IMAGE_OVERRIDDEN=0
 fi
-# The auto-built tag is CONTENT-ADDRESSED over ci/Dockerfile, the same fix the
-# kernel builder already carries (lib/kernel/builder.sh::resolve_kernel_builder_tag).
+# The auto-built tag is CONTENT-ADDRESSED over the Dockerfile and Python lock.
 # With a constant tag, ensure_builder_image's "already present" short-circuit is
 # permanent: every host that built the image once keeps using it for good, so an
 # edit to ci/Dockerfile silently never takes effect anywhere. That is not
@@ -142,7 +144,9 @@ fi
 # been committed, tested green in CI on a cold runner, and changed nothing on the
 # machine that actually cuts the artifacts.
 if (( MKOSI_BUILDER_IMAGE_OVERRIDDEN == 0 )); then
-  MKOSI_BUILDER_IMAGE="ceralive-mkosi-builder:${MKOSI_VERSION_PIN}-$(sha256sum "${MKOSI_BUILDER_DOCKERFILE}" | cut -c1-12)"
+  builder_inputs="$(cd "$(dirname "${MKOSI_BUILDER_DOCKERFILE}")" &&
+    sha256sum Dockerfile mkosi-build-requirements.txt)" || die "cannot hash the canonical mkosi builder inputs"
+  MKOSI_BUILDER_IMAGE="ceralive-mkosi-builder:${MKOSI_VERSION_PIN}-$(sha256sum <<<"${builder_inputs}" | cut -c1-12)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -176,6 +180,8 @@ source "${STAGE_DIR}/tar-emit.sh"
 source "${STAGE_DIR}/boot-verify.sh"
 # shellcheck source=stages/size-gate.sh
 source "${STAGE_DIR}/size-gate.sh"
+# shellcheck source=stages/firmware-closure-gate.sh
+source "${STAGE_DIR}/firmware-closure-gate.sh"
 # shellcheck source=stages/packages-lock.sh
 source "${STAGE_DIR}/packages-lock.sh"
 # shellcheck source=stages/parity.sh
@@ -195,6 +201,8 @@ Options:
   --variant <name>   name a family variant overlay explicitly (default:
                      'default', the family's own default_variant — on rk3588 the
                      production mainline 'edge' track). Never inferred.
+  --rootfs-measurement  production ceralive8 content measurement using sealed
+                     inputs and approved public device root; no bundle signing
 
 Env:
   INSTALL_BOOT_BSP   1 (default) full device build incl. kernel/DTB/U-Boot/firmware
@@ -224,7 +232,7 @@ acquire_board_lock() {
 
 main() {
   local board="" manifest="" variant="${CERALIVE_KERNEL_VARIANT:-default}"
-  local kernel_only=0 release=0
+  local kernel_only=0 release=0 rootfs_measurement=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --board)     board="${2:-}"; shift 2 ;;
@@ -232,6 +240,7 @@ main() {
       --native)    MKOSI_NATIVE=1; shift ;;
       --kernel-only) kernel_only=1; shift ;;
       --release) release=1; shift ;;
+      --rootfs-measurement) rootfs_measurement=1; shift ;;
       --variant)   variant="${2:-}"; shift 2 ;;
       --variant=*) variant="${1#--variant=}"; shift ;;
       -h|--help)   usage; exit 0 ;;
@@ -246,8 +255,16 @@ main() {
   require_cmd ar
   require_cmd tar
   require_cmd flock
+  if (( rootfs_measurement )); then
+    (( kernel_only == 0 && release == 0 )) || die "--rootfs-measurement is a separate single-board purpose"
+    rootfs_measurement_preflight
+  else
+    [[ "${CERALIVE_BUILD_PURPOSE:-full}" == full ]] || die "select measurement explicitly with --rootfs-measurement"
+  fi
   if (( kernel_only == 0 )); then
-    rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+    if (( rootfs_measurement == 0 )) && [[ "${DRY_RUN:-0}" != "1" ]]; then
+      rauc_pki_resolve "${CERALIVE_BUILD_MODE}" "${CERALIVE_RAUC_PKI_DIR:-}" "${RAUC_KEYRING_FILE:-}"
+    fi
     export CERALIVE_RAUC_PKI_DIR RAUC_KEYRING_FILE RAUC_ROOT_SHA256
     acquire_board_lock "${board}"
     prune_local_conf_install_traps
@@ -273,6 +290,7 @@ main() {
   local out_dir="" artifact=""
 
   stage_resolve
+  if (( rootfs_measurement )); then rootfs_measurement_resolved; fi
   if (( release )); then
     "${CHECK_RELEASE_VARIANT_SH}" --variant "${KERNEL_VARIANT:-${variant}}"
   fi
@@ -311,9 +329,14 @@ main() {
   stage_tar_emit
   stage_boot_verify
   stage_size_gate
+  stage_firmware_closure_gate
   stage_packages_lock
   stage_parity
   stage_assemble
+  if (( rootfs_measurement )); then
+    rootfs_measurement_complete
+    return 0
+  fi
 
   log_info "[9/9] done"
   log_success "=== build complete: board='${board}' → ${artifact} ==="
@@ -364,8 +387,10 @@ run_mkosi_build() {
     ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
     OS_VERSION_ID APT_SUITE APT_SUITE_UPDATES APT_SUITE_SECURITY
     CERALIVE_BUILD_APT_PROXY
+    CERALIVE_SEALED_MEDIAMTX_SHA256
     INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
     KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+    FIRMWARE_SWEEP_PREFIXES FIRMWARE_SWEEP_FILES FIRMWARE_PRESERVED_ROOTS
     KERNEL_VARIANT KERNEL_SOURCE_DTB_DEB_DIR KERNEL_SOURCE_DTB_BOOT_DIR
     KERNEL_SOURCE_KERNEL_RELEASE
     HW_ACCEL_GSTREAMER_PLUGINS GSTREAMER_RUNTIME_PACKAGES
@@ -389,6 +414,7 @@ run_mkosi_build() {
   export ARCH RELEASE CHANNEL VARIANT BOARD_ID FAMILY SERIAL_CONSOLE DTB_NAME
   export INSTALL_BOOT_BSP ARMBIAN_APT_URL ARMBIAN_SUITE
   export KERNEL_PACKAGES DTB_PACKAGES UBOOT_PACKAGES FIRMWARE_PACKAGES
+  export FIRMWARE_SWEEP_PREFIXES FIRMWARE_SWEEP_FILES FIRMWARE_PRESERVED_ROOTS
   # Kernel-from-source DTB install mapping. EMPTY on a prebuilt-BSP resolve — a
   # family or variant declaring no `kernel_source:` block — which is what makes
   # the platform layer's copy step a strict no-op there: a source-built kernel
@@ -435,12 +461,15 @@ run_mkosi_build() {
   export APT_CLIENT_CRT_B64="${APT_CLIENT_CRT_B64:-}"
   export APT_CLIENT_KEY_B64="${APT_CLIENT_KEY_B64:-}"
   export APT_GPG_PUBLIC_B64="${APT_GPG_PUBLIC_B64:-}"
-  if [[ "${MKOSI_NATIVE:-0}" == 1 ]]; then
+  if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    CERALIVE_BUILD_APT_PROXY="http://127.0.0.1:3142"
+  elif [[ "${MKOSI_NATIVE:-0}" == 1 ]]; then
     CERALIVE_BUILD_APT_PROXY="$(apt_proxy_url)"
   else
     CERALIVE_BUILD_APT_PROXY="$(apt_proxy_container_url)"
   fi
   export CERALIVE_BUILD_APT_PROXY
+  export CERALIVE_SEALED_MEDIAMTX_SHA256="${CERALIVE_SEALED_MEDIAMTX_SHA256:-}"
 
   # RAUC device keyring (task 26): the IMMUTABLE root CA baked in at first flash,
   # committed (PUBLIC) at mkosi/runtime/rauc/ceralive-keyring.pem. Forwarded base64

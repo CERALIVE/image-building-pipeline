@@ -84,6 +84,14 @@ find_first() {
   find "$@" -name "${name}" "${preds[@]}" -print -quit 2>/dev/null
 }
 
+# Inspect image metadata: X_OK also tests the verifier mount's noexec policy.
+image_executable_file() {
+  local path="$1" mode
+  [[ -f "${path}" ]] || return 1
+  mode="$(stat -Lc '%a' -- "${path}")" || return 1
+  (( (8#${mode} & 0111) != 0 ))
+}
+
 # ---------------------------------------------------------------------------
 # read_manifest_packages — echo every active package in the canonical v2 runtime
 # package lists: manifests/packages/shared.list plus every <family>.delta.list,
@@ -199,7 +207,7 @@ main() {
   else
     fail "user 'ceralive' not present in /etc/passwd"
   fi
-  if [[ -x "${root}/usr/bin/sudo" ]]; then
+  if image_executable_file "${root}/usr/bin/sudo"; then
     pass "sudo binary present for CeraUI privileged helper"
   else
     fail "sudo binary missing — CeraUI add-on sudoers drop-in cannot execute"
@@ -248,7 +256,7 @@ main() {
   if [[ -f "${cera_service}" ]]; then
     local cera_exec
     cera_exec="$(sed -n 's/^ExecStart=//p' "${cera_service}" | awk 'NR == 1 { print $1 }')"
-    if [[ -n "${cera_exec}" && -x "${root}${cera_exec}" ]]; then
+    if [[ -n "${cera_exec}" ]] && image_executable_file "${root}${cera_exec}"; then
       pass "ceralive.service ExecStart target exists and is executable (${cera_exec})"
     else
       fail "ceralive.service ExecStart target missing/not executable: ${cera_exec:-<empty>}"

@@ -16,18 +16,21 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import yaml
+from image_lifecycle import job_disk, report_error
+from vm_process import (
+    CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
+    child_pipes, read_check_script, run, terminate, wait,
+)
+from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
 HERE = Path(__file__).resolve().parent
 IMAGE_URL = "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img"
 IMAGE_SHA = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
 RUNNER_VERSION = "2.338.2"
 RUNNER_SHA = "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
-
-
-def interrupted(_signum: int, _frame: object) -> None:
-    raise InterruptedError("runner stopped; destroying job disk")
 
 
 def die_with_parent(parent: int) -> None:
@@ -42,55 +45,77 @@ def die_with_parent(parent: int) -> None:
 
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
          seed: Path | None = None, source_bundle: Path | None = None,
-         disk_fd: int | None = None) -> None:
+         disk_fd: int | None = None, image_job=None, image_base: bool = False,
+         cancellation: Cancellation | None = None) -> None:
     """Pass the one-job credential in an anonymous RAM fd, not argv or a file."""
+    cancellation = cancellation or (image_job.cancellation if image_job else Cancellation())
+    cancellation.check()
     fd = os.memfd_create("ceralive-job", 0)
     try:
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
         args = [
             "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
-            "-smp", "16", "-m", "16384", "-display", "none", "-monitor", "none",
-            "-serial", "stdio", "-no-reboot",
+            "-smp", "4" if image_job or image_base else "16",
+            "-m", "20480" if image_job or image_base else "16384", "-display", "none", "-monitor", "none",
+            "-serial", f"file:/proc/self/fd/{image_job.console_write}" if image_job else "stdio",
+            "-no-reboot",
             "-drive", f"file={disk},format=qcow2,if=none,id=system",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
-            "-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0",
             "-fw_cfg", f"name=opt/ceralive/{kind},file=/proc/self/fd/{fd}",
         ]
+        if image_job:
+            from image_vm import image_arguments
+            args += image_arguments(image_job)
+        else:
+            args += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0"]
         if seed:
             args += ["-drive", f"file={seed},format=raw,media=cdrom,readonly=on"]
         if source_bundle:
             args += ["-drive", f"file={source_bundle.resolve()},format=raw,if=none,id=source,readonly=on",
                      "-device", "virtio-blk-pci,drive=source,serial=ceralive-source"]
         # The gh credential stays in the host's gh process; QEMU gets no host env secrets.
-        env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
-        process = subprocess.Popen(args, pass_fds=descriptors, env=env,
+        if image_job:
+            descriptors += (image_job.capsule_fd, image_job.console_write)
+        if any(private_fd < 3 for private_fd in descriptors):
+            raise RuntimeError("guest descriptor aliases a standard stream")
+        check_spawn_signals(cancellation)
+        process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
                                    preexec_fn=partial(die_with_parent, os.getpid()),
                                    stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        lines: list[bytes] = []
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE if image_job else subprocess.STDOUT,
+                                   restore_signals=True)
+        with child_pipes(process):
+            lines: list[bytes] = []
 
-        def console() -> None:
-            for line in process.stdout:
-                lines.append(line)
-                if kind != "jit":
-                    sys.stdout.buffer.write(line)
-                    sys.stdout.buffer.flush()
+            def console() -> None:
+                for line in process.stdout:
+                    lines.append(line)
+                    if kind != "jit":
+                        sys.stdout.buffer.write(line)
+                        sys.stdout.buffer.flush()
 
-        reader = threading.Thread(target=console)
-        reader.start()
-        try:
-            process.wait(timeout=seconds)
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            reader.join()
+            reader = None
+            try:
+                if image_job:
+                    image_job.capture(process, seconds)
+                else:
+                    reader = threading.Thread(target=console)
+                    reader.start()
+                    wait(process, time.monotonic() + seconds, cancellation)
+            finally:
+                terminate(process)
+                if reader:
+                    reader.join()
+                if image_job:
+                    image_job.state.update(qemu_reaped=True, qemu_exit=process.returncode)
+        cancellation.check()
+        if image_job:
+            if process.returncode:
+                raise RuntimeError(f"image guest exited ({process.returncode})")
+            return
         # Never relay runner logs: an untrusted job could print the JIT credential.
         expected = b"CERALIVE_BASE_READY" if seed else b"CERALIVE_JOB_DONE=0"
         output = b"".join(lines)
@@ -101,16 +126,33 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         os.close(fd)
 
 
-def main() -> int:
+def main(cancellation: Cancellation) -> int:
+    try:
+        changes = sanitize_startup(cancellation)
+    except (OSError, ValueError, KeyError, RuntimeError, StartupError) as error:
+        report_error(f"startup baseline failed: {error}")
+        return STARTUP_ERROR
+    for change in changes:
+        report_error(change)
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("build-base", "run", "check"))
+    parser.add_argument("operation", choices=("build-base", "run", "check", "image"))
     parser.add_argument("--base", required=True, type=Path)
     parser.add_argument("--group-id", type=int)
     parser.add_argument("--check-script", type=Path)
     parser.add_argument("--source-bundle", type=Path,
                         help="check only: read-only public-source tar capsule, never a directory share")
     parser.add_argument("--timeout", type=int, default=21600)
-    args = parser.parse_args()
+    parser.add_argument("--profile", choices=("kernel", "image"), default="kernel",
+                        help="build-base provisioning identity; kernel defaults remain unchanged")
+    from image_vm import add_arguments
+    add_arguments(parser)
+    try:
+        args = parser.parse_args()
+    except SystemExit as exc:
+        if exc.code == 0:  # argparse successfully printed help.
+            return 0
+        raise
     parent = os.getppid()
     parent_proc = Path("/proc") / str(parent)
     if (
@@ -120,29 +162,40 @@ def main() -> int:
     ):
         raise RuntimeError("run vm.py directly under flock --exclusive --close")
     die_with_parent(parent)
+    cancellation.check()
     child_setup = partial(die_with_parent, os.getpid())
     base = args.base.resolve()
     if "," in str(base):
         parser.error("commas are not supported in VM disk paths")
+    if args.operation == "image":
+        from image_vm import run_image
+        return run_image(args, parser, cancellation)
     if args.operation == "build-base":
         if base.exists():
             parser.error("base already exists; select a new base path")
         base.parent.mkdir(parents=True, exist_ok=True)
+        if args.profile == "image":
+            from image_resources import cgroup_admission, disk_headroom, require_host_lock
+            require_host_lock()
+            cgroup_admission()
+            disk_headroom(((base.parent, 257 * 1024**3),))
+            from image_resources import CAPS
+            CAPS.qemu_limit()
         with tempfile.TemporaryDirectory(prefix="base-", dir=base.parent) as directory:
             work = Path(directory)
             image = work / "ubuntu.img"
-            subprocess.run(["curl", "-fSL", "--connect-timeout", "30", "--max-time", "900",
-                            IMAGE_URL, "-o", str(image)], check=True,
-                           preexec_fn=child_setup, timeout=900)
+            run(["curl", "-fSL", "--connect-timeout", "30", "--max-time", "900",
+                 IMAGE_URL, "-o", str(image)], cancellation=cancellation,
+                preexec_fn=child_setup, timeout=900)
             with image.open("rb") as downloaded:
                 image_digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
             if image_digest != IMAGE_SHA:
                 raise RuntimeError("Ubuntu cloud image digest mismatch")
             disk = work / "base.qcow2"
-            subprocess.run(["qemu-img", "convert", "-O", "qcow2", str(image), str(disk)],
-                           check=True, preexec_fn=child_setup, timeout=300)
-            subprocess.run(["qemu-img", "resize", str(disk), "240G"], check=True,
-                           preexec_fn=child_setup, timeout=180)
+            run(["qemu-img", "convert", "-O", "qcow2", str(image), str(disk)],
+                cancellation=cancellation, preexec_fn=child_setup, timeout=300)
+            run(["qemu-img", "resize", str(disk), "128G" if args.profile == "image" else "240G"],
+                cancellation=cancellation, preexec_fn=child_setup, timeout=180)
             files = []
             for source, destination in (
                 ("provision.sh", "/root/provision.sh"),
@@ -154,6 +207,11 @@ def main() -> int:
             ):
                 files.append({"path": destination, "permissions": "0755", "encoding": "b64",
                               "content": base64.b64encode((HERE / source).read_bytes()).decode()})
+            if args.profile == "image":
+                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py"):
+                    files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
+                                  "permissions": "0755", "encoding": "b64",
+                                  "content": base64.b64encode((HERE / source).read_bytes()).decode()})
             files.append({
                 "path": "/etc/systemd/system/ceralive-runner.service", "permissions": "0644",
                 "content": "[Unit]\nAfter=network-online.target cloud-final.service docker.service\n"
@@ -166,19 +224,23 @@ def main() -> int:
             })
             config = {
                 "ssh_pwauth": False, "disable_root": True, "write_files": files,
-                "runcmd": [["bash", "/root/provision.sh", RUNNER_VERSION, RUNNER_SHA]],
+                "runcmd": [["bash", "/root/provision.sh", RUNNER_VERSION, RUNNER_SHA, args.profile]],
                 "power_state": {"mode": "poweroff", "delay": "now", "timeout": 30},
             }
             (work / "user-data").write_text("#cloud-config\n" + yaml.safe_dump(config))
-            (work / "meta-data").write_text("instance-id: kernel-base\nlocal-hostname: kernel-runner\n")
+            (work / "meta-data").write_text(
+                f"instance-id: {args.profile}-base\nlocal-hostname: {args.profile}-runner\n")
             seed = work / "seed.iso"
-            subprocess.run(["xorriso", "-as", "mkisofs", "-quiet", "-volid", "cidata",
-                            "-joliet", "-rock", "-o", str(seed),
-                            str(work / "user-data"), str(work / "meta-data")], check=True,
-                           preexec_fn=child_setup, timeout=180)
-            boot(disk, b"", "base", args.timeout, seed)
+            run(["xorriso", "-as", "mkisofs", "-quiet", "-volid", "cidata",
+                 "-joliet", "-rock", "-o", str(seed), str(work / "user-data"), str(work / "meta-data")],
+                cancellation=cancellation, preexec_fn=child_setup, timeout=180)
+            boot(disk, b"", "base", args.timeout, seed, image_base=args.profile == "image",
+                 cancellation=cancellation)
+            if args.profile == "image" and disk.stat().st_blocks * 512 > 32 * 1024**3:
+                raise RuntimeError("image base exceeds the 32 GiB allocated-byte budget")
             disk.chmod(0o444)
             # link is create-only, including against a concurrent base builder.
+            cancellation.check()
             os.link(disk, base)
         return 0
     if not base.is_file():
@@ -194,35 +256,62 @@ def main() -> int:
     if args.operation == "run" and (not args.group_id or args.group_id in (1, 5)):
         parser.error("run requires the dedicated kernel-release group ID, never a default")
     # An unlinked disk has no pathname to leak, even when Python cannot run finally.
-    with tempfile.TemporaryFile(prefix="job-", dir=base.parent) as overlay_file:
-        disk_fd = overlay_file.fileno()
-        overlay = Path(f"/proc/self/fd/{disk_fd}")
-        subprocess.run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
-                        "-b", str(base), str(overlay)], check=True,
-                       pass_fds=(disk_fd,), preexec_fn=child_setup, timeout=180)
+    with job_disk(base, cancellation=cancellation) as (overlay, disk_fd):
         if args.operation == "run":
-            response = subprocess.run([
+            response = run([
                 "gh", "api", "--method", "POST",
                 "orgs/CERALIVE/actions/runners/generate-jitconfig",
                 "-f", f"name=kernel-release-{os.getpid()}", "-F", f"runner_group_id={args.group_id}",
                 "-f", "labels[]=self-hosted", "-f", "labels[]=Linux", "-f", "labels[]=X64",
                 "-f", "labels[]=ceralive-kernel-vm", "-f", "work_folder=_work",
-            ], check=True, capture_output=True, timeout=180, preexec_fn=child_setup)
+            ], cancellation=cancellation, capture_output=True, timeout=180,
+                registration=True, preexec_fn=child_setup)
             payload = json.loads(response.stdout)["encoded_jit_config"].encode()
             if not payload or b"\n" in payload:
                 raise RuntimeError("invalid JIT response")
-            boot(overlay, payload, "jit", args.timeout, disk_fd=disk_fd)
+            boot(overlay, payload, "jit", args.timeout, disk_fd=disk_fd, cancellation=cancellation)
         else:
-            boot(overlay, args.check_script.read_bytes(), "check", args.timeout,
-                 source_bundle=args.source_bundle, disk_fd=disk_fd)
+            boot(overlay, read_check_script(args.check_script, cancellation), "check", args.timeout,
+                 source_bundle=args.source_bundle, disk_fd=disk_fd, cancellation=cancellation)
     print("CERALIVE_OVERLAY_REMOVED")
+    cancellation.check()
     return 0
 
 
-if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, interrupted)
+def exit_launcher() -> None:
+    """Return the status in the published image receipt through the only exit point."""
+    cancellation = Cancellation()
+    status = 1
     try:
-        sys.exit(main())
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
-        print(f"kernel runner: {exc}", file=sys.stderr)
-        sys.exit(1)
+        status = main(cancellation)
+    except SystemExit as exc:
+        if type(exc.code) is int and 0 < exc.code <= 255:
+            status = exc.code
+        if cancellation.exit_receipt is not None or status == 1:
+            report_error(exc)
+    except BaseException as exc:
+        report_error(exc)
+    finally:
+        try:
+            if cancellation.exit_receipt is not None:
+                status = 1
+                # Final receipt publication keeps signals blocked through this exit.
+                try:
+                    published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
+                    if type(published) is not int or published not in (0, 1):
+                        raise ValueError("invalid launcher_exit in image receipt")
+                    status = published
+                except BaseException as exc:
+                    report_error(exc)
+            else:
+                for stream in (sys.stdout, sys.stderr):
+                    try:
+                        stream.flush()
+                    except BaseException as exc:
+                        report_error(exc)
+        finally:
+            os._exit(status)
+
+
+if __name__ == "__main__":
+    exit_launcher()

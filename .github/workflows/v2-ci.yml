@@ -197,7 +197,7 @@ jobs:
             device-tree-compiler dosfstools e2fsprogs gdisk iproute2 kmod \
             libcurl4-openssl-dev libdbus-1-dev libfdisk-dev libglib2.0-dev \
             libjson-glib-dev libnl-genl-3-dev libssl-dev meson mtools \
-            jq ninja-build pkg-config procps rsync socat squashfs-tools systemd \
+            jq ninja-build pkg-config procps rsync socat squashfs-tools strace systemd \
             systemd-repart u-boot-tools util-linux zstd
 
       - name: Read shipped RAUC source pin

@@ -1,0 +1,9 @@
+schema: 1
+preserved_roots: [brcm]
+classes:
+  invalid:
+    description: Must not classify a child of a Bluetooth firmware root.
+    attachable: false
+    module_path_globs: [kernel/drivers/test/**]
+    firmware_prefixes: [mrvl/prestera]
+    kconfig_symbols: [TEST]

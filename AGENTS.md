@@ -67,10 +67,14 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 | Family kernel-only builds, fingerprints and image-equivalent Bluetooth/UHID firmware checks [EXISTS] | [Kernel-only lane](docs/kernel-build-from-source.md#kernel-only-build-lane-exists) |
 | Immutable kernel versions, APT image reuse and signed OS kernel floors [EXISTS] | [Artifact reuse](docs/kernel-build-from-source.md#released-kernel-reuse-exists); [channel publishing](docs/RELEASE-PROCESS.md#signed-channel-publishing-ceraui-os-agent) |
 | Immutable kernel candidates and owner-approved single-job KVM release runners [PARTIAL: settings/publication manual] | [Kernel release runbook](docs/kernel-release.md) |
+| Isolated offline image/rootfs measurement, host metadata discovery and bounded uncredentialed BSP redirects [PARTIAL: real VM/build qualification pending] | [Image measurement](docs/image-measurement.md); `ci/discover-image-metadata.py`; `tests/image-route.bats`; `tests/capsule-producer.bats` |
 | Fork CI, image-builder admission, owner-only jobs and runner registration [PARTIAL: group/move/probes owner-gated] | [CI security contract](docs/agents/ci-security.md) |
 | Kernel activation, boot identity, durable overlays/quarantine and owner-gated capability [PARTIAL] | [Activation lifecycle](docs/ota-activation.md) |
 | First-boot WiFi provisioning portal [PARTIAL]: brand mark, lock, notice and fail-soft rendering | [Portal contract](docs/agents/add-on-subsystem.md); [flow and brand refresh](docs/wifi-provisioning.md) |
 | Kiosk display and input stack | [KIOSK STACK](docs/agents/kiosk-stack.md) |
+| Selected audio card re-enumeration [PARTIAL: host tests only] | [Audio contract](docs/agents/key-facts.md); `tests/audio-card-reprobe.test.sh` |
+| Hardware-class registry, family exclusions, board add-backs and resolver output [EXISTS: policy data only] | [Hardware policy](docs/hardware-policy.md) |
+| Final-rootfs firmware closure after size gate [EXISTS: artifact gate] | [Closure contract](docs/firmware-closure.md); `tests/firmware-closure-gate.test.sh` |
 | Unsafe build/runtime patterns | [ANTI-PATTERNS](docs/agents/anti-patterns.md) |
 | Known issues, deferred work and hardware acceptance limits | [KNOWN ISSUES / DEFERRED](docs/agents/known-issues-deferred.md) |
 
@@ -90,4 +94,6 @@ Keep [physical bench-label verification](docs/DEFERRED.md) item 12 open without 
 - Do not log private keys or credential values; mTLS client keys must remain `_apt`-readable without undoing their numeric ownership.
 - One firmware owner: pin archive identity as well as version; an unexplained missing retained-module firmware reference fails closed.
 - Never treat DRY_RUN, a clean boot or a test-pattern stream as proof of physical capture, radio or full-image qualification.
+- Plan-only `DRY_RUN=1` must never resolve or access RAUC PKI; normal signer preflight and measurement public-root admission remain separate.
 - Kernel release runners must use throwaway KVM disks, no host shares/secrets and the workflow-restricted `kernel-release` group; never register a persistent or default-group runner.
+- Offline measurements use the explicit production purpose, approved public root, sealed inputs and private returns; they never constitute signed candidates.

@@ -252,6 +252,9 @@ setup_pipewire_system_mode() {
       || die "pipewire artifact not found: ${src}/${artifact} (is \$SRCDIR/runtime mounted?)"
   done
 
+  [[ -f "${CERALIVE_RUNTIME_SRC}/ceralive-audio-reprobe.sh" ]] \
+    || die "audio reprobe helper not found in runtime source"
+
   # 1. The dedicated system user. FAIL CLOSED: if it is somehow not created, the
   # units' User= would be unresolvable and systemd would refuse to start them — but
   # a silently root-running audio daemon is the failure this guards against, so the
@@ -286,6 +289,8 @@ setup_pipewire_system_mode() {
   install -D -m 0644 "${src}/ceralive-pipewire-bluez.dbus.conf" "${dbus_dir}/ceralive-pipewire-bluez.conf"
   install -D -m 0644 "${src}/ceralive-cerastream-pipewire.dropin.conf" \
     "${cerastream_dropin_dir}/40-pipewire.conf"
+  install -D -m 0755 "${CERALIVE_RUNTIME_SRC}/ceralive-audio-reprobe.sh" \
+    "${CERALIVE_LIBEXEC_DIR:-/usr/libexec/ceralive}/ceralive-audio-reprobe"
 
   # 3. Mask the packaged USER units. There is no user session on this appliance, so
   # they cannot start today — but "cannot start today" is a property of the image's
@@ -535,10 +540,16 @@ setup_rtmp_gateway() {
   local tarball="${tmpdir}/mediamtx.tar.gz"
 
   # Fetch the pinned tarball (or use a local one for offline verification).
-  if [[ -n "${MEDIAMTX_LOCAL_TARBALL:-}" ]]; then
-    [[ -f "${MEDIAMTX_LOCAL_TARBALL}" ]] \
-      || { rm -rf "${tmpdir}"; die "MEDIAMTX_LOCAL_TARBALL not a file: ${MEDIAMTX_LOCAL_TARBALL}"; }
-    cp "${MEDIAMTX_LOCAL_TARBALL}" "${tarball}"
+  local local_tarball="${MEDIAMTX_LOCAL_TARBALL:-}"
+  if [[ -n "${CERALIVE_SEALED_MEDIAMTX_SHA256:-}" ]]; then
+    [[ "${CERALIVE_SEALED_MEDIAMTX_SHA256}" == "${expected}" ]] \
+      || { rm -rf "${tmpdir}"; die "sealed MediaMTX object differs from the public recipe pin"; }
+    local_tarball="${CERALIVE_RUNTIME_SRC}/../.image-inputs/${CERALIVE_SEALED_MEDIAMTX_SHA256}"
+  fi
+  if [[ -n "${local_tarball}" ]]; then
+    [[ -f "${local_tarball}" ]] \
+      || { rm -rf "${tmpdir}"; die "MEDIAMTX_LOCAL_TARBALL not a file: ${local_tarball}"; }
+    cp "${local_tarball}" "${tarball}"
   else
     command -v curl >/dev/null 2>&1 || { rm -rf "${tmpdir}"; die "curl not found — cannot fetch MediaMTX"; }
     local url="${MEDIAMTX_URL_TEMPLATE//\{ver\}/${MEDIAMTX_VERSION}}"

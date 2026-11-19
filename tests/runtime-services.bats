@@ -161,7 +161,7 @@ load manifest-helpers
 @test "hostname: malformed Avahi snapshots fail closed without persisting identity" {
   local root="$BATS_TEST_TMPDIR/malformed-probe"
   make_hostname_fixture "$root"
-  run run_hostname_script "$root" "" malformed
+  CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" malformed
   [ "$status" -ne 0 ]
   [[ "$output" == *"index=<missing>"* ]]
   [[ "$output" == *"system-hostname=<missing>"* ]]
@@ -492,7 +492,7 @@ SH
   for scenario in misleading-state misleading-name; do
     root="$BATS_TEST_TMPDIR/$scenario"
     make_hostname_fixture "$root"
-    run run_hostname_script "$root" "" "$scenario"
+    CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" "$scenario"
     [ "$status" -ne 0 ]
     [[ "$output" == *"index=<missing>"* ]]
     [[ "$output" == *"system-hostname=<missing>"* ]]
@@ -506,7 +506,7 @@ SH
   for scenario in multiline-state multiline-name; do
     root="$BATS_TEST_TMPDIR/$scenario"
     make_hostname_fixture "$root"
-    run run_hostname_script "$root" "" "$scenario"
+    CERALIVE_HOSTNAME_MAX_WAIT=4 run run_hostname_script "$root" "" "$scenario"
     [ "$status" -ne 0 ]
     [[ "$output" == *"index=<missing>"* ]]
     [[ "$output" == *"hostname-file=<missing>"* ]]
@@ -833,6 +833,8 @@ EOF
   rm "$root/run/failed"
   : >"$root/iio/writes"
 
+  # Keep this attachment nine seconds old even if the runner is descheduled.
+  export TYPEC_TEST_NOW="$(( $(stat -c %Y "$root/run/corrected") + 9 ))"
   run run_typec_rock
   [ "$status" -eq 0 ]
   [ ! -s "$root/iio/writes" ]
@@ -2330,19 +2332,9 @@ SH
   local timeline="$BATS_TEST_TMPDIR/fk-edge-timeline"
   fankick_fake_thermal "$sysfs" 6 0
 
-  # Governor moves it 0 -> 1 shortly after the monitor primes.
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1 ) &
-  # Sample cur_state independently so the kick is observed, not inferred.
-  ( for _ in $(seq 1 24); do
-      fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
-      printf '\n' >>"$timeline"
-      sleep 0.1
-    done ) &
-  local sampler=$!
-
-  run fankick_run "$sysfs" 800 16
+  run fankick_run "$sysfs" 800 16 \
+    FANKICK_GOVERNOR_STATES=1 FANKICK_TIMELINE="$timeline"
   [ "$status" -eq 0 ]
-  wait "$sampler"
 
   [[ "$output" == *"nudging to state 6"* ]]
   [[ "$output" == *"max_state"* ]]
@@ -2363,17 +2355,9 @@ SH
   local timeline="$BATS_TEST_TMPDIR/fk-bounded-timeline"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 2 ) &
-  ( for _ in $(seq 1 30); do
-      fankick_attr "$sysfs/cooling_device6/cur_state" >>"$timeline"
-      printf '\n' >>"$timeline"
-      sleep 0.1
-    done ) &
-  local sampler=$!
-
-  run fankick_run "$sysfs" 500 20
+  run fankick_run "$sysfs" 500 20 \
+    FANKICK_GOVERNOR_STATES=2 FANKICK_TIMELINE="$timeline"
   [ "$status" -eq 0 ]
-  wait "$sampler"
 
   # Nothing external ever moved it off max_state, so if it is not at max_state
   # by the end, the monitor's own bounded window is what ended the kick.
@@ -2400,8 +2384,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-nonzero"
   fankick_fake_thermal "$sysfs" 6 1
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 3 ) &
-  run fankick_run "$sysfs" 300 12
+  run fankick_run "$sysfs" 300 12 FANKICK_GOVERNOR_STATES=3
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "3" ]
@@ -2411,8 +2394,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-tozero"
   fankick_fake_thermal "$sysfs" 6 2
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 0 ) &
-  run fankick_run "$sysfs" 300 12
+  run fankick_run "$sysfs" 300 12 FANKICK_GOVERNOR_STATES=0
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "0" ]
@@ -2425,8 +2407,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-atmax"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 6 ) &
-  run fankick_run "$sysfs" 300 12
+  run fankick_run "$sysfs" 300 12 FANKICK_GOVERNOR_STATES=6
   [ "$status" -eq 0 ]
   [[ "$output" != *"nudging"* ]]
   [ "$(fankick_attr "$sysfs/cooling_device6/cur_state")" = "6" ]
@@ -2446,19 +2427,16 @@ SH
 }
 
 @test "fan kickstart: a governor decision made DURING the kick wins — it is not overwritten by the restore" {
-  local sysfs="$BATS_TEST_TMPDIR/fk-race" log="$BATS_TEST_TMPDIR/fk-race.log"
-  local attr="$sysfs/cooling_device6/cur_state" monitor rc=0 out
+  local sysfs="$BATS_TEST_TMPDIR/fk-race" timeline="$BATS_TEST_TMPDIR/fk-race-timeline"
+  local attr="$sysfs/cooling_device6/cur_state" out
   fankick_fake_thermal "$sysfs" 6 0
 
-  fankick_run "$sysfs" 2500 30 >"$log" 2>&1 &
-  monitor=$!
-  fankick_wait_until grep -q 'currently state 0' "$log"
-  fankick_set_state "$attr" 1
-  fankick_wait_until fankick_state_is "$attr" 6
-  fankick_set_state "$attr" 4
-  wait "$monitor" || rc=$?
-  out="$(<"$log")"
-  [ "$rc" -eq 0 ]
+  run fankick_run "$sysfs" 2500 30 \
+    FANKICK_GOVERNOR_STATES=1 FANKICK_DURING_KICK=4 FANKICK_TIMELINE="$timeline"
+  out="$output"
+  [ "$status" -eq 0 ]
+  [[ "$out" == *"currently state 0"* ]]
+  grep -qx '6' "$timeline"
   [[ "$out" == *"nudging to state 6"* ]]
   [[ "$out" == *"re-asserted state 4"* ]]
   [[ "$out" != *"state 1 handed back"* ]]
@@ -2469,10 +2447,7 @@ SH
   local sysfs="$BATS_TEST_TMPDIR/fk-cycles"
   fankick_fake_thermal "$sysfs" 6 0
 
-  ( sleep 0.35; fankick_set_state "$sysfs/cooling_device6/cur_state" 1
-    sleep 0.9;  fankick_set_state "$sysfs/cooling_device6/cur_state" 0
-    sleep 0.4;  fankick_set_state "$sysfs/cooling_device6/cur_state" 1 ) &
-  run fankick_run "$sysfs" 300 26
+  run fankick_run "$sysfs" 300 26 FANKICK_GOVERNOR_STATES="1 0 1"
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c 'nudging to state 6')" -eq 2 ]
 }
@@ -2689,10 +2664,11 @@ pw_run() {
     PIPEWIRE_TMPFILES_DIR="$root/etc/tmpfiles.d" \
     PIPEWIRE_DBUS_DIR="$root/etc/dbus-1/system.d" \
     CERASTREAM_PIPEWIRE_DROPIN_DIR="$root/etc/systemd/system/cerastream.service.d" \
+    CERALIVE_LIBEXEC_DIR="$root/usr/libexec/ceralive" \
     bash -c "source '$POSTINST_ENTRY'; setup_pipewire_system_mode"
 }
 
-PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
+PW_RUNTIME_DIR() { printf '%s' "${PW_RUNTIME_SRC:-$PIPELINE_DIR/mkosi/runtime}/pipewire"; }
 
 @test "pipewire: the trixie-native package set is present and BlueALSA is gone from shared.list" {
   # Package NAMES and their exclusivity, asserted on the one file that decides the
@@ -2742,6 +2718,10 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   [ -f "$root/etc/tmpfiles.d/ceralive-pipewire.conf" ]
   [ -f "$root/etc/dbus-1/system.d/ceralive-pipewire-bluez.conf" ]
   [ -f "$root/etc/systemd/system/cerastream.service.d/40-pipewire.conf" ]
+  local helper="$root/usr/libexec/ceralive/ceralive-audio-reprobe"
+  [ "$(stat -c %a "$helper")" = 755 ]
+  [ "$(stat -c %u "$helper")" = "$EUID" ]
+  cmp "$PIPELINE_DIR/mkosi/runtime/ceralive-audio-reprobe.sh" "$helper"
 
   run cat "$root/calls"
   [ "$status" -eq 0 ]
@@ -2879,6 +2859,145 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
   # would load module-rt a SECOND time rather than reconfigure the first.
   run bash -c "grep -vE '^[[:space:]]*#' '$(PW_RUNTIME_DIR)/10-ceralive-system.conf' | grep -E 'context\.modules'"
   [ "$status" -ne 0 ]
+}
+
+@test "pipewire: image fragments leave capture clocking to the engine" {
+  local fragment
+  for fragment in 10-ceralive-system.conf 10-ceralive-headless.conf; do
+    # The engine joins the stock Dummy-Driver through stream-properties. Image
+    # objects or device rules must not compete with that clock or its resampler.
+    run python3 "$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py" ownership \
+      "$(PW_RUNTIME_DIR)/$fragment"
+    printf '%s: %s\n' "$fragment" "$output"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "pipewire: the default graph rate stays at 48000 with no alternate rates" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local system="$(PW_RUNTIME_DIR)/10-ceralive-system.conf"
+  local headless="$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  run python3 "$checker" rate "$system" "$headless"
+  [ "$status" -eq 0 ]
+  [ "$output" = 48000 ]
+  run python3 "$checker" allowed-rates "$system" "$headless"
+  [ "$status" -eq 0 ]
+  [ "$output" = '[48000]' ]
+}
+
+@test "pipewire: rate guard rejects inline overrides and retains declaration history" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fixture="$BATS_TEST_TMPDIR/rate.conf" override
+  local valid='context.properties = { default.clock.rate = 48000 default.clock.allowed-rates = [ 48000 ] }'
+  for override in \
+    'context.properties = { default.clock.rate = 44100 default.clock.allowed-rates = [ 44100 ] }' \
+    'context.properties = { default.clock.rate = 48000 default.clock.allowed-rates = [ 48000 44100 ] }' \
+    'rules = [ { actions = { update-props = { "default.clock.rate": 44100 } } } ]'; do
+    printf '%s\n%s\n' "$valid" "$override" >"$fixture"
+    run python3 "$checker" rate "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *44100* ]]
+    # Restoring 48000 later must not hide the earlier bad declaration.
+    printf '%s\n' "$valid" >>"$fixture"
+    run python3 "$checker" rate "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *44100* ]]
+  done
+  # A later section replaces the earlier one: both effective fields are required.
+  printf '%s\ncontext.properties = { default.clock.rate = 48000 }\n' "$valid" >"$fixture"
+  run python3 "$checker" allowed-rates "$fixture"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Effective default.clock.allowed-rates"* ]]
+}
+
+@test "pipewire: rate guard checks the other fragment and ignores commented overrides" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local system="$BATS_TEST_TMPDIR/system.conf" headless="$BATS_TEST_TMPDIR/headless.conf"
+  printf '%s\n' 'context.properties={default.clock.rate=48000 default.clock.allowed-rates=[48000]}' >"$system"
+  printf '%s\n' '# default.clock.rate = 44100' 'rules = [ { default.clock.allowed-rates = [44100] } ]' >"$headless"
+  run python3 "$checker" rate "$system" "$headless"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"default.clock.allowed-rates"*44100* ]]
+}
+
+@test "pipewire: ownership guard rejects every forbidden key across SPA assignment forms" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fixture="$BATS_TEST_TMPDIR/ownership.conf" key value declaration
+  for key in context.objects node.group priority.driver node.driver resample.disable node.force-rate node.lock-rate; do
+    case "$key" in
+      context.objects) value='[]' ;;
+      node.group) value='pipewire.dummy' ;;
+      *) value=0 ;;
+    esac
+    for declaration in "$key $value" "\"$key\": $value" "$key=$value" \
+      "$(printf '\"%s\"\n  =\n  %s' "$key" "$value")"; do
+      printf 'rules = [ { actions = { update-props = { %s } } } ]\n' "$declaration" >"$fixture"
+      run python3 "$checker" ownership "$fixture"
+      [ "$status" -ne 0 ]
+      [[ "$output" == *"image sets $key"* ]]
+    done
+  done
+  printf '%s\n' '"\u0070riority.driver" = 0' >"$fixture"
+  run python3 "$checker" ownership "$fixture"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"image sets priority.driver"* ]]
+}
+
+@test "pipewire: packaged driver guard requires direct properties in the actual args" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fixture="$BATS_TEST_TMPDIR/driver.conf" properties
+  local markers='factory.name=support.node.driver node.name=Dummy-Driver node.group=pipewire.dummy'
+  for properties in \
+    "unused = { $markers }" \
+    "args = { unused = { $markers } }" \
+    'args = { factory.name=support.node.driver node.name=Dummy-Driver node.group=pipewire.wrong }'; do
+    printf 'context.objects = [ { factory=spa-node-factory %s } ]\n' "$properties" >"$fixture"
+    run python3 "$checker" driver "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Missing Dummy-Driver args"* ]]
+  done
+}
+
+@test "pipewire: clock guards accept realistic reformatting and benign comments" {
+  local checker="$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py"
+  local fragment="$BATS_TEST_TMPDIR/benign.conf" packaged="$BATS_TEST_TMPDIR/packaged.conf"
+  cat >"$fragment" <<'CONF'
+# context.objects = [] priority.driver 0 node.group = pipewire.dummy
+# node.driver true resample.disable true node.force-rate 44100 node.lock-rate true
+"context.properties": {
+  "default.clock.rate"=48000 # A compact assignment keeps the same rate.
+  "default.clock.allowed-rates"
+    =
+    [48000]
+  node.description = "priority.driver # context.objects"
+}
+# default.clock.rate=44100 default.clock.allowed-rates=[44100]
+CONF
+  run python3 "$checker" ownership "$fragment"
+  [ "$status" -eq 0 ]
+  run python3 "$checker" rate "$fragment"
+  [ "$status" -eq 0 ]
+  [ "$output" = 48000 ]
+  run python3 "$checker" allowed-rates "$fragment"
+  [ "$status" -eq 0 ]
+  [ "$output" = '[48000]' ]
+  cat >"$packaged" <<'CONF'
+"context.objects": [
+  {
+    factory spa-node-factory
+    # unused = { node.name = Dummy-Driver } is only a comment.
+    "args"
+    =
+    {
+      "factory.name": "support.node.driver",
+      node.name=Dummy-Driver
+      node.group pipewire.dummy
+    }
+  }
+]
+CONF
+  run python3 "$checker" driver "$packaged"
+  [ "$status" -eq 0 ]
 }
 
 @test "pipewire: the WirePlumber profile is HEADLESS — no seat, no session bus, no reservation" {
@@ -3110,6 +3229,14 @@ PW_RUNTIME_DIR() { printf '%s' "$PIPELINE_DIR/mkosi/runtime/pipewire"; }
     cmp -s "$emitted/$rel" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
     run bash -c "ls -1 '$emitted/etc/wireplumber/wireplumber.conf.d' | wc -l"
     [ "$output" -eq 1 ]
+
+    # The engine's stream group needs the packaged driver, with both properties
+    # in the same args object; a Freewheel-Driver group cannot satisfy this.
+    local packaged="$emitted/usr/share/pipewire/pipewire.conf"
+    [ -f "$packaged" ]
+    run python3 "$BATS_TEST_DIRNAME/lib/pipewire-clock-contract.py" driver "$packaged"
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ]
   done
 }
 

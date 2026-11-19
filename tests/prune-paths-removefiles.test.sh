@@ -68,6 +68,13 @@ got_empty_csv="$(prune_paths_csv "${EMPTY_FIXTURE}")"
 [[ -z "${got_empty_csv}" ]] || fail "Part A: an empty manifest must yield an empty CSV, got: '${got_empty_csv}'"
 echo "prune-paths-removefiles: Part A (empty-manifest leg) OK"
 
+if got_missing="$(prune_paths_csv "${WORK}/nonexistent.list" 2>"${WORK}/missing-error")"; then
+  fail "Part A: missing manifest was accepted as an empty policy"
+fi
+[[ -z "${got_missing}" ]] || fail "Part A: missing manifest emitted a CSV"
+grep -qF 'manifest not found' "${WORK}/missing-error" || fail "Part A: missing manifest diagnostic absent"
+echo "prune-paths-removefiles: Part A (missing manifest fails closed) OK"
+
 # ===========================================================================
 # Part B — the SHIPPED generate_prune_local_conf() (lib/stages/mkosi.sh),
 # sourced for real (not re-implemented) and run against a scratch tree.
@@ -87,6 +94,14 @@ source "${PIPELINE_DIR}/lib/stages/mkosi.sh"
 SCRATCH_MKOSI="${WORK}/mkosi-scratch"
 mkdir -p "${SCRATCH_MKOSI}/mkosi.images/runtime"
 export MKOSI_DIR="${SCRATCH_MKOSI}"
+if CERALIVE_PRUNE_PATHS_MANIFEST=/nonexistent generate_prune_local_conf >"${WORK}/generate-error" 2>&1; then
+  fail "Part B: missing manifest generated a config"
+fi
+[[ ! -e "${SCRATCH_MKOSI}/mkosi.images/runtime/mkosi.local.conf" ]] \
+  || fail "Part B: missing manifest wrote a config"
+[[ -z "$(find "${SCRATCH_MKOSI}" -type f -print)" ]] \
+  || fail "Part B: missing manifest left a temporary file"
+echo "prune-paths-removefiles: Part B (missing manifest writes no file) OK"
 CERALIVE_PRUNE_PATHS_MANIFEST="${FIXTURE}" generate_prune_local_conf >/dev/null 2>&1 \
   || fail "Part B: generate_prune_local_conf() (the real shipped stage function) failed"
 

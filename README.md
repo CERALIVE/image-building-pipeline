@@ -35,6 +35,7 @@ matching bench report and immutable publication authorization.
 | curl | ≥ 7.71.0 **on the build host**, including container mode | hosted Ubuntu 22.04 provides 7.81.0; see [host curl prerequisite](docs/host-support.md#build-host-curl-prerequisite) |
 | Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
 | ccache | recommended for unpublished local kernel-from-source builds | `which ccache` → `/usr/bin/ccache` present on this host |
+| Firmware gate | host Python >= 3.11, GNU tar and kmod (`modinfo`) | [Final-rootfs closure](docs/firmware-closure.md) runs after the size gate |
 
 This table is the quick-reference; the full, step-by-step, executed walkthrough
 — including the container-vs-native host matrix, the full board × kernel-track
@@ -98,7 +99,9 @@ the `.deb`, `resolved.config`, `built-modules.txt`, `kernel-artifact.json` and
 `SHA256SUMS` under `mkosi/build/kernel-only/rk3588/` only after all boot and
 pinned-firmware checks pass. Firmware uses exactly the image's Bluetooth/UHID
 closure and its two reviewed hardware gaps; other modules' firmware is not
-gated, just as in shipped images. `DRY_RUN=1` prints only resolution and kernel work;
+gated in this kernel-only lane. Full image builds additionally enforce
+[final-rootfs firmware closure](docs/firmware-closure.md) after the size gate.
+`DRY_RUN=1` prints only resolution and kernel work;
 `--release` rejects debug variants. This does not publish or qualify hardware.
 See [kernel build details](docs/kernel-build-from-source.md#kernel-only-build-lane-exists).
 
@@ -122,6 +125,27 @@ sparse `.raw`, emits the same verified `.raw.xz` transport artifact as the relea
 path, and builds a `.raucb` A/B OTA package. Both paths use `xz -T0 -6` and verify
 the decompressed bytes against the raw SHA-256. The `.raucb` is already
 squashfs-compressed and is not recompressed.
+
+The separate [offline rootfs measurement profile](docs/image-measurement.md)
+is [PARTIAL: real VM/build qualification pending]. It imports sealed inputs
+into a no-network disposable guest and uses `--rootfs-measurement` in
+production mode with the approved public device root. All content and real
+slot-reserve gates remain; signing and compression are omitted. Returned
+artifacts stay private and require an independent verifier. This route does
+not create a signed candidate or refresh the size baselines.
+Its host preparation command, `python3 ci/prepare-image-capsule.py`, fetches an
+explicit reviewed package closure with origin-scoped client certificate paths
+and preserves the original signed metadata. It supports separately pinned signed
+Suite/Codename identities and bounded gzip/xz binary-index decoding, including
+complete validation of every concatenated xz stream and its padding. See the
+profile's preparation contract before authorizing any authenticated prefetch.
+The preceding `python3 ci/discover-image-metadata.py` command fills reviewed
+package hashes, sizes and URLs from approved original signed metadata without
+fetching package payloads. It emits an inventory fragment and preserves the
+metadata for review; archive public trust must be supplied independently.
+Both commands share optional bounded HTTPS redirects for uncredentialed BSP
+requests, retaining `https://apt.armbian.com` as the logical origin and recording
+the mirror chain only in receipts. Redirects default to zero.
 
 **The container build is canonical.** Native builds (`--native` /
 `MKOSI_NATIVE=1`) are opt-in and require mkosi ≥ 26 + Python ≥ 3.12 on a Debian
@@ -196,8 +220,13 @@ content, and only then records `os_release_version` in its schema-4 tuple.
 The six existing Todo-44 artifacts predate this check and lack the stamp; they
 must be rebuilt before any OS-update drill publication. Neither the wrapper nor
 the old artifacts constitute a released or board-qualified image.
-Factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d` and
-reserve helper. The OTA's neutral-labelled ext4 image is relabelled after install
+RK3588 and x86 factory assembly and OTA use the same 4096 MiB `mkfs.ext4 -d`
+writer and reserve helper. A shared checksum/hash seed preserves metadata across
+their distinct label-derived UUIDs, so images of one tree differ only in
+superblocks and adaptive updates can reuse their metadata blocks. The
+[storage contract](docs/agents/key-facts.md) describes the host fixture coverage;
+x86 hardware qualification remains pending.
+The OTA's neutral-labelled ext4 image is relabelled after install
 from the written partition's own GPT PARTLABEL, whether production (`rootfs_a/b`)
 or bench (`xrootfs_a/b`); an unreadable label aborts installation. New OS bundles
 are `format=verity` with `adaptive=block-hash-index`; cert-rotation bundles also
@@ -269,6 +298,22 @@ be converted by OTA.
 └── CONTRIBUTING.md        # Contribution rules
 ```
 
+## Hardware policy [EXISTS: proof-gated firmware sweep]
+
+[`manifests/hardware/module-classes.yaml`](manifests/hardware/module-classes.yaml)
+defines hardware classes and preserved firmware roots. Families declare excluded
+classes and sweep candidates; boards can add excluded classes back. The resolver
+emits deduplicated firmware prefixes, module globs and Kconfig symbols, and forwards
+the firmware parameters into mkosi. The platform layer sweeps those firmware
+prefixes after installing firmware packages, retaining any prefix requested by
+an installed module or built-in driver and keeping everything when that inventory
+cannot be read completely or its metadata is malformed. Preserved and Bluetooth roots remain
+protected. Kernel configuration is unchanged; x86 declares no exclusions and
+resolves an empty sweep list. See the [prune contract](docs/bluetooth-firmware-closure.md#what-the-prune-may-and-may-not-delete).
+
+See [the policy contract](docs/hardware-policy.md) for field ownership, validation
+and the emitted parameters.
+
 ## Quick Start
 
 ```bash
@@ -301,6 +346,12 @@ A single resolved board execs the orchestrator directly. A multi-board selection
 (`--all`, or `--only` with 2+ boards) is handed to the parallel runner
 `lib/build-all.sh`. An unknown board in `--only` fails loudly: it names the
 offender and lists the available boards.
+
+Single-board `DRY_RUN=1` plans, including `x86-minipc`, do not resolve or access
+RAUC signing material or require PKI configuration in either build mode.
+Normal full builds retain the existing signer preflight and fail closed without
+valid PKI. The separate `--rootfs-measurement` purpose still refuses dry-runs and
+requires its approved public device root.
 
 A source-kernel dry run exits after emitting the fetch and kernel plans; it does
 not send the intentionally empty staging tree through package or BSP validation.
@@ -1630,6 +1681,15 @@ its rollback hatch are cerastream's
 [`ADR-0010`](https://github.com/CERALIVE/cerastream/blob/main/docs/adr/ADR-0010-pipewire-capture.md);
 this repository supplies the runtime.
 
+Capture clocking belongs to the engine: cerastream sets
+`node.group = pipewire.dummy` on every PipeWire capture stream, including the meter,
+through `pipewiresrc` stream properties (ADR-0010). The image keeps the graph at
+48000 Hz and uses the packaged `Dummy-Driver`; its two configuration fragments
+create no objects and set no clock, driver or resampler overrides.
+`tests/runtime-services.bats` guards that boundary and checks the packaged driver's
+group when a built rootfs is present. The HDMI-RX profile rule selects a profile
+independently of capture clocking.
+
 The image installs trixie's own `pipewire` 1.4.2-1, `wireplumber` **0.5.8-2**,
 `pipewire-alsa`, `gstreamer1.0-pipewire` (the `pipewiresrc` the engine builds its
 capture source from) and `libspa-0.2-bluetooth`.
@@ -1678,8 +1738,15 @@ Measured cost: **+20.9 MiB net** (18 packages added, 2 removed) — see
 WirePlumber picks that profile deterministically whenever the card enumerated one,
 which is the case on any board probed with HDMI audio present. When the card was
 probed with no signal at all, ACP can describe no input profile, the card parks at
-`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until something
-re-enumerates the card — a known, deliberate limitation. The `pro-audio` floor that
+`off`, and `hw:CARD=HDMIIN` is absent from the engine's device list until the card
+is re-enumerated. The image installs the root-owned, mode-0755 helper
+`/usr/libexec/ceralive/ceralive-audio-reprobe` for the engine to request this when
+the operator selects a kernel card with no PipeWire node. It accepts only an exact
+ALSA card id, sends remove then add for that card, and limits attempts to one per
+card per 30 seconds, including failures. Each udev command has a one-second limit.
+The engine must still observe a usable node; helper success alone proves no audio.
+Host tests cover the helper and installation; boot-without-signal recovery on a
+physical receiver remains unqualified. The `pro-audio` floor that
 used to cover that case is removed: it published a capture node whose PCM cannot
 start without a signal (`set_hw_params: Link has been severed`), and the engine's
 always-on meter then leaked one PipeWire capture pipeline every 30 s against it —

@@ -79,24 +79,26 @@ assert_contains 'missing-tool diagnostic is explicit' "${WORK}/tool" 'modinfo'
 POSTINST="${REPO}/mkosi/mkosi.images/platform/mkosi.postinst"
 assert_contains 'platform stages the same committed roots' "${REPO}/lib/stages/partition.sh" 'rk3588-bluetooth-firmware-roots.txt'
 prepare_line="$(grep -n '^    bluetooth_firmware_prepare' "${POSTINST}" | cut -d: -f1)"
-prune_line="$(grep -n '^  prune_irrelevant_rk3588_firmware$' "${POSTINST}" | cut -d: -f1)"
+prune_line="$(grep -n '^  firmware_sweep "\${BUILDROOT}"$' "${POSTINST}" | cut -d: -f1)"
 if [[ -n "${prepare_line}" && -n "${prune_line}" && "${prepare_line}" -lt "${prune_line}" ]]; then ok 'production prepares closure before pruning'; else bad 'closure preflight not wired before prune'; fi
 # Given: runtime-only Intel/TI roots and an unconsumed non-Bluetooth candidate.
 mkdir -p "${FW}/qcom"; touch "${FW}/qcom/unconsumed.bin"
 source "${REPO}/mkosi/customize/bluetooth-firmware.sh"
 source "${REPO}/mkosi/runtime/ceralive-kernel-boot-staging.sh"
-eval "$(sed -n '/^prune_irrelevant_rk3588_firmware()/,/^}/p' "${POSTINST}")"
+source "${REPO}/mkosi/customize/firmware-sweep.sh"
+FIRMWARE_SWEEP_PREFIXES='qcom intel ath10k ath11k ath12k updates microchip nvidia tegra renesas'
+FIRMWARE_SWEEP_FILES=r8a779x_usb3_rom.mem
+FIRMWARE_PRESERVED_ROOTS='brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi'
 log() { printf '%s\n' "$*"; }
 export BUILDROOT="${WORK}/root"
 bluetooth_firmware_prepare "${MODULES}" "${FW}" "${MANIFEST}" || exit 1
 # When: real prune runs. Then: all snapshotted objects survive, qcom does not.
-if (set -e; prune_irrelevant_rk3588_firmware) >"${WORK}/prune" 2>&1; then ok 'real prune passes'; else bad "$(<"${WORK}/prune")"; fi
+if (set -e; firmware_sweep "${BUILDROOT}") >"${WORK}/prune" 2>&1; then ok 'real prune passes'; else bad "$(<"${WORK}/prune")"; fi
 if bluetooth_firmware_assert_retained "${FW}"; then ok 'every closure object survives real prune'; else bad 'prune lost a closure object'; fi
 if [[ ! -e "${FW}/qcom" ]]; then ok 'unconsumed non-Bluetooth family removed'; else bad 'blanket preservation'; fi
 if [[ -f "${FW}/ti-connectivity/TIInit_fixture.bts" ]]; then ok 'TI runtime firmware survives'; else bad 'TI firmware removed'; fi
 # A candidate-list accident must fail BEFORE any deletion, not quietly preserve.
-eval "$(declare -f prune_irrelevant_rk3588_firmware | sed 's/qcom intel/qca qcom intel/')"
-if (set -e; prune_irrelevant_rk3588_firmware) >"${WORK}/candidate" 2>&1; then bad 'Bluetooth deletion candidate accepted'; else ok 'Bluetooth candidate mutation refused'; fi
+if (set -e; FIRMWARE_SWEEP_PREFIXES="qca ${FIRMWARE_SWEEP_PREFIXES}" firmware_sweep "${BUILDROOT}") >"${WORK}/candidate" 2>&1; then bad 'Bluetooth deletion candidate accepted'; else ok 'Bluetooth candidate mutation refused'; fi
 rm "${FW}/rtl_bt/rtl8852bu_fw.bin"
 if bluetooth_firmware_assert_retained "${FW}" >/dev/null 2>&1; then bad 'closure deletion accepted'; else ok 'closure deletion mutation refused'; fi
 printf '%s passed, %s failed\n' "${PASS}" "${FAIL}"
