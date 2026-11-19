@@ -21,10 +21,10 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import close_transport, job_disk, report_error
+from image_lifecycle import job_disk, report_error
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
-    child_pipes, read_check_script, run, terminate, wait,
+    child_pipes, open_pidfd, read_check_script, register_close, run, terminate, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -52,15 +52,12 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
     """Pass the one-job credential in an anonymous RAM fd, not argv or a file."""
     cancellation = cancellation or (image_job.cancellation if image_job else Cancellation())
     cancellation.check()
-    fd = os.memfd_create("ceralive-job", 0)
-    with ExitStack() as startup:
-        try:
-            config = FileIO(fd, "wb")
-        except (OSError, MemoryError):
-            close_transport(partial(os.close, fd))
-            raise
+    with ExitStack() as startup, ExitStack() as writers:
+        config = FileIO("/dev/null", "wb", opener=lambda _path, _flags: os.memfd_create(
+            "ceralive-job", os.MFD_CLOEXEC))
         on_loss = image_job.lose_diagnostics if image_job and image_job.probe else None
-        startup.callback(close_transport, config.close, on_loss)
+        register_close(startup, "fw-cfg", config.close, on_loss)
+        fd = config.fileno()
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
         serial = "stdio"
@@ -98,7 +95,6 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         stdout, stderr = subprocess.PIPE, subprocess.PIPE if image_job else subprocess.STDOUT
-        writers = startup.enter_context(ExitStack())
         if image_job and image_job.probe:
             stdout = image_job.prepare_probe_transport(writers)
             stderr = subprocess.DEVNULL
@@ -120,7 +116,11 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                         sys.stdout.buffer.flush()
 
             reader = None
+            handle = None
             try:
+                if on_loss is not None:
+                    handle = open_pidfd(process)
+                    register_close(startup, "qemu-pidfd", handle.close, on_loss)
                 writers.close()
                 if image_job:
                     image_job.capture(process, seconds)
@@ -129,11 +129,9 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                     reader.start()
                     wait(process, time.monotonic() + seconds, cancellation)
             finally:
-                terminate(process)
+                terminate(process, handle, image_job.record_reaped if image_job else None)
                 if reader:
                     reader.join()
-                if image_job:
-                    image_job.state.update(qemu_reaped=True, qemu_exit=process.returncode)
         cancellation.check()
         if image_job:
             if process.returncode:

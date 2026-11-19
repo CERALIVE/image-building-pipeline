@@ -113,6 +113,11 @@ and the live transport files have explicit owners. One guarded close path
 records capture loss if a probe close callback fails and gives the same
 idempotent owner another chance to release the resource. Successful stream
 flush and sync, required validation, and receipt publication remain strict.
+The launcher registers the two pipe-end owners before asking the kernel for
+the descriptors. Rollback closes the owners once, even if returning the
+pipe pair fails. The launcher records QEMU's wait status before retiring its
+process handle. A handle-close failure can mark capture lost while the
+recorded reap and the attempt outcome remain authoritative.
 
 The guest flushes and closes the artifact port before attempting
 `CERALIVE_JOB_DONE`. The image wrapper gives that write 250 ms and requests

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from io import FileIO
 import os
 from pathlib import Path
 import selectors
 import signal
 import subprocess
 import time
+from typing import Callable
 
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
@@ -16,6 +18,48 @@ CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 CHILD_CWD = "/"
 CHILD_LOCALE = "C.UTF-8"
+
+
+def close_transport(release: Callable[[], None], on_loss: Callable[[], None] | None = None,
+                    attempt: Callable[[], None] | None = None) -> None:
+    """Isolate optional close faults and retry only through the same idempotent owner."""
+    try:
+        (attempt or release)()
+    except Exception:
+        if on_loss is None:
+            raise
+        on_loss()
+        try:
+            release()
+        except Exception:
+            on_loss()
+
+
+def register_close(stack: ExitStack, role: str, release: Callable[[], None],
+                   on_loss: Callable[[], None] | None = None,
+                   attempt: Callable[[], None] | None = None,
+                   before_close: Callable[[], None] | None = None) -> None:
+    """Keep the owner's role and failure policy together in the cleanup stack."""
+    def retire(_role: str) -> None:
+        try:
+            if before_close is not None:
+                before_close()
+        finally:
+            close_transport(release, on_loss, attempt)
+
+    try:
+        stack.callback(retire, role)
+    except (MemoryError, OSError):
+        close_transport(release, on_loss)
+        raise
+
+
+def open_pidfd(process: subprocess.Popen) -> FileIO:
+    return FileIO("/dev/null", "rb", opener=lambda _path, _flags: os.pidfd_open(process.pid))
+
+
+def ignore_cleanup_failure() -> None:
+    """A process handle is disposable once the kernel wait status is known."""
 
 
 class Cancelled(RuntimeError):
@@ -72,13 +116,14 @@ def child_environment(*, registration: bool = False) -> dict[str, str]:
 def child_pipes(process: subprocess.Popen):
     """Close Popen's pipes without its context manager's implicit wait."""
     with ExitStack() as stack:
-        for pipe in (process.stdin, process.stdout, process.stderr):
+        for role, pipe in (("child-stdin", process.stdin), ("child-stdout", process.stdout),
+                           ("child-stderr", process.stderr)):
             if pipe is not None:
-                stack.callback(pipe.close)
+                register_close(stack, role, pipe.close)
         yield process
 
 
-def poll_owned(process: subprocess.Popen) -> int | None:
+def poll_owned(process: subprocess.Popen, on_reaped: Callable[[int], None] | None = None) -> int | None:
     """Collect an actual wait status. ECHILD cannot be reported as exit zero."""
     if process.returncode is None:
         while True:
@@ -94,6 +139,8 @@ def poll_owned(process: subprocess.Popen) -> int | None:
         if pid != process.pid or not (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
             raise ChildStatusError(f"invalid exit status for owned child PID {process.pid}")
         process.returncode = os.waitstatus_to_exitcode(status)
+        if on_reaped is not None:
+            on_reaped(process.returncode)
     return process.returncode
 
 
@@ -101,8 +148,11 @@ def read_check_script(path: Path, cancellation: Cancellation) -> bytes:
     """Read a regular file or FIFO without blocking cancellation on a FIFO writer."""
     chunks = bytearray()
     cancellation.check()
-    with open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK)) as source, \
-            selectors.PollSelector() as events:
+    with ExitStack() as owners:
+        source = open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK))
+        register_close(owners, "check-script", source.close)
+        events = selectors.PollSelector()
+        register_close(owners, "check-selector", events.close)
         fd = source.fileno()
         events.register(fd, selectors.EVENT_READ)
         while True:
@@ -121,13 +171,14 @@ def read_check_script(path: Path, cancellation: Cancellation) -> bytes:
 
 
 def wait(process: subprocess.Popen, deadline: float | None,
-         cancellation: Cancellation | None = None) -> None:
+         cancellation: Cancellation | None = None,
+         on_reaped: Callable[[int], None] | None = None) -> None:
     """Retry interruptions without restarting the deadline or losing cancellation."""
     delay = 0.001
     while True:
         if cancellation is not None:
             cancellation.check()
-        if poll_owned(process) is not None:
+        if poll_owned(process, on_reaped) is not None:
             return
         remaining = POLL_SECONDS if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
@@ -137,28 +188,31 @@ def wait(process: subprocess.Popen, deadline: float | None,
     raise subprocess.TimeoutExpired(process.args, 0)
 
 
-def terminate(process: subprocess.Popen) -> None:
+def terminate(process: subprocess.Popen, handle: FileIO | None = None,
+              on_reaped: Callable[[int], None] | None = None) -> None:
     """Stop only the owned child, without allowing another signal to abort reaping."""
-    if poll_owned(process) is not None:
+    status = poll_owned(process)
+    if status is not None:
+        if on_reaped is not None:
+            on_reaped(status)
         return
-    pidfd = os.pidfd_open(process.pid)
-    try:
-        if poll_owned(process) is not None:
-            return
+    with ExitStack() as handles:
+        if handle is None:
+            handle = open_pidfd(process)
+            register_close(handles, "termination-pidfd", handle.close, ignore_cleanup_failure)
+        pidfd = handle.fileno()
         try:
             signal.pidfd_send_signal(pidfd, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
-            wait(process, time.monotonic() + TERM_GRACE_SECONDS)
+            wait(process, time.monotonic() + TERM_GRACE_SECONDS, on_reaped=on_reaped)
         except subprocess.TimeoutExpired:
             try:
                 signal.pidfd_send_signal(pidfd, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            wait(process, None)
-    finally:
-        os.close(pidfd)
+            wait(process, None, on_reaped=on_reaped)
 
 
 def run(args: list[str], *, timeout: int, cancellation: Cancellation,
@@ -173,7 +227,9 @@ def run(args: list[str], *, timeout: int, cancellation: Cancellation,
     with child_pipes(process):
         output = [bytearray(), bytearray()]
         try:
-            with selectors.PollSelector() as events:
+            with ExitStack() as owners:
+                events = selectors.PollSelector()
+                register_close(owners, "helper-selector", events.close)
                 if capture_output:
                     events.register(process.stdout, selectors.EVENT_READ, 0)
                     events.register(process.stderr, selectors.EVENT_READ, 1)

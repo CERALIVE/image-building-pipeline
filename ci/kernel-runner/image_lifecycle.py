@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
+import ctypes
 from functools import partial
 from io import FileIO
 import json
@@ -20,7 +21,10 @@ import uuid
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
 from image_stages import StageTail, optional
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
-from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
+from vm_process import (
+    POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, close_transport, poll_owned,
+    register_close, run, wait,
+)
 
 UNAVAILABLE_DIAGNOSTICS = {
     "last_observed_stage": None,
@@ -254,30 +258,52 @@ def reconcile(store: Path) -> None:
     sync_directory(store)
 
 
-def close_transport(release: Callable[[], None], on_loss: Callable[[], None] | None = None,
-                    attempt: Callable[[], None] | None = None) -> None:
-    """Isolate optional close failures and give an idempotent owner one chance to release."""
-    try:
-        (attempt or release)()
-    except Exception:
-        if on_loss is None:
-            raise
-        on_loss()
-        optional(on_loss, release)
+_PIPE_SLOTS = ctypes.c_int * 2
+_PIPE2 = ctypes.CDLL(None, use_errno=True).pipe2
+_PIPE2.argtypes = (_PIPE_SLOTS, ctypes.c_int)
+_PIPE2.restype = ctypes.c_int
 
 
-def pipe_files(flags: int) -> tuple[FileIO, FileIO]:
-    """Transfer both raw pipe ends to idempotent owners before registering them."""
-    reader, writer = os.pipe2(flags)
-    source = None
+class PipeEnd:
+    """Own a kernel result slot before pipe2 has any descriptor to return."""
+
+    def __init__(self, slots: ctypes.Array, index: int) -> None:
+        self.slots = slots
+        self.index = index
+
+    def fileno(self) -> int:
+        fd = self.slots[self.index]
+        if fd < 0:
+            raise ValueError("closed pipe end")
+        return fd
+
+    def close(self) -> None:
+        fd = self.slots[self.index]
+        if fd >= 0:
+            # Linux may release the FD even when close reports an error.
+            self.slots[self.index] = -1
+            os.close(fd)
+
+
+def pipe_files(flags: int, inputs: ExitStack, writers: ExitStack, name: str,
+               on_loss: Callable[[], None] | None = None,
+               close_reader: Callable[[], None] | None = None) -> tuple[PipeEnd, PipeEnd]:
+    """Write pipe2 results straight into slots held by preallocated owners."""
+    slots = _PIPE_SLOTS(-1, -1)
+    reader = PipeEnd(slots, 0)
+    writer = PipeEnd(slots, 1)
+    register_close(inputs, name + "-reader", reader.close, on_loss, close_reader)
+    register_close(writers, name + "-writer", writer.close, on_loss)
     try:
-        source = FileIO(reader, "rb")
-        return source, FileIO(writer, "wb")
-    except (OSError, MemoryError):
+        if _PIPE2(slots, flags):
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return reader, writer
+    except BaseException:
         try:
-            close_transport(source.close if source is not None else partial(os.close, reader))
+            close_transport(reader.close)
         finally:
-            close_transport(partial(os.close, writer))
+            close_transport(writer.close)
         raise
 
 
@@ -310,12 +336,12 @@ class ImageJob:
         with ExitStack() as inputs:
             on_loss = self.lose_diagnostics if probe else None
             capsule_file = FileIO(capsule, "rb", opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW))
-            inputs.callback(close_transport, capsule_file.close, on_loss)
+            register_close(inputs, "capsule", capsule_file.close, on_loss)
             self.capsule_fd = capsule_file.fileno()
-            self.console_reader, self.console_writer = pipe_files(os.O_CLOEXEC | (os.O_NONBLOCK if probe else 0))
+            self.console_reader, self.console_writer = pipe_files(
+                os.O_CLOEXEC | (os.O_NONBLOCK if probe else 0), inputs, inputs, "console",
+                on_loss, self.close_console_reader if probe else None)
             self.release_console_reader = self.console_reader.close
-            inputs.callback(close_transport, self.release_console_reader, on_loss, self.close_console_reader)
-            inputs.callback(close_transport, self.console_writer.close, on_loss)
             self.console_read = self.console_reader.fileno()
             self.console_write = self.console_writer.fileno()
             self.inputs = inputs.pop_all()
@@ -339,6 +365,9 @@ class ImageJob:
 
     def lose_diagnostics(self) -> None:
         self.capture_lost = True
+
+    def record_reaped(self, status: int) -> None:
+        self.state.update(qemu_reaped=True, qemu_exit=status)
 
     def close_console_reader(self) -> None:
         self.release_console_reader()
@@ -373,16 +402,15 @@ class ImageJob:
         """Register the artifact and serial streams before guest startup."""
         try:
             events = selectors.DefaultSelector()
-            self.inputs.callback(close_transport, events.close, self.lose_diagnostics)
-            stream_reader, stream_writer = pipe_files(os.O_CLOEXEC)
-            self.inputs.callback(close_transport, stream_reader.close, self.lose_diagnostics)
-            writers.callback(close_transport, stream_writer.close, self.lose_diagnostics)
+            register_close(self.inputs, "console-selector", events.close, self.lose_diagnostics)
+            stream_reader, stream_writer = pipe_files(
+                os.O_CLOEXEC, self.inputs, writers, "artifact", self.lose_diagnostics)
             stream_read = stream_reader.fileno()
             for name, fd in (("stream", stream_read), ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
             # A stuck serial registration must not wake the artifact poll.
             artifact_events = selectors.DefaultSelector()
-            self.inputs.callback(close_transport, artifact_events.close, self.lose_diagnostics)
+            register_close(self.inputs, "artifact-selector", artifact_events.close, self.lose_diagnostics)
             artifact_events.register(stream_read, selectors.EVENT_READ, "stream")
             self.probe_events = events
             self.probe_artifact_events = artifact_events
@@ -440,18 +468,18 @@ class ImageJob:
             events = self.probe_events
             if not self.probe:
                 events = selectors.DefaultSelector()
-                local.callback(close_transport, events.close)
+                register_close(local, "measurement-selector", events.close)
                 self.register_measure_transport(events, process)
             assert events is not None
             files = {}
             for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
                 output = self._open_log(self.directory / (name + ".partial"))
-                self.outputs.callback(close_transport, output.close, on_loss)
-                self.outputs.callback(sync_output, output)
+                register_close(self.outputs, name + "-capture", output.close, on_loss,
+                               before_close=partial(sync_output, output))
                 files[name] = output
             stream_open = True
             try:
-                while (stream_open if self.probe else events.get_map()) or poll_owned(process) is None:
+                while (stream_open if self.probe else events.get_map()) or poll_owned(process, self.record_reaped) is None:
                     self.cancellation.check()
                     now = time.monotonic()
                     if now >= end:
@@ -463,11 +491,11 @@ class ImageJob:
                             except Exception:
                                 self.capture_lost = True
                         raise subprocess.TimeoutExpired(command, seconds)
-                    if now >= next_priority_check and poll_owned(process) is None:
+                    if now >= next_priority_check and poll_owned(process, self.record_reaped) is None:
                         try:
                             self.state["qemu_priority"] = process_priority(process.pid, self.cancellation)
                         except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
-                            if poll_owned(process) is None:
+                            if poll_owned(process, self.record_reaped) is None:
                                 raise
                         next_priority_check = now + 5
                     if console_retry_at is not None and now >= console_retry_at:
@@ -520,7 +548,7 @@ class ImageJob:
                     remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
                     disk_headroom(((Path(self.state["overlay_directory"]), remaining_overlay),
                                    (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
-                wait(process, end, self.cancellation)
+                wait(process, end, self.cancellation, self.record_reaped)
                 if self.probe:
                     try:
                         self.drain(events)
