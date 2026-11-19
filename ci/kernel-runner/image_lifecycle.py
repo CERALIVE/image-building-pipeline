@@ -21,6 +21,9 @@ from image_stages import StageTail, optional
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
 
+SIDECAR_WRITE_SECONDS = 0.5
+SIDECAR_REAP_SECONDS = 0.1
+
 
 class ReceiptError(OSError):
     """A receipt publication failed."""
@@ -148,7 +151,7 @@ RECEIPT_STEPS = (
 
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
-            diagnostic: BaseException | None = None) -> None:
+            diagnostic: BaseException | None = None, sync_directory: bool = True) -> None:
     transaction = Receipt(path, row, outcome, diagnostic)
     failure: BaseException | None = None
     for action, cleanup in RECEIPT_STEPS:
@@ -156,6 +159,8 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             continue
         try:
             action(transaction)
+            if transaction.renamed and not sync_directory:
+                break
         except BaseException as error:
             if failure is None:
                 failure = error
@@ -323,7 +328,43 @@ class ImageJob:
             "truncated": self.control_bytes > CONTROL_LOG_LIMIT or (tail is not None and tail.truncated),
             "control_bytes_received": self.control_bytes,
             "console_stage_tail": tail.text() if tail is not None else "",
-        })
+        }, sync_directory=False)
+
+    def finish_diagnostics(self) -> None:
+        """Give the post-commit writer a bounded lifetime outside the launcher."""
+        from vm import die_with_parent
+        from vm_startup import fd_table
+        from vm_process import CATCHABLE_SIGNALS
+
+        deadline = time.monotonic() + SIDECAR_WRITE_SECONDS
+        parent = os.getpid()
+        child = os.fork()
+        if child == 0:
+            status = 1
+            try:
+                die_with_parent(parent)
+                for fd in fd_table():
+                    os.close(fd)
+                for signum in CATCHABLE_SIGNALS:
+                    signal.signal(signum, signal.SIG_DFL)
+                signal.pthread_sigmask(signal.SIG_SETMASK, set())
+                self.persist_diagnostics()
+                status = 0
+            finally:
+                os._exit(status)
+
+        reaped = False
+        try:
+            reaped = reap_sidecar(child, deadline)
+        finally:
+            if not reaped:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                # Uninterruptible kernel I/O can defer SIGKILL. Never block
+                # the committed exit while the kernel finishes that I/O.
+                reap_sidecar(child, deadline + SIDECAR_REAP_SECONDS)
 
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
         """Drain three bounded pipes without echoing guest bytes to a terminal."""
@@ -349,13 +390,9 @@ class ImageJob:
                 if self.probe and name != "stream":
                     if pipe == -1:
                         continue
-                    if optional(lose, nonblocking_fd, pipe) is None:
+                    if not optional(lose, register_probe_diagnostic, events, diagnostic_pipes, name, pipe):
+                        optional(lose, diagnostic_pipes.pop, name, None)
                         self.detach_diagnostic(events, name, pipe)
-                        continue
-                    if optional(lose, events.register, pipe, selectors.EVENT_READ, name) is None:
-                        self.detach_diagnostic(events, name, pipe)
-                        continue
-                    diagnostic_pipes[name] = pipe
                 else:
                     events.register(pipe, selectors.EVENT_READ, name)
                     output = self.outputs.enter_context(self._open_log(self.directory / (name + ".partial")))
@@ -456,10 +493,26 @@ class ImageJob:
                 optional(self.lose_diagnostics, pipe.close)
 
 
-def nonblocking_fd(pipe) -> int:
-    fd = pipe if type(pipe) is int else pipe.fileno()
-    os.set_blocking(fd, False)
-    return fd
+def register_probe_diagnostic(events, diagnostic_pipes: dict, name: str, pipe) -> bool:
+    """Set up the inherited console transport and its tracking together."""
+    nonblocking_fd = pipe if type(pipe) is int else pipe.fileno()
+    os.set_blocking(nonblocking_fd, False)
+    events.register(pipe, selectors.EVENT_READ, name)
+    diagnostic_pipes[name] = pipe
+    return True
+
+
+def reap_sidecar(child: int, deadline: float) -> bool:
+    while True:
+        try:
+            if os.waitpid(child, os.WNOHANG)[0] == child:
+                return True
+        except ChildProcessError:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.005, remaining))
 
 
 def sync_output(output) -> None:

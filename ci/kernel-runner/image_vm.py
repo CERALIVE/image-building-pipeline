@@ -232,7 +232,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             report_error(exc)
             return 1
         if probe:
-            optional(build.lose_diagnostics, build.persist_diagnostics)
+            optional(build.lose_diagnostics, build.finish_diagnostics)
         return row["launcher_exit"]
 
 

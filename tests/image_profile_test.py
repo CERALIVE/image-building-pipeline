@@ -47,7 +47,7 @@ STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error", "stag
                "stages:flush-error", "stages:priority-timeout", "stages:before-header")
 HOST_DIAGNOSTICS = {
     "os.pipe2": "pipe2", "os.close": "close", "StageTail": "StageTail",
-    "nonblocking_fd": "nonblocking_fd", "events.register": "register",
+    "register_probe_diagnostic": "register_probe_diagnostic", "diagnostic_pipes.pop": "pop",
     "os.read": "read", "tail.observe": "observe",
     "receive_diagnostic": "receive_diagnostic", "drain": "drain",
     "self._snapshot_diagnostics": "_snapshot_diagnostics",
@@ -57,12 +57,22 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                    *(f"isolated:{step}:{error}" for step in ("pipe", "register", "read")
                      for error in ("RuntimeError", "OSError", "MemoryError")),
                    *(f"isolated:wrap-{step}:{error}" for step in
-                     ("close", "StageTail", "nonblocking_fd",
+                     ("close", "StageTail", "register_probe_diagnostic",
                       "observe", "receive_diagnostic", "drain",
                       "_snapshot_diagnostics", "_detach_diagnostic")
                      for error in ("RuntimeError", "OSError", "MemoryError")))
 SIDECAR_MODES = ("sidecar:slow", "sidecar:write-error", "sidecar:rename-error",
-                 "sidecar:render-error", "sidecar:cleanup-guard")
+                 "sidecar:render-error", "sidecar:cleanup-guard", "sidecar:slow-4", "sidecar:slow-30",
+                 "sidecar:dir-sync-stall")
+REGISTRATION_FAULTS = {
+    "before-get-fd": "nonblocking_fd =",
+    "before-nonblocking": "os.set_blocking(",
+    "before-register": "events.register(",
+    "before-track": "diagnostic_pipes[name] = pipe",
+    "after-track": "return True",
+}
+ISOLATION_MODES += tuple(f"isolated:{step}:MemoryError" for step in REGISTRATION_FAULTS)
+ISOLATION_MODES += tuple(f"isolated:stderr-{step}:MemoryError" for step in REGISTRATION_FAULTS)
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
 STARTUP_STATES = {
@@ -125,6 +135,7 @@ def signal_status(path: pathlib.Path) -> tuple[int, int, int]:
 
 def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> None:
     """Run the CLI and deliver a real signal inside the poll owned by select()."""
+    launcher_pid = os.getpid()
     poll_type = selectors.EpollSelector._selector_cls
     replace_file = os.replace
     sigmask = signal.pthread_sigmask
@@ -319,7 +330,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def mask(how, signals):
         nonlocal terminal_entered
-        if (mode == "mask-restore-error" and how == signal.SIG_SETMASK
+        if (mode == "mask-restore-error" and os.getpid() == launcher_pid and how == signal.SIG_SETMASK
                 and (directory / "exit.json").exists()):
             (root / "restore-attempt").touch()
             raise OSError(errno.EPERM, "fixture final mask restoration")
@@ -353,7 +364,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 print("once", file=attempts)
             (root / "committed").write_bytes((directory / "exit.json").read_bytes())
             if mode == "sidecar:slow":
-                time.sleep(2)
+                time.sleep(0.05)
+            if mode in {"sidecar:slow-4", "sidecar:slow-30"}:
+                inherited = vm_startup.fd_table()
+                mask_bits, ignored_bits, caught_bits = signal_status(pathlib.Path("/proc/self/status"))
+                (root / "persist-hold").write_text(json.dumps({
+                    "pid": os.getpid(), "parent": os.getppid(), "start": time.monotonic(),
+                    "fds": sorted(inherited), "signals": [mask_bits, ignored_bits, caught_bits],
+                }))
+                time.sleep(int(mode.rsplit("-", 1)[1]))
             if mode == "sidecar:rename-error":
                 raise MemoryError("fixture sidecar rename")
         if pair:
@@ -407,6 +426,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             os.fstat(fd)
             return
         path = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if mode == "sidecar:dir-sync-stall" and path == directory and (directory / "diagnostics.json").exists():
+            (root / "post-publication-sync").touch()
+            time.sleep(4)
         if mode == "stages:flush-error" and path.name.startswith(".receipt-"):
             if '"truncated"' in path.read_text():
                 (root / "sidecar-sync-failed").touch()
@@ -623,6 +645,26 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                         diagnostic_failure()
                     return original_read(fd, length)
                 patches.enter_context(patch.object(os, "read", fail_read))
+            step = operation.removeprefix("stderr-")
+            if step in REGISTRATION_FAULTS:
+                channel = "diagnostic" if operation.startswith("stderr-") else "console"
+                registration = image_lifecycle.register_probe_diagnostic
+                source, first = inspect.getsourcelines(registration)
+                needle = REGISTRATION_FAULTS[step]
+                target = next(first + index for index, text in enumerate(source) if needle in text)
+
+                def inject_line(frame, event, _arg):
+                    if event == "line" and frame.f_lineno == target and frame.f_locals.get("name") == channel:
+                        diagnostic_failure()
+                    return inject_line
+
+                def trace_registration(frame, event, _arg):
+                    if event == "call" and frame.f_code is registration.__code__:
+                        return inject_line
+                    return None
+
+                sys.settrace(trace_registration)
+                patches.callback(sys.settrace, None)
             if operation.startswith("wrap-"):
                 boundary = image_lifecycle.optional
                 def fault_boundary(on_loss, action, *args, **kwargs):
@@ -680,7 +722,7 @@ class FixturePolicy:
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
                       blocked: tuple[signal.Signals, ...] = (),
                       ignored: tuple[signal.Signals, ...] = (),
-                      entry_setup: str | None = None) -> None:
+                      entry_setup: str | None = None) -> dict | None:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         capsule = root / "capsule"
@@ -904,7 +946,10 @@ os.execvp(sys.argv[1], sys.argv[1:])
             seconds = 27 if mode == "ignore" else 8
             try:
                 _, stderr = launcher.communicate(timeout=seconds)
+                launcher_finished = time.monotonic()
             except subprocess.TimeoutExpired as error:
+                if mode in {"sidecar:slow-4", "sidecar:slow-30"}:
+                    raise AssertionError(f"{mode} held the committed launcher open") from None
                 assert (root / "sent").exists(), "fixture never delivered cancellation"
                 pid = (root / "pid").read_text()
                 assert pathlib.Path(f"/proc/{pid}").exists()
@@ -1088,6 +1133,14 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert (directory / "artifacts/verification.json").read_bytes() == expected
             if mode.count(":") == 2:
                 assert (root / "diag-injected").exists(), mode
+            if mode == "isolated:baseline" or mode.split(":")[1].removeprefix("stderr-") in REGISTRATION_FAULTS:
+                assert json.loads((root / "leaks").read_text()) == []
+                assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+                # Only diagnostics fields and per-launch metadata may differ.
+                excluded = {"last_observed_stage", "sequence_complete", "diagnostics_capture_lost",
+                            "launcher", "qemu", "base", "overlay_directory", "overlay_fd", "overlay_inode",
+                            "acquired_at", "started_at", "ended_at", "qemu_priority"}
+                return {key: value for key, value in receipts[0].items() if key not in excluded}
             return
         if mode in SIDECAR_MODES:
             committed = directory / "exit.json"
@@ -1100,13 +1153,22 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert (directory / "artifacts/verification.json").is_file()
             assert not (directory / "console.partial").exists() and not (directory / "diagnostic.partial").exists()
             sidecar = directory / "diagnostics.json"
-            if mode in {"sidecar:slow", "sidecar:cleanup-guard"}:
+            if mode in {"sidecar:slow", "sidecar:cleanup-guard", "sidecar:dir-sync-stall"}:
                 assert sidecar.stat().st_mode & 0o777 == 0o600
                 assert (root / "persisted").read_text() == "once\n"
                 assert "stream_close_end" in json.loads(sidecar.read_text())["console_stage_tail"]
                 assert not (root / "cleanup-registration-attempted").exists()
+                assert not (root / "post-publication-sync").exists()
             else:
                 assert not sidecar.exists()
+            if mode in {"sidecar:slow-4", "sidecar:slow-30"}:
+                hold = json.loads((root / "persist-hold").read_text())
+                assert launcher_finished - hold["start"] < 0.85, hold
+                assert hold["pid"] != hold["parent"] and not pathlib.Path(f"/proc/{hold['pid']}").exists()
+                assert hold["fds"] == [] and hold["signals"] == [0, 0, 0]
+                assert not (root / "returns/active.json").exists()
+                with (root / "fixture.lock").open("rb") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         if mode in STAGE_MODES:
             stalled = mode in {"stages:timeout", "stages:before-header", "stages:blocked-header"}
@@ -1235,8 +1297,11 @@ def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_t
 
 
 def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> None:
-    for mode in ISOLATION_MODES:
-        cancelled_fixture(mode)
+    baseline = cancelled_fixture("isolated:baseline")
+    for mode in ISOLATION_MODES[1:]:
+        result = cancelled_fixture(mode)
+        if mode.split(":")[1].removeprefix("stderr-") in REGISTRATION_FAULTS:
+            assert result is not None and result == baseline, (mode, result, baseline)
 
 
 def test_sidecar_persistence_cannot_change_the_committed_probe() -> None:
@@ -1253,7 +1318,7 @@ def test_diagnostic_boundary_keeps_capture_operations_in_the_fault_table() -> No
                    if ast.unparse(call.func) == "self.outputs.callback" and len(call.args) > 2
                    and ast.unparse(call.args[0]) == "optional")
     assert guarded == set(HOST_DIAGNOSTICS)
-    indirect = {"receive_diagnostic", "drain", "_detach_diagnostic"}
+    indirect = {"receive_diagnostic", "drain", "_detach_diagnostic", "register_probe_diagnostic"}
     assert not [call.lineno for call in calls
                 if ast.unparse(call.func) in {"StageTail", "tail.observe", "self._snapshot_diagnostics",
                                             "nonblocking_fd", "os.pipe2"}

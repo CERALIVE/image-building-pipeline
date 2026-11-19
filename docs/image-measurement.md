@@ -110,8 +110,14 @@ budget, overwrites records, or encounters a console or parser error. A timeout
 reports the last observed stage even if the sequence is incomplete.
 
 After `exit.json` is committed, including after cancellation or timeout, the
-launcher attempts one atomic write of the private `diagnostics.json` sidecar.
-It holds the bounded `console_stage_tail` and a `truncated` flag. Consumers
+launcher gives a forked writer 500 ms to publish the private `diagnostics.json`
+sidecar atomically. The writer starts with default signals and closed inherited
+descriptors. The launcher sends SIGKILL at the deadline and allows up to 100 ms
+for reaping. It exits on schedule even if the kernel defers termination during
+uninterruptible I/O. Consumers ignore any private `.receipt-*` temporary file.
+The sidecar is complete at rename and may be lost after a host crash because
+its directory is not synced again. It holds the bounded `console_stage_tail`
+and a `truncated` flag. Consumers
 must treat diagnostics as lost if `diagnostics_capture_lost` is true or the
 sidecar is absent or invalid. The committed exit outcome and artifact
 validation are independent of sidecar persistence.
