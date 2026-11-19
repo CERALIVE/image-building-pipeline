@@ -93,6 +93,26 @@ There is no image matrix or `--all` path. `--image-mode probe` performs a small
 network-denial/artifact-return probe; an actual probe and attended cancellation
 check remain prerequisites for admitting expensive measurements.
 
+The probe emits `STAGE <monotonic-nanoseconds> <stage> <count>` to the guest
+serial console and to `/run/ceralive-image-stages.log` in the disposable guest.
+The guest log is capped at 16 KiB. Check and verdict counts are 1 for denial
+and 0 for an unexpected result or error. Import completion counts objects.
+Stream markers identify member order and separate preparation, header writes,
+body writes, flush and close. Write completion counts are bytes reported by
+the guest writer.
+
+Probe `teardown.json` and `exit.json` include `last_stage`, `stream_bytes`
+received by the host, and `console_stage_tail`, up to 64 KiB of complete
+allowlisted stage lines. The receipt omits other console text. The independent
+guest deadline error names the last observed stage. An external supervisor
+that ends the probe with TERM still produces a cancellation receipt, with the
+same diagnostics. Stage logging is best effort and does not affect acceptance.
+
+The image base embeds the guest helper, stage logger and stream writer at
+`build-base --profile image` time. A newer launcher or source bundle does not
+update an earlier base. Prepare a new file from the reviewed helper revision,
+and independently approve its digest before using it for an attended probe.
+
 ## Typed capsule and independent public policy
 
 A capsule is an uncompressed regular tar containing exactly `inventory.json`

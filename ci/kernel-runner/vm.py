@@ -208,7 +208,8 @@ def main(cancellation: Cancellation) -> int:
                 files.append({"path": destination, "permissions": "0755", "encoding": "b64",
                               "content": base64.b64encode((HERE / source).read_bytes()).decode()})
             if args.profile == "image":
-                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py"):
+                for source in ("image_guest.py", "image_verify.py", "image_stream.py",
+                               "image_capsule.py", "image_urls.py", "image_stages.py"):
                     files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
                                   "permissions": "0755", "encoding": "b64",
                                   "content": base64.b64encode((HERE / source).read_bytes()).decode()})

@@ -41,6 +41,7 @@ IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
 SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error",
                        "raising-handler", "late-exit", "unreadable-exit", "shutdown-gap")
+STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error")
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
 STARTUP_STATES = {
@@ -435,7 +436,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             def poll(self, *args):
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
-                        and mode not in SUCCESS_GUEST_MODES and not sent):
+                        and mode not in (*SUCCESS_GUEST_MODES, *STAGE_MODES) and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
@@ -514,6 +515,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
+        if mode == "stages:timeout":
+            capture = ImageJob.capture
+            patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 1)))
+        if mode == "stages:logging-error":
+            from image_stages import StageTail
+            patches.enter_context(patch.object(StageTail, "observe", side_effect=OSError("fixture observer failure")))
         patches.enter_context(patch.object(vm_startup, "verify_startup", fixture_verify))
         patches.enter_context(patch.object(
             vm_process, "TERM_GRACE_SECONDS", 0.2 if startup else vm_process.TERM_GRACE_SECONDS))
@@ -654,6 +661,17 @@ if mode.startswith("pair:"):
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
+if mode in {STAGE_MODES!r}:
+    console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
+    os.write(console, b"STAGE 1 probe_start 0\\r\\n" * 4000)
+    os.write(console, b"Bearer FIXTURE_NOT_A_REAL_SECRET\\n" + b"x" * (70 * 1024) + b"\\n")
+    os.write(console, b"STAGE 2 magic_writ")
+    os.write(console, b"ten 25\\r\\n")
+    if mode != "stages:timeout":
+        os.write(1, (root / "probe.frame").read_bytes())
+        os.write(console, b"STAGE 3 stream_close_end 0\\n")
+        sys.exit(0)
+    os.write(1, b"CERALIVE_IMAGE_STREAM_V1\\n")
 if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(("fault:", "receipt-step:")):
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
@@ -866,6 +884,27 @@ os.execvp(sys.argv[1], sys.argv[1:])
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
+        if mode in STAGE_MODES:
+            stalled = mode == "stages:timeout"
+            logging_error = mode == "stages:logging-error"
+            exit_row = json.loads((directory / "exit.json").read_text())
+            teardown = json.loads((directory / "teardown.json").read_text())
+            assert launcher.returncode == exit_row["launcher_exit"] == int(stalled), stderr.decode()
+            for row in (exit_row, teardown):
+                assert row["qemu_reaped"] and row["input_descriptor_closed"] and row["overlay_descriptor_closed"]
+                assert row["stream_bytes"] == (25 if stalled else (root / "probe.frame").stat().st_size)
+                expected_stage = "magic_written" if stalled else "stream_close_end"
+                assert row["last_stage"] == (None if logging_error else expected_stage)
+                tail = row["console_stage_tail"]
+                assert "FIXTURE_NOT_A_REAL_SECRET" not in tail
+                if not logging_error:
+                    assert 63 * 1024 < len(tail.encode()) <= 64 * 1024
+                    assert tail.splitlines()[-1].split()[2] == expected_stage
+            if stalled:
+                assert b"magic_written" in stderr
+                assert (directory / "stream.partial").read_bytes() == b"CERALIVE_IMAGE_STREAM_V1\n"
+            assert not (root / "returns/active.json").exists()
+            return
         expected_status = 0 if mode in {"committed", "exit-sync-error", "mask-restore-error",
                                         "raising-handler", "late-exit", "shutdown-gap"} else 1
         pid = (root / "pid").read_text()
@@ -924,6 +963,11 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert caught & stop_bits == 1 << (signal.SIGINT - 1), (child, caught)
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_timeout() -> None:
+    for mode in STAGE_MODES:
+        cancelled_fixture(mode)
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:

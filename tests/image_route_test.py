@@ -8,9 +8,13 @@ import pathlib
 import sys
 import tempfile
 import tarfile
+from dataclasses import asdict
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
+import image_guest
 from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
 from image_capsule import unpack
 from image_verify import compare_slot
@@ -43,6 +47,85 @@ def test_artifacts_return_with_private_fixed_names() -> None:
         artifact = pathlib.Path(directory) / "verification.json"
         assert artifact.read_bytes() == b'{"verified":true}\n'
         assert artifact.stat().st_mode & 0o777 == 0o600
+
+
+def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> None:
+    for logging_available, route_present in ((True, False), (False, False), (False, True)):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            guest_home, console, stage_log = (root / name for name in ("guest", "console", "stages"))
+            console.touch()
+            if not logging_available:
+                console.unlink()
+                stage_log.mkdir()  # Writes fail even when the fixture runs as root.
+            request = root / "request"
+            request.write_text(json.dumps({"schema": 1, "identity": asdict(IDENTITY),
+                                           "operation": "probe", "trust": {}}))
+            wire = root / "wire"
+            no_connection = SimpleNamespace(settimeout=lambda _seconds: None,
+                                            connect_ex=lambda _address: 101)
+
+            def import_fixture(_capsule, destination, _identity):
+                destination.mkdir()
+                return SimpleNamespace(objects=tuple(range(610)))
+
+            with (patch.object(image_guest, "HOME", guest_home),
+                  patch.object(image_guest, "Path", side_effect=lambda path: {
+                      "/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw": request,
+                      "/dev/virtio-ports/ceralive-artifacts": wire,
+                  }.get(path, pathlib.Path(path))),
+                  patch.object(image_guest, "unpack", side_effect=import_fixture),
+                  patch.object(image_guest, "source_checkout", return_value=root / "CLIENT_KEY_PATH"),
+                  patch.object(image_guest, "command", return_value="[{}]" if route_present else "[]"),
+                  patch.object(image_guest.socket, "socket") as socket_factory):
+                socket_factory.return_value.__enter__.return_value = no_connection
+                from image_stages import StageLog
+                with (patch("image_stages.CONSOLE", console), patch("image_stages.GUEST_LOG", stage_log)):
+                    try:
+                        image_guest.main()
+                    except StreamError:
+                        assert route_present
+                    else:
+                        assert not route_present
+                    if logging_available:
+                        # Exercise the real bounded sink past its normal probe workload.
+                        with patch("image_stages.CONSOLE", root / "no-console"):
+                            for _ in range(1000):
+                                StageLog().emit("probe_start")
+            artifacts = root / "returns"
+            artifacts.mkdir()
+            with wire.open("rb") as source:
+                decode(source, artifacts, IDENTITY)
+            if route_present:
+                assert json.loads((artifacts / "failure.json").read_text())["failure"] == "StreamError"
+            else:
+                assert json.loads((artifacts / "verification.json").read_text())["network_denied"] is True
+            if logging_available:
+                lines = console.read_text().splitlines()
+                records = [line.split() for line in lines]
+                assert [event for _, _, event, _ in records] == [
+                    "probe_start", "capsule_import_begin", "capsule_import_end",
+                    "source_checkout_begin", "source_checkout_end", "route_check_begin", "route_check_end",
+                    "tcp_check_1_begin", "tcp_check_1_end", "tcp_check_2_begin", "tcp_check_2_end",
+                    "tcp_check_3_begin", "tcp_check_3_end", "tcp_check_4_begin", "tcp_check_4_end",
+                    "verdict_computed", "stream_open_begin", "stream_open_end",
+                    "magic_write_begin", "magic_written", "member_prepare_begin", "member_prepare_end",
+                    "member_header_begin", "member_header_end", "member_body_begin", "member_body_written",
+                    "member_prepare_begin", "member_prepare_end", "member_header_begin", "member_header_end",
+                    "member_body_begin", "member_body_written", "flush_begin", "flush_end",
+                    "stream_close_begin", "stream_close_end",
+                ]
+                timestamps = [int(ns) for _, ns, _, _ in records]
+                assert timestamps == sorted(timestamps)
+                counts = {stage: int(count) for _, _, stage, count in records}
+                assert counts["capsule_import_end"] == 610 and counts["magic_written"] == 25
+                assert all(counts[stage] == 1 for stage in (
+                    "route_check_end", "tcp_check_1_end", "tcp_check_2_end", "tcp_check_3_end",
+                    "tcp_check_4_end", "verdict_computed"))
+                log = stage_log.read_bytes()
+                assert log.startswith(console.read_bytes()) and log.endswith(b"\n")
+                assert 15 * 1024 < len(log) <= 16 * 1024 and b"CLIENT_KEY_PATH" not in log
+                assert stage_log.stat().st_mode & 0o777 == 0o600
 
 
 def test_identity_is_selected_by_host() -> None:

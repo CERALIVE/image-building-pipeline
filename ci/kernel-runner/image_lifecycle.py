@@ -17,12 +17,14 @@ from typing import TextIO
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
+from image_stages import StageTail
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
 
 
 class ReceiptError(OSError):
     """A receipt publication failed."""
+
 
 @contextmanager
 def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = None):
@@ -222,6 +224,7 @@ class ImageJob:
         self.directory = directory
         self.identity = identity
         self.cancellation = cancellation or Cancellation()
+        self.probe = False
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
@@ -282,6 +285,13 @@ class ImageJob:
         end = time.monotonic() + seconds
         next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
+        tail = None
+        if self.probe:
+            self.state.update(last_stage=None, console_stage_tail="")
+            try:
+                tail = StageTail()
+            except MemoryError:
+                pass
         with selectors.DefaultSelector() as events:
             files = {}
             for name, pipe in (("stream", process.stdout), ("diagnostic", process.stderr),
@@ -326,14 +336,31 @@ class ImageJob:
                                 or counts["console"] + counts["diagnostic"] > CONTROL_LOG_LIMIT):
                             raise StreamError("image return stream or log budget exceeded")
                         files[name].write(chunk)
+                        if name == "console" and tail is not None:
+                            # A broken diagnostic observer must never affect the probe.
+                            try:
+                                tail.observe(chunk)
+                            except (OSError, ValueError, MemoryError):
+                                tail = None
                     # Fixed caps bound growth between these observations.
                     overlay = Path(f"/proc/self/fd/{self.state['overlay_fd']}")
                     remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
                     disk_headroom(((Path(self.state["overlay_directory"]), remaining_overlay),
                                    (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
                 wait(process, end, self.cancellation)
+            except subprocess.TimeoutExpired as error:
+                if self.probe:
+                    stage = (tail.last if tail is not None else None) or "none seen"
+                    raise subprocess.TimeoutExpired(f"image guest (last stage: {stage})", error.timeout) from None
+                raise
             finally:
                 self.state["stream_bytes"] = counts["stream"]
+                if tail is not None:
+                    self.state["last_stage"] = tail.last
+                    try:
+                        self.state["console_stage_tail"] = tail.text()
+                    except (OSError, ValueError, MemoryError):
+                        pass
 
 
 def sync_output(output) -> None:

@@ -159,6 +159,7 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
     create_directory(directory)
     with ImageJob(directory, identity, request["capsule"], cancellation) as job:
         jobs.append(job)
+        job.probe = request["payload"]["operation"] == "probe"
         job.state.update(base_sha256=request["base_sha256"], base=str(base),
                          public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
                          overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],

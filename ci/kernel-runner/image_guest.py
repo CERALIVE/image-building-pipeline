@@ -16,6 +16,7 @@ import signal
 import time
 
 from image_capsule import Capsule, unpack
+from image_stages import StageLog
 from image_stream import BUILD_LOG_LIMIT, Identity, StreamError, encode
 
 HOME = Path("/opt/ceralive-image-job")
@@ -196,13 +197,24 @@ def main() -> None:
     if job["schema"] != 1 or set(job) - {"schema", "identity", "operation", "trust", "artifacts", "build_identity"}:
         raise StreamError("invalid image job contract")
     identity = Identity(**job["identity"])
+    stages = StageLog() if job["operation"] == "probe" else None
+    if stages:
+        stages.emit("probe_start")
     HOME.mkdir(mode=0o700)
     env = {"PATH": os.environ["PATH"], "HOME": str(HOME), "LANG": "C.UTF-8"}
     capsule_path = Path("/dev/disk/by-id/virtio-ceralive-image-input")
+    if stages:
+        stages.emit("capsule_import_begin")
     capsule = unpack(capsule_path, HOME / "input", identity)
+    if stages:
+        stages.emit("capsule_import_end", len(capsule.objects))
     directory = HOME / "input"
     (directory / "trust.json").write_text(json.dumps(job["trust"]) + "\n")
+    if stages:
+        stages.emit("source_checkout_begin")
     source = source_checkout(capsule, directory, env)
+    if stages:
+        stages.emit("source_checkout_end")
     failure = None
     try:
         match job["operation"]:
@@ -212,14 +224,26 @@ def main() -> None:
                 from image_verify import verify
                 records = verify(source, capsule, job)
             case "probe":
-                routes = command(["ip", "-j", "route", "show", "default"], env)
-                if json.loads(routes):
+                assert stages is not None
+                denied = False
+                stages.emit("route_check_begin")
+                try:
+                    denied = not json.loads(command(["ip", "-j", "route", "show", "default"], env))
+                finally:
+                    stages.emit("route_check_end", int(denied))
+                if not denied:
                     raise StreamError("offline guest has a default route")
-                for address in ("10.0.2.2", "169.254.169.254", "192.168.0.1", "1.1.1.1"):
-                    with socket.socket() as probe:
-                        probe.settimeout(1)
-                        if probe.connect_ex((address, 443)) == 0:
-                            raise StreamError("offline guest can reach an external endpoint")
+                for index, address in enumerate(("10.0.2.2", "169.254.169.254", "192.168.0.1", "1.1.1.1"), 1):
+                    denied = False
+                    stages.emit(f"tcp_check_{index}_begin")
+                    try:
+                        with socket.socket() as probe:
+                            probe.settimeout(1)
+                            denied = probe.connect_ex((address, 443)) != 0
+                            if not denied:
+                                raise StreamError("offline guest can reach an external endpoint")
+                    finally:
+                        stages.emit(f"tcp_check_{index}_end", int(denied))
                 report = HOME / "verification.json"
                 report.write_text(json.dumps({"schema": 1, "identity": asdict(identity),
                                              "network_denied": True}) + "\n")
@@ -236,8 +260,19 @@ def main() -> None:
         log = HOME / "build.log"
         if log.is_file():
             records.append(("build.log", log))
+    if stages:
+        stages.emit("verdict_computed", int(failure is None))
+        stages.emit("stream_open_begin")
     with Path("/dev/virtio-ports/ceralive-artifacts").open("wb", buffering=0) as output:
-        encode(output, records, identity)
+        if stages:
+            stages.emit("stream_open_end")
+        try:
+            encode(output, records, identity, stages)
+        finally:
+            if stages:
+                stages.emit("stream_close_begin")
+    if stages:
+        stages.emit("stream_close_end")
     if failure is not None:
         raise failure
 

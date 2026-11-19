@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 from typing import BinaryIO, Callable, Final, Iterable, TypeAlias
 
+from image_stages import StageLog
+
 JSONValue: TypeAlias = str | bool | int | float | None | list["JSONValue"] | dict[str, "JSONValue"]
 
 LIMIT: Final = 16 * 1024**3
@@ -91,21 +93,23 @@ def read_header(source: BinaryIO) -> Member:
 
 
 def transfer(source: BinaryIO, destination: BinaryIO, member: Member,
-             checkpoint: Callable[[], None] | None = None) -> None:
+             checkpoint: Callable[[], None] | None = None) -> int:
     """Hash while copying exactly the declared length, with bounded memory."""
     digest = hashlib.sha256()
     remaining = member.length
+    written = 0
     while remaining:
         if checkpoint is not None:
             checkpoint()
         chunk = source.read(min(1024 * 1024, remaining))
         if not chunk:
             raise StreamError("truncated artifact")
-        destination.write(chunk)
+        written += destination.write(chunk) or 0
         digest.update(chunk)
         remaining -= len(chunk)
     if digest.hexdigest() != member.sha256:
         raise StreamError("artifact digest mismatch")
+    return written
 
 
 def decode(source: BinaryIO, directory: Path, expected: Identity,
@@ -159,11 +163,29 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
 
 
 def encode(destination: BinaryIO, records: Iterable[tuple[str, bytes | Path]],
-           identity: Identity) -> None:
+           identity: Identity, stages: StageLog | None = None) -> None:
     """Guest producer; the host independently recomputes every record hash."""
-    destination.write(MAGIC)
+    def mark(stage: str, count: int = 0) -> None:
+        if stages is not None:
+            stages.emit(stage, count)
+
+    def write_member(member: Member, value: bytes | Path) -> None:
+        header = json.dumps(asdict(member), separators=(",", ":")).encode() + b"\n"
+        mark("member_header_begin", len(header))
+        mark("member_header_end", destination.write(header) or 0)
+        mark("member_body_begin", member.length)
+        if isinstance(value, Path):
+            with value.open("rb") as source:
+                written = transfer(source, destination, member)
+        else:
+            written = destination.write(value) or 0
+        mark("member_body_written", written)
+
+    mark("magic_write_begin", len(MAGIC))
+    mark("magic_written", destination.write(MAGIC) or 0)
     members = []
-    for name, value in records:
+    for ordinal, (name, value) in enumerate(records, 1):
+        mark("member_prepare_begin", ordinal)
         if isinstance(value, Path):
             with value.open("rb") as source:
                 digest = hashlib.file_digest(source, "sha256").hexdigest()
@@ -172,17 +194,16 @@ def encode(destination: BinaryIO, records: Iterable[tuple[str, bytes | Path]],
             digest = hashlib.sha256(value).hexdigest()
             length = len(value)
         member = Member(name, length, digest)
-        destination.write(json.dumps(asdict(member), separators=(",", ":")).encode() + b"\n")
-        if isinstance(value, Path):
-            with value.open("rb") as source:
-                transfer(source, destination, member)
-        else:
-            destination.write(value)
+        mark("member_prepare_end", ordinal)
+        write_member(member, value)
         members.append(member)
+    mark("member_prepare_begin", len(members) + 1)
     manifest = json.dumps({"schema": 1, "identity": asdict(identity),
                            "members": [asdict(item) for item in members]},
                           separators=(",", ":")).encode()
     terminal = Member("manifest", len(manifest), hashlib.sha256(manifest).hexdigest())
-    destination.write(json.dumps(asdict(terminal), separators=(",", ":")).encode() + b"\n")
-    destination.write(manifest)
+    mark("member_prepare_end", len(members) + 1)
+    write_member(terminal, manifest)
+    mark("flush_begin")
     destination.flush()
+    mark("flush_end")
