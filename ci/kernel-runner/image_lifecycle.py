@@ -234,33 +234,37 @@ class ImageJob:
                       "stop_reason": "not started", "qemu_reaped": False,
                       "stream_budget": CAPS.stream_max,
                       "input_descriptor_closed": False, "overlay_descriptor_closed": False}
+        self.stage_tail = None
+        self.control_bytes = 0
         if probe:
-            self.state.update(last_stage=None, last_observed_stage=None, console_stage_tail="",
-                              sequence_complete=False, diagnostics_lost=False, diagnostics_truncated=False)
+            self.state.update(last_observed_stage=None, sequence_complete=False, diagnostics_capture_lost=False)
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
             inputs.callback(os.close, self.capsule_fd)
-            if probe:
-                pipe = optional(self.lose_diagnostics, os.pipe2, os.O_NONBLOCK)
-            else:
-                pipe = os.pipe()
-            if pipe is not None:
-                self.console_read, self.console_write = pipe
+            if not probe:
+                self.console_read, self.console_write = os.pipe()
                 inputs.callback(self.close_console_reader)
                 inputs.callback(self.close_console_writer)
             self.inputs = inputs.pop_all()
+        if probe and (pipe := optional(self.lose_diagnostics, os.pipe2, os.O_NONBLOCK)) is not None:
+            self.console_read, self.console_write = pipe
 
     def __enter__(self) -> ImageJob:
         return self
 
     def __exit__(self, _type, error, _traceback) -> None:
         # Attempt every descriptor close even if an earlier close or sync fails.
-        with self.outputs:
-            self.inputs.close()
-            self.state["input_descriptor_closed"] = True
+        try:
+            with self.outputs:
+                self.inputs.close()
+                self.state["input_descriptor_closed"] = True
+        finally:
+            if self.probe:
+                self.close_console_writer()
+                self.close_console_reader()
         if self.probe:
-            self.state["diagnostics_lost"] |= not self.state["sequence_complete"]
-            self.state["sequence_complete"] = not self.state["diagnostics_lost"]
+            self.state["diagnostics_capture_lost"] |= not self.state["sequence_complete"]
+            self.state["sequence_complete"] = not self.state["diagnostics_capture_lost"]
         self.state["ended_at"] = time.time()
         if error:
             self.state["stop_reason"] = type(error).__name__
@@ -271,7 +275,7 @@ class ImageJob:
             sync_directory(self.active.parent)
 
     def lose_diagnostics(self) -> None:
-        self.state["diagnostics_lost"] = True
+        self.state["diagnostics_capture_lost"] = True
 
     def _close_console(self, end: str) -> None:
         fd = getattr(self, end)
@@ -307,9 +311,19 @@ class ImageJob:
             raise
 
     def _snapshot_diagnostics(self, tail: StageTail) -> None:
-        self.state.update(last_stage=tail.last, last_observed_stage=tail.last)
-        self.state["sequence_complete"] = tail.complete and not self.state["diagnostics_truncated"]
-        self.state["console_stage_tail"] = tail.text()
+        self.state.update(last_observed_stage=tail.last,
+                          sequence_complete=tail.complete and self.control_bytes <= CONTROL_LOG_LIMIT)
+
+    def persist_diagnostics(self) -> None:
+        # The outcome receipt is already committed. A missing or invalid
+        # sidecar reports persistence failure without rewriting exit.json.
+        tail = self.stage_tail
+        receipt(self.directory / "diagnostics.json", {
+            "schema": 1,
+            "truncated": self.control_bytes > CONTROL_LOG_LIMIT or (tail is not None and tail.truncated),
+            "control_bytes_received": self.control_bytes,
+            "console_stage_tail": tail.text() if tail is not None else "",
+        })
 
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
         """Drain three bounded pipes without echoing guest bytes to a terminal."""
@@ -325,14 +339,13 @@ class ImageJob:
         next_priority_check = 0.0
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
         lose = self.lose_diagnostics
-        tail = optional(lose, StageTail) if self.probe else None
+        tail = self.stage_tail = optional(lose, StageTail) if self.probe else None
         observe = tail is not None
         with selectors.DefaultSelector() as events:
             files = {}
             diagnostic_pipes = {}
             for name, pipe in (("stream", process.stdout), ("diagnostic", process.stderr),
                                ("console", self.console_read)):
-                path = self.directory / (name + ".partial")
                 if self.probe and name != "stream":
                     if pipe == -1:
                         continue
@@ -343,14 +356,9 @@ class ImageJob:
                         self.detach_diagnostic(events, name, pipe)
                         continue
                     diagnostic_pipes[name] = pipe
-                    output = optional(lose, self._open_log, path)
-                    if output is not None:
-                        self.outputs.callback(optional, lose, output.close)
-                        self.outputs.callback(optional, lose, sync_output, output)
-                    files[name] = output
                 else:
                     events.register(pipe, selectors.EVENT_READ, name)
-                    output = self.outputs.enter_context(self._open_log(path))
+                    output = self.outputs.enter_context(self._open_log(self.directory / (name + ".partial")))
                     self.outputs.callback(sync_output, output)
                     files[name] = output
             stream_open = True
@@ -364,15 +372,7 @@ class ImageJob:
                     return False
                 if name == "console" and observe:
                     observe = bool(optional(lose, tail.observe, chunk))
-                remaining = CONTROL_LOG_LIMIT - counts["console"] - counts["diagnostic"]
-                if len(chunk) > remaining:
-                    self.state["diagnostics_truncated"] = True
-                if remaining and (output := files[name]) is not None:
-                    kept = chunk[:remaining]
-                    counts[name] += len(kept)
-                    if optional(lose, output.write, kept) != len(kept):
-                        lose()
-                        files[name] = None
+                self.control_bytes += len(chunk)
                 return True
 
             try:
@@ -399,6 +399,8 @@ class ImageJob:
                         self.cancellation.check()
                         name = event.data
                         if self.probe and name != "stream":
+                            # The console transport is already open. This branch
+                            # drains it without acquiring or writing a log sink.
                             if name in diagnostic_pipes:
                                 optional(lose, receive_diagnostic, name, event.fileobj, event.fd)
                             continue

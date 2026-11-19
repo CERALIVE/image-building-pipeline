@@ -1,16 +1,12 @@
 """Payload-free diagnostics for the isolated image probe."""
 
-from collections import deque
 import os
 from pathlib import Path
 import re
-import stat
 import time
 from typing import Callable, ParamSpec, TypeVar
 
 CONSOLE = Path("/dev/ttyS0")
-GUEST_LOG = Path("/run/ceralive-image-stages.log")
-GUEST_LIMIT = 16 * 1024
 TAIL_LIMIT = 64 * 1024
 LINE_LIMIT = 96
 STAGE_LINE = re.compile(
@@ -49,18 +45,9 @@ class StageLog:
         self.pending_loss = True
 
     @staticmethod
-    def _write(path: Path, line: bytes, *, guest_file: bool = False) -> bool:
-        flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
-        if guest_file:
-            flags |= os.O_CREAT
-        fd = os.open(path, flags, 0o600)
+    def _write(line: bytes) -> bool:
+        fd = os.open(CONSOLE, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
         try:
-            # The side log is under /run (tmpfs). The serial sink never waits
-            # for space or for a reader.
-            if guest_file:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_size + len(line) > GUEST_LIMIT:
-                    return False
             return os.write(fd, line) == len(line)
         finally:
             os.close(fd)
@@ -76,14 +63,12 @@ class StageLog:
             self.lose()
             return
         line += b"\n"
-        if not optional(self.lose, self._write, GUEST_LOG, line, guest_file=True):
-            self.lose()
         # Emit a loss notice before the next stage. A stalled guest that
         # cannot send the notice is still incomplete at host teardown.
         if self.pending_loss and not self.reported_loss:
             marker = f"\nSTAGE {timestamp} diagnostics_lost 0\n".encode("ascii")
-            self.reported_loss = bool(optional(self.lose, self._write, CONSOLE, marker))
-        if not optional(self.lose, self._write, CONSOLE, line):
+            self.reported_loss = bool(optional(self.lose, self._write, marker))
+        if not optional(self.lose, self._write, line):
             self.lose()
 
 
@@ -109,15 +94,17 @@ class StageTail:
 
     def __init__(self) -> None:
         self.pending: bytes | None = b""
-        self.lines: deque[bytes] = deque()
+        self.ring = bytearray(TAIL_LIMIT)
+        self.head = 0
         self.size = 0
         self.last: str | None = None
         self.lost = False
+        self.truncated = False
         self.sequence = 0
 
     @property
     def complete(self) -> bool:
-        return self.last == "stream_close_end" and not self.lost and not self.pending
+        return self.last == "stream_close_end" and not self.lost and self.pending == b""
 
     def observe(self, chunk: bytes) -> bool:
         parts = chunk.split(b"\n")
@@ -142,13 +129,25 @@ class StageTail:
                     if match[4] is not None:
                         self.sequence = int(match[4])
                     self.last = match[2].decode("ascii")
-                line += b"\n"
-                self.lines.append(line)
-                self.size += len(line)
-                while self.size > TAIL_LIMIT:
-                    self.lost = True
-                    self.size -= len(self.lines.popleft())
+                self._append(line + b"\n")
         return True
 
+    def _append(self, line: bytes) -> None:
+        # Only allowlisted complete records enter this fixed-size memory ring.
+        while self.size + len(line) > TAIL_LIMIT:
+            self.lost = self.truncated = True
+            for _ in range(LINE_LIMIT + 1):
+                end = self.ring[self.head] == 10
+                self.head = (self.head + 1) % TAIL_LIMIT
+                self.size -= 1
+                if end:
+                    break
+        start = (self.head + self.size) % TAIL_LIMIT
+        first = min(len(line), TAIL_LIMIT - start)
+        self.ring[start:start + first] = line[:first]
+        self.ring[:len(line) - first] = line[first:]
+        self.size += len(line)
+
     def text(self) -> str:
-        return b"".join(self.lines).decode("ascii")
+        first = min(self.size, TAIL_LIMIT - self.head)
+        return (self.ring[self.head:self.head + first] + self.ring[:self.size - first]).decode("ascii")

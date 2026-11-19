@@ -19,6 +19,7 @@ from image_lifecycle import ImageJob, create_directory, receipt, reconcile, repo
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
+from image_stages import optional
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -230,6 +231,8 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         except OSError as exc:
             report_error(exc)
             return 1
+        if probe:
+            optional(build.lose_diagnostics, build.persist_diagnostics)
         return row["launcher_exit"]
 
 

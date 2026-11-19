@@ -56,7 +56,7 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
     baseline = None
     for logging_available, route_present, fault in (
         (True, False, None), (False, False, None), (False, True, None),
-        (True, False, "fstat"), (True, False, "write"), (True, False, "close"),
+        (True, False, "open"), (True, False, "write"), (True, False, "close"),
         (True, False, "init:RuntimeError"), (True, False, "init:OSError"),
         (True, False, "init:MemoryError"),
     ):
@@ -66,7 +66,6 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
             console.touch()
             if not logging_available:
                 console.unlink()
-                stage_log.mkdir()  # Writes fail even when the fixture runs as root.
             request = root / "request"
             request.write_text(json.dumps({"schema": 1, "identity": asdict(IDENTITY),
                                            "operation": "probe", "trust": {}}))
@@ -88,8 +87,7 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                   patch.object(image_guest, "command", return_value="[{}]" if route_present else "[]"),
                   patch.object(image_guest.socket, "socket") as socket_factory):
                 socket_factory.return_value.__enter__.return_value = no_connection
-                from image_stages import StageLog
-                with (patch("image_stages.CONSOLE", console), patch("image_stages.GUEST_LOG", stage_log)):
+                with patch("image_stages.CONSOLE", console):
                     with ExitStack() as faults:
                         if fault and fault.startswith("init:"):
                             error = {"RuntimeError": RuntimeError, "OSError": OSError,
@@ -99,14 +97,15 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                             operation = getattr(os, fault)
                             injected = False
 
-                            def fail_once(fd, *args):
+                            def fail_once(target, *args):
                                 nonlocal injected
-                                if not injected and os.readlink(f"/proc/self/fd/{fd}") == str(stage_log):
+                                path = str(target) if fault == "open" else os.readlink(f"/proc/self/fd/{target}")
+                                if not injected and path == str(console):
                                     injected = True
                                     if fault == "close":
-                                        operation(fd, *args)
+                                        operation(target, *args)
                                     raise MemoryError(f"fixture stage {fault}")
-                                return operation(fd, *args)
+                                return operation(target, *args)
 
                             faults.enter_context(patch.object(os, fault, side_effect=fail_once))
                         try:
@@ -119,11 +118,6 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                             failed_init.assert_called_once()
                         elif fault:
                             assert injected
-                    if logging_available and not fault:
-                        # Exercise the real bounded sink past its normal probe workload.
-                        with patch("image_stages.CONSOLE", root / "no-console"):
-                            for _ in range(1000):
-                                StageLog().emit("probe_start")
             artifacts = root / "returns"
             artifacts.mkdir()
             with wire.open("rb") as source:
@@ -141,7 +135,13 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                            for line in console.read_text().splitlines())
             if logging_available and not fault:
                 lines = console.read_text().splitlines()
-                records = [line.split()[:4] for line in lines]
+                records = [line.split() for line in lines]
+                assert [int(seq) for _, _, _, _, seq in records] == list(range(1, len(lines) + 1))
+                from image_stages import StageTail
+                tail = StageTail()
+                tail.observe(console.read_bytes())
+                assert tail.complete and tail.text() == console.read_text()
+                records = [record[:4] for record in records]
                 assert [event for _, _, event, _ in records] == [
                     "probe_start", "capsule_import_begin", "capsule_import_end",
                     "source_checkout_begin", "source_checkout_end", "route_check_begin", "route_check_end",
@@ -161,10 +161,8 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                 assert all(counts[stage] == 1 for stage in (
                     "route_check_end", "tcp_check_1_end", "tcp_check_2_end", "tcp_check_3_end",
                     "tcp_check_4_end", "verdict_computed"))
-                log = stage_log.read_bytes()
-                assert log.startswith(console.read_bytes()) and log.endswith(b"\n")
-                assert 15 * 1024 < len(log) <= 16 * 1024 and b"CLIENT_KEY_PATH" not in log
-                assert stage_log.stat().st_mode & 0o777 == 0o600
+                assert b"CLIENT_KEY_PATH" not in console.read_bytes()
+            assert not stage_log.exists()
 
 
 def test_stage_logger_returns_when_the_console_pipe_is_full() -> None:
@@ -176,12 +174,12 @@ def test_stage_logger_returns_when_the_console_pipe_is_full() -> None:
         os.mkfifo(fifo)
         with (os.fdopen(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK), "rb", buffering=0) as reader,
               os.fdopen(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK), "wb", buffering=0) as writer,
-              patch("image_stages.CONSOLE", fifo), patch("image_stages.GUEST_LOG", root / "log")):
+              patch("image_stages.CONSOLE", fifo)):
             capacity = fcntl.fcntl(writer.fileno(), fcntl.F_GETPIPE_SZ)
             assert writer.write(b"x" * capacity) == capacity
             stages = StageLog()
             stages.emit("probe_start")
-            assert (root / "log").read_bytes().split()[2] == b"probe_start"
+            assert not (root / "log").exists()
             assert reader.read(capacity) == b"x" * capacity
             stages.emit("capsule_import_begin")
             assert [line.split()[2] for line in reader.read(capacity).splitlines() if line] == [
