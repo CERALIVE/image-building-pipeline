@@ -32,6 +32,10 @@ class IOPriorityError(AdmissionError):
     """The live guest's I/O class could not be verified."""
 
 
+class IOPrioritySyscallError(OSError):
+    """A native sampling error whose errno must reach the observation retry."""
+
+
 @dataclass(frozen=True, slots=True)
 class ImageCaps:
     cpus: int = 4
@@ -132,7 +136,10 @@ class PriorityObservation(TypedDict):
 
 def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
     """Observe the owned QEMU process, including containment after exec."""
-    return retry_check(_process_priority, pid, cancellation)
+    try:
+        return retry_check(_process_priority, pid, cancellation)
+    except IOPrioritySyscallError as error:
+        raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
 
 
 def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
@@ -146,7 +153,7 @@ def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservati
     value = _LIBC.syscall(ctypes.c_long(SYS_IOPRIO_GET), IOPRIO_WHO_PROCESS, pid)
     if value == -1:
         error = ctypes.get_errno()
-        raise IOPriorityError(f"ioprio_get failed: {os.strerror(error)}")
+        raise IOPrioritySyscallError(error, os.strerror(error))
     policy, level = divmod(value, 1 << IOPRIO_CLASS_SHIFT)
     if policy == 1:
         raise AdmissionError("image profile forbids realtime I/O priority")

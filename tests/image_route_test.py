@@ -9,6 +9,8 @@ import io
 import json
 import os
 import pathlib
+import signal
+import subprocess
 import sys
 import tempfile
 import tarfile
@@ -544,6 +546,73 @@ def test_sidecar_rejects_wrong_hash_filename_and_trailing_records() -> None:
                 pass
             else:
                 raise AssertionError("malformed artifact sidecar accepted")
+
+
+def test_mirror_requires_readiness_and_owned_clean_shutdown() -> None:
+    child = """
+import os, signal, sys
+mode = sys.argv[1]
+if mode == 'early':
+    sys.exit(0)
+if mode in ('clean', 'bad'):
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0 if mode == 'clean' else 7))
+print('CERALIVE_SEALED_MIRROR_READY', flush=True)
+while True:
+    signal.pause()
+"""
+    for mode in ("clean", "legacy", "early", "bad", "foreign-term", "kill"):
+        with subprocess.Popen([sys.executable, "-c", child, mode], stdout=subprocess.PIPE) as mirror:
+            entered = False
+            try:
+                with image_guest.ready_mirror(mirror):
+                    entered = True
+                    if mode in ("foreign-term", "kill"):
+                        os.kill(mirror.pid, signal.SIGTERM if mode == "foreign-term" else signal.SIGKILL)
+                        mirror.wait(timeout=2)
+            except StreamError:
+                assert mode in ("early", "bad", "foreign-term", "kill"), mode
+            else:
+                assert mode in ("clean", "legacy"), mode
+            finally:
+                if mirror.poll() is None:
+                    mirror.kill()
+                    mirror.wait(timeout=2)
+            assert entered == (mode != "early"), mode
+            if mode in ("clean", "legacy"):
+                assert mirror.returncode == (0 if mode == "clean" else -signal.SIGTERM)
+
+
+def test_nested_slot_directory_close_does_not_leak_or_replace_read_failure() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        (root / "nested" / "deeper").mkdir(parents=True)
+        open_fd, close_fd = os.open, os.close
+        for late_at in (root, root / "nested/deeper"):
+            live = {}
+            calls = []
+            baseline = set(os.listdir("/proc/self/fd"))
+
+            def opened(path, flags, *args, dir_fd=None):
+                fd = open_fd(path, flags, *args, dir_fd=dir_fd)
+                live[fd] = (live[dir_fd] / path) if dir_fd is not None else pathlib.Path(path)
+                return fd
+
+            def closed(fd):
+                assert fd in live, ("reclosed", fd)
+                path = live.pop(fd)
+                calls.append(path)
+                close_fd(fd)
+                if path == late_at:
+                    raise OSError(errno.EIO, "late close already released fd")
+
+            with patch.object(image_verify.os, "open", opened), patch.object(image_verify.os, "close", closed):
+                try:
+                    with image_verify.parent_fd(root, "nested/deeper/file"):
+                        raise FileNotFoundError(errno.ENOENT, "primary read failure")
+                except OSError as error:
+                    assert error.errno == (errno.EIO if late_at == root else errno.ENOENT)
+            assert not live and set(os.listdir("/proc/self/fd")) == baseline
+            assert calls.count(late_at) == 1
 
 
 def test_encoded_package_urls_preserve_origin_and_reject_encoded_traversal() -> None:

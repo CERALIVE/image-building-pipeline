@@ -15,7 +15,9 @@ import subprocess
 import tarfile
 
 from image_capsule import Capsule, digest_file
-from image_stream import Identity, StreamError, list_directory, listed_entry, positioned_open, read_input, retry_check
+from image_stream import (
+    Identity, StreamError, close_checked, list_directory, listed_entry, positioned_open, read_input, retry_check,
+)
 
 
 @contextmanager
@@ -25,14 +27,16 @@ def parent_fd(root: Path, name: str):
     if not parts or any(part in (".", "..") for part in parts) or name.startswith("/"):
         raise StreamError("unsafe returned tar path")
     fd = os.open(root, os.O_DIRECTORY)
+    completed = False
     try:
         for part in parts[:-1]:
-            child = os.open(part, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
+            parent = fd
+            fd = os.open(part, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            close_checked(parent, completed=True)
         yield fd, parts[-1]
+        completed = True
     finally:
-        os.close(fd)
+        close_checked(fd, completed=completed)
 
 
 def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:

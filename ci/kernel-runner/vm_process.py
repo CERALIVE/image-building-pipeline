@@ -86,7 +86,7 @@ class ChildContainmentError(OSError):
 class Cancellation:
     """Signal state and the authoritative status of a renamed exit receipt."""
 
-    __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "finalizing",
+    __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "exit_sync_calls", "finalizing",
                  "saved_dispositions", "safe_journal")
 
     def __init__(self) -> None:
@@ -94,6 +94,7 @@ class Cancellation:
         self.exit_receipt: Path | None = None
         self.exit_temporary: Path | None = None
         self.exit_status: int | None = None
+        self.exit_sync_calls = 0
         self.finalizing = False
         self.saved_dispositions: dict[int, signal.Handlers | Callable] = {}
         self.safe_journal: tuple[Path, Path] | None = None

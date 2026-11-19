@@ -779,13 +779,15 @@ The launcher holds the flock through all of these steps:
 Every receipt is written to a mode-0600 temporary file in its own directory,
 file-synced after the unbuffered writes, atomically renamed into place, and followed by a
 directory sync. A regular-file sync error can report lost writeback even
-when a later sync would return zero. A raw regular-file sync call can
-retry once on EINTR. A second EINTR fails the sync without consuming a
-fresh-file attempt. A receipt has at most two write-and-sync attempts.
-After a recoverable sync fault it
-rewrites the prepared bytes into a fresh inode, closes and removes the old
-temporary, and syncs the replacement. Every attempt eligible for publication
-must pass a positioned readback of all prepared bytes and EOF before rename.
+when a later sync would return zero. The terminal marker has one budget of
+two actual file sync calls, including EINTR, even if the transaction restarts.
+After a recoverable sync fault or exhausted readback it rewrites the prepared
+bytes into a fresh inode, closes and removes the old temporary, and syncs the
+replacement if the budget permits. Each write attempt requires a complete
+positioned readback of the prepared bytes and EOF before rename. A transient
+readback error restarts that comparison at offset zero, up to three comparisons
+per inode. A byte mismatch rejects the receipt. Other regular-file consumers
+retain their bounded EINTR retry.
 Decoded artifacts replay from the captured envelope and recheck their member
 digest. Staging captures replay only if the bytes match the digest accumulated
 as the launcher read the guest pipe and the additional disk space is available.
@@ -839,16 +841,22 @@ Reconciliation retains the journal if it cannot inspect a potential holder.
 If a process or descriptor disappears during inspection, the launcher
 restarts from the store, up to the same three-attempt limit.
 The launcher completes the private-store inventory before starting an image
-helper or guest. It restarts the entire scan on EINTR, EAGAIN or EIO, up to three
-attempts. An incomplete scan refuses admission. Only a complete scan with a
-matching committed marker can account for a finished board.
+helper or guest. It restarts the store and capacity observation together on
+EINTR, EAGAIN or EIO, up to three attempts. A transient error reading live I/O
+priority likewise restarts the complete priority sample. An incomplete scan
+refuses admission. Only a complete scan with a matching committed marker can
+account for a finished board.
 
 The guest checks the capsule transport SHA-256, then rewinds the same open
 input for tar parsing. Archive headers and members use positioned reads that
 retry at the failed byte offset. Each object still has to match its inventory
 length and SHA-256.
 The slot, firmware and sealed-mirror checks require complete directory
-observations. The offline probe requires an empty JSON list of default routes
+observations. After readiness, the guest sends TERM to the mirror it started.
+It accepts either an orderly zero exit or the legacy default TERM disposition
+and separately checks the sealed missing-object marker. An early mirror exit,
+an unowned shutdown, or any other exit status rejects the measurement.
+The offline probe requires an empty JSON list of default routes
 and ENETUNREACH or EHOSTUNREACH for every selected TCP endpoint. ECONNREFUSED
 indicates a reachable endpoint, and ETIMEDOUT supplies no conclusive evidence.
 An inconclusive local TCP error produces a failure frame if the artifact

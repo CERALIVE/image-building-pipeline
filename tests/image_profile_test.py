@@ -16,6 +16,7 @@ import fcntl
 from functools import partial
 import io
 import inspect
+from itertools import product
 import json
 import hashlib
 import os
@@ -271,7 +272,14 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     read_text = pathlib.Path.read_text
     read_bytes = pathlib.Path.read_bytes
     fsync = os.fsync
-    unlink = pathlib.Path.unlink
+    unlink_syscall = os.unlink
+
+    def unlink(path, *, missing_ok=False):
+        try:
+            unlink_syscall(os.fspath(path))
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
     temporary_file = tempfile.TemporaryFile
     native_open, native_close = os.open, os.close
     directory = root / "returns/fixture/build"
@@ -678,12 +686,17 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             tail_signal_at("journal-unlink")
             if tail_case and tail_case[0] == "journal-unlink":
                 assert (directory / "exit.json").exists(), "journal unlink ran before exit commit"
-                if tail_case[1] == "ENOENT" and tail_count == 0:
+                if tail_case[1] == "ENOENT" and tail_count == 0 and not mode.endswith("/still-present"):
                     unlink(path, *args, **kwargs)
                 tail_fault("journal-unlink")
             teardown_memory("journal-unlink")
             fault_at("journal-unlink")
         return unlink(path, *args, **kwargs)
+
+    def remove_owned(path, *args, **kwargs):
+        if isinstance(path, pathlib.Path):
+            return remove(path, *args, **kwargs)
+        return unlink_syscall(path, *args, **kwargs)
 
     def overlay(*args, **kwargs):
         fault_at("overlay-create")
@@ -1603,6 +1616,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(signal, "pthread_sigmask", mask),
              patch.object(os, "fsync", sync), patch("image_stream.sync_once", sync),
             patch.object(pathlib.Path, "unlink", remove),
+             patch.object(os, "unlink", remove_owned),
             patch.object(tempfile, "TemporaryFile", overlay),
             patch.object(pathlib.Path, "read_text", read_result),
             patch.object(pathlib.Path, "read_bytes", fixture_read_bytes),
@@ -2785,6 +2799,84 @@ def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
         spawn.assert_not_called()
 
 
+def test_priority_syscall_error_restarts_the_whole_observation() -> None:
+    for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
+        steps = []
+
+        def cpu(_pid):
+            steps.append("cpu")
+            return 9
+
+        def cgroup(_pid):
+            steps.append("cgroup")
+            return 10
+
+        def ioprio(*_args):
+            steps.append("ioprio")
+            return -1 if steps.count("ioprio") <= failures else 0
+
+        with patch.object(image_resources, "require_process_priority", cpu), \
+                patch.object(image_resources, "cgroup_limits", cgroup), \
+                patch.object(image_resources._LIBC, "syscall", ioprio), \
+                patch.object(image_resources.ctypes, "get_errno", return_value=error):
+            try:
+                assert image_resources.process_priority(os.getpid(), Cancellation())["ionice"] == "none: prio 0"
+            except image_resources.IOPriorityError:
+                assert failures == 3 or error == errno.EPERM
+        assert steps == ["cpu", "cgroup", "ioprio"] * (1 if error == errno.EPERM else min(failures + 1, 3))
+
+
+def test_late_disk_error_restarts_store_admission_before_execution() -> None:
+    for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            store = root / "store"
+            store.mkdir(mode=0o700)
+            base, capsule = root / "base", root / "capsule"
+            base.touch()
+            capsule.touch()
+            args = SimpleNamespace(base=base, input_capsule=capsule, input_sha256=IDENTITY.input_sha256,
+                                   base_sha256="a" * 64, trust_policy=root / "trust", output_dir=store,
+                                   attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                                   source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None,
+                                   group_id=None, image_mode="probe")
+            steps = []
+            inventory = image_vm.list_directory
+
+            def scan(path, **kwargs):
+                if path == store:
+                    steps.append("store")
+                return inventory(path, **kwargs)
+
+            def disk(*_args):
+                steps.append("disk")
+                if steps.count("disk") <= failures:
+                    raise OSError(error, "fixture disk observation")
+
+            def execute(_base, directory, request, *_args):
+                steps.append("execute")
+                artifacts = directory / "artifacts"
+                (artifacts / "verification.json").write_text(json.dumps({
+                    "schema": 1, "identity": request["payload"]["identity"], "network_denied": True}))
+                return artifacts
+
+            with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                                check_capsule=lambda *_: None, validate_base=lambda *_: None,
+                                load_policy=lambda *_: FixturePolicy(), reconcile=lambda *_: None,
+                                list_directory=scan, disk_admission=disk, execute=execute), \
+                    patch.object(image_resources.ImageCaps, "qemu_limit"):
+                try:
+                    image_vm.measure_image(args, None, Cancellation(), [])
+                except (OSError, image_resources.AdmissionError):
+                    assert failures == 3 or error == errno.EPERM
+                else:
+                    assert failures == 1 and error != errno.EPERM
+            tries = 1 if error == errno.EPERM else min(failures + 1, 3)
+            success = failures == 1 and error != errno.EPERM
+            assert steps == ["store", "disk"] * tries + (["execute"] if success else []), steps
+            assert (store / IDENTITY.attempt).exists() == success
+
+
 def statement_lines(code) -> tuple[str, ...]:
     return tuple(str(line) for _, line in dis.findlinestarts(code)
                  if line is not None and line > code.co_firstlineno)
@@ -3005,16 +3097,17 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         "read_once(event.fd, self.capture_buffer)",
         "events.select(timeout=min(POLL_SECONDS, end - now))",
         "self.register_measure_transport(events, process)",
-        "overlay.stat()",
+        "retry_check(self.capture_headroom, sum(counts.values()))",
         "process_identity(process.pid)", "process_priority(process.pid, self.cancellation)",
         "receipt(self.directory / 'started.json', self.state)",
         "receipt(self.active, {'attempt': self.identity.attempt, 'launcher': self.state['launcher'], "
         "'qemu': self.state['qemu'], 'overlay_inode': self.state['overlay_inode']})",
-        "disk_headroom(((Path(self.state['overlay_directory']), remaining_overlay), "
-        "(self.directory, 49 * GIB - self.state['retained_bytes'] - sum(counts.values()))))",
     )
     assert not (bad := unexpected(capture, capture_calls, capture_exact)), bad
     helpers = (
+        ("capture_headroom", {"Path", "max", "self.cancellation.check"},
+         ("overlay.stat()", "disk_headroom(((Path(self.state['overlay_directory']), remaining_overlay), "
+          "(self.directory, 49 * GIB - self.state['retained_bytes'] - bytes_received)))")),
         ("read_console", {"bool", "len"},
          {"os.read(fd, 1024 * 1024)", "optional(self.lose_diagnostics, tail.observe, chunk)"}),
         ("drain", {"events.get_map", "events.get_map().values", "range", "self.lose_diagnostics"},
@@ -3374,11 +3467,14 @@ def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
         assert row == (None if point == "exit-file-fsync" else baseline), point
     for error in ("EAGAIN", "ENOSYS", "EIO"):
         assert cancelled_fixture(f"tail-io:live-stream-read/{error}/2") == baseline
+    for error in ("EACCES", "EBUSY"):
+        assert cancelled_fixture(f"tail-io:live-stream-read/{error}/1") == baseline
     assert cancelled_fixture("tail-io:live-stream-read/EIO/3")["launcher_exit"] == 1
     for point in ("verification-read", "exit-file-fsync", "exit-dir-fsync", "readback", "journal-unlink"):
         cancelled_fixture(f"tail-io:{point}/EINTR/3")
     for error in ("EACCES", "ENOENT", "EBUSY"):
         assert cancelled_fixture(f"tail-io:journal-unlink/{error}/1") == baseline, error
+    assert cancelled_fixture("tail-io:journal-unlink/ENOENT/1/still-present") == baseline
     assert cancelled_fixture("tail-io:journal-unlink/EPERM/3") == baseline
     print(f"{len(operations)} tail syscall sites tested with five one-shot errno values", flush=True)
 
@@ -3469,7 +3565,7 @@ def test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_tempora
             root = pathlib.Path(temporary)
             target = root / "exit.json"
             row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
-            real_sync, real_unlink = image_stream.sync_once, pathlib.Path.unlink
+            real_sync, real_unlink = image_stream.sync_once, os.unlink
             first = root / ".receipt-original"
             failures = 0
 
@@ -3507,7 +3603,7 @@ def test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_tempora
                 return after_acquisition
 
             before = set(os.listdir("/proc/self/fd"))
-            with patch("image_stream.sync_once", sync), patch.object(pathlib.Path, "unlink", unlink):
+            with patch("image_stream.sync_once", sync), patch.object(os, "unlink", unlink):
                 if case == "allocation-after-create":
                     sys.settrace(after_acquisition)
                 try:
@@ -3522,6 +3618,87 @@ def test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_tempora
                     sys.settrace(None)
             assert set(os.listdir("/proc/self/fd")) == before
             assert list(root.iterdir()) == ([target] if target.exists() else [])
+
+
+def test_terminal_receipt_sync_has_one_two_call_budget() -> None:
+    import image_stream
+
+    errors = (errno.EINTR, errno.EPERM, errno.EIO, errno.ENOSPC, errno.EDQUOT, errno.ENOSYS)
+    row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
+    real_sync = image_stream.sync_once
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        for sequence in (*product(errors, repeat=2), *product(errors, repeat=3),
+                         *((error,) for error in errors)):
+            marker = root / "exit.json"
+            issued = []
+            verified = False
+
+            def sync(fd):
+                index = len(issued)
+                issued.append(os.fstat(fd).st_ino)
+                if index < len(sequence):
+                    raise OSError(sequence[index], "fixture terminal sync")
+                real_sync(fd)
+
+            expected = len(sequence) == 1 or errno.ENOSYS in sequence[:2]
+            with patch("image_stream.sync_once", sync), patch("image_stream.report_error"):
+                try:
+                    image_lifecycle.receipt(marker, row, outcome=Cancellation())
+                    verified = True
+                except image_lifecycle.ReceiptError:
+                    pass
+            assert len(issued) == (1 if sequence[0] == errno.ENOSYS else 2), (sequence, issued)
+            assert len(set(issued)) == len(issued), (sequence, issued)
+            assert verified == expected, (sequence, verified)
+            assert list(root.iterdir()) == ([marker] if expected else []), sequence
+            if expected:
+                assert json.loads(marker.read_bytes()) == row
+                marker.unlink()
+
+
+def test_terminal_receipt_readback_restarts_and_uses_the_remaining_attempt() -> None:
+    import image_stream
+
+    errors = (errno.EINTR, errno.EAGAIN, errno.EIO, errno.EACCES, errno.EPERM, errno.EBUSY,
+              errno.ENOSPC, errno.EDQUOT, errno.ENOSYS, errno.EBADF)
+    row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
+    read_at = image_stream._PREAD
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        summary = {"capture_lost": False}
+        probe = SimpleNamespace(diagnostic_summary=lambda: summary,
+                                fallback_fields=image_lifecycle.encode_diagnostic_fields(summary))
+        body_length = len(json.dumps(row, sort_keys=True, indent=2)[:-2].encode("ascii"))
+        probes = ((None, 0), (None, len((json.dumps(row, sort_keys=True, indent=2) + "\n").encode())),
+                  (probe, 0), (probe, body_length), (probe, body_length + len(probe.fallback_fields)))
+        for error, (probe, target_offset), fault_scope in product(errors, probes, ("once", "first-inode", "always")):
+            marker = root / "exit.json"
+            reads = []
+
+            def pread(fd, address, size, offset):
+                inode = os.fstat(fd).st_ino
+                reads.append((inode, offset))
+                if offset == target_offset and (
+                    fault_scope == "always"
+                    or fault_scope == "first-inode" and inode == reads[0][0]
+                    or fault_scope == "once" and sum(at == target_offset for _, at in reads) == 1
+                ):
+                    image_stream.ctypes.set_errno(error)
+                    return -1
+                return read_at(fd, address, size, offset)
+
+            with patch("image_stream._PREAD", pread):
+                try:
+                    image_lifecycle.receipt(marker, row, outcome=Cancellation(), probe=probe)
+                except image_lifecycle.ReceiptError:
+                    assert fault_scope == "always", (error, target_offset, fault_scope, reads)
+            assert list(root.iterdir()) == ([] if fault_scope == "always" else [marker]), (error, target_offset, fault_scope)
+            assert len({inode for inode, _ in reads}) == (1 if fault_scope == "once" else 2), reads
+            assert sum(not offset for _, offset in reads) >= 2, reads
+            if marker.exists():
+                assert json.loads(marker.read_bytes()) == (row | summary if probe else row)
+                marker.unlink()
 
 
 def test_each_reached_fresh_receipt_recovery_line_keeps_ownership() -> None:
@@ -3583,6 +3760,60 @@ def test_each_reached_fresh_receipt_recovery_line_keeps_ownership() -> None:
     assert len(healthy_lines) >= 12
     for point in sorted(healthy_lines):
         replay(point)
+
+
+def test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults() -> None:
+    import image_stream
+
+    watched = {fn.__code__ for fn in (image_lifecycle.Receipt.temp_cleanup,
+                                     image_stream.ExclusiveFile.discard,
+                                     image_stream.ExclusiveFile.close, image_stream.unlink_owned)}
+    sites = set()
+
+    def replay(fault=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            baseline = set(os.listdir("/proc/self/fd"))
+            syncs = 0
+            hit = False
+
+            def sync(_fd):
+                nonlocal syncs
+                syncs += 1
+                raise OSError(errno.EIO, "both terminal syncs failed")
+
+            def trace(frame, event, _arg):
+                nonlocal hit
+                if frame.f_code not in watched:
+                    return None
+                if syncs == 2 and event == "line":
+                    site = (frame.f_code.co_qualname, frame.f_lineno)
+                    if fault is None:
+                        sites.add(site)
+                    elif site == fault:
+                        hit = True
+                        sys.settrace(None)
+                        raise MemoryError("terminal cleanup")
+                return trace
+
+            with patch("image_stream.sync_once", sync):
+                sys.settrace(trace)
+                try:
+                    image_lifecycle.receipt(root / "exit.json", {"launcher_exit": 0}, outcome=Cancellation())
+                except image_lifecycle.ReceiptError as error:
+                    assert isinstance(error.__cause__, image_stream.FileSyncError)
+                else:
+                    raise AssertionError("published after two failed sync calls")
+                finally:
+                    sys.settrace(None)
+            assert syncs == 2 and hit == (fault is not None)
+            assert list(root.iterdir()) == [], fault
+            assert set(os.listdir("/proc/self/fd")) == baseline, fault
+
+    replay()
+    assert sites
+    for site in sorted(sites):
+        replay(site)
 
 
 def test_attempt_preparation_and_journal_survive_transient_io() -> None:
@@ -4197,6 +4428,50 @@ def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() 
         assert record["stop_reason"] == "previous launcher interrupted; guest cleanup unknown"
 
 
+def test_reconciliation_checks_descriptors_of_a_second_real_process() -> None:
+    code = "import os,sys; os.fstat(int(sys.argv[1])); print('ready', flush=True); sys.stdin.read()"
+    scan = image_lifecycle.list_directory
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        with (store / "overlay").open("wb") as overlay:
+            inode = os.fstat(overlay.fileno())
+            child = subprocess.Popen([sys.executable, "-c", code, str(overlay.fileno())],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     pass_fds=(overlay.fileno(),))
+        with child:
+            try:
+                assert select.select([child.stdout], [], [], 2)[0]
+                assert child.stdout.readline() == b"ready\n"
+                journal = store / "active.json"
+                journal.write_text(json.dumps({"attempt": "interrupted",
+                                               "overlay_inode": [inode.st_dev, inode.st_ino]}))
+                record = store / "interrupted.reconciled.json"
+
+                def scoped_proc(path, **kwargs):
+                    entries = scan(path, **kwargs)
+                    if path == image_lifecycle.PROC_ROOT:
+                        return [pid for pid in entries if pid in (str(os.getpid()), str(child.pid))]
+                    return entries
+
+                with patch.object(image_lifecycle, "list_directory", scoped_proc):
+                    try:
+                        reconcile(store)
+                    except image_resources.AdmissionError as error:
+                        assert f"/proc/{child.pid}/fd/" in str(error), error
+                    else:
+                        raise AssertionError("foreign process still held the owned overlay")
+                    assert journal.exists() and not record.exists()
+                    child.stdin.close()
+                    assert child.wait(timeout=2) == 0
+                    reconcile(store)
+                assert not journal.exists()
+                assert json.loads(record.read_text())["overlay_descriptors_closed"] is True
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+
+
 def test_journal_reconciliation_restarts_and_never_certifies_an_incomplete_proc_scan() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
@@ -4422,6 +4697,7 @@ class PairAndAdmissionCases:
         test_image_admission_requires_effective_cgroup_caps,
         test_nice_nine_requires_low_cpu_weight_and_all_hard_caps,
         test_reconciliation_holds_admission_until_owned_overlay_descriptors_close,
+        test_reconciliation_checks_descriptors_of_a_second_real_process,
         test_journal_reconciliation_restarts_and_never_certifies_an_incomplete_proc_scan,
         test_image_base_rejects_backing_and_nested_external_data_files,
         test_quarantined_outputs_do_not_reduce_future_pair_disk_admission,
@@ -4445,6 +4721,11 @@ if __name__ == "__main__":
                             test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode,
                             test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_temporary,
                             test_each_reached_fresh_receipt_recovery_line_keeps_ownership),
+        "--terminal-io-budget": (test_terminal_receipt_sync_has_one_two_call_budget,
+                                 test_terminal_receipt_readback_restarts_and_uses_the_remaining_attempt,
+                                 test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults),
+        "--admission-restart": (test_priority_syscall_error_restarts_the_whole_observation,
+                                test_late_disk_error_restarts_store_admission_before_execution),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,

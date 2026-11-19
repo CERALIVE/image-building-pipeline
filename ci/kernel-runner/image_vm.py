@@ -143,6 +143,15 @@ def scan_retained_outputs(store: Path, identity: Identity, trust_identity: tuple
             retained += info.st_blocks * 512
     return retained
 
+
+def admit_output_store(store: Path, identity: Identity, base: Path, base_sha256: str,
+                       trust_policy: Path) -> tuple[dict, int]:
+    """Recompute the store and capacity observation together on every attempt."""
+    trust = asdict(load_policy(trust_policy))
+    retained = scan_retained_outputs(store, identity, (base_sha256, trust["root_der_sha256"]))
+    disk_admission(base.parent, store, retained)
+    return trust, retained
+
 def validate_return(job: ImageJob, verifier: bool) -> None:
     target = job.artifacts
     envelope = job.directory / "stream.partial"
@@ -215,7 +224,7 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
                      disk_fd=disk_fd, image_job=job)
             job.outputs.close()
             cancellation.check()
-            disk_headroom(((directory, 16 * GIB),))
+            retry_check(disk_headroom, ((directory, 16 * GIB),))
             validate_return(job, request["payload"]["operation"] != "measure")
             job.state["stop_reason"] = "guest exited; transport validated"
     except BaseException:
@@ -349,9 +358,10 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         raise AdmissionError("image return store must be owned by the launcher and mode 0700")
     store = retry_check(lambda: store.resolve(strict=True))
     reconcile(store)
-    trust = asdict(retry_check(load_policy, args.trust_policy))
-    retained = retained_outputs(store, identity, (args.base_sha256, trust["root_der_sha256"]))
-    retry_check(disk_admission, base.parent, store, retained)
+    try:
+        trust, retained = retry_check(admit_output_store, store, identity, base, args.base_sha256, args.trust_policy)
+    except OSError as error:
+        raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
     if not base_checked:
         retry_check(validate_base, args.base, args.base_sha256, cancellation)
     directory = store / identity.attempt

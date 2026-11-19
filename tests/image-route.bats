@@ -134,6 +134,18 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image terminal publication shares one sync and readback budget" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --terminal-io-budget
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image admission restarts store and priority observations" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --admission-restart
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image profile pair publication and admission preserve lifecycle guarantees" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --pair-and-admission
   printf '%s\n' "$output"

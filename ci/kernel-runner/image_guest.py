@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
 import errno
 import json
@@ -20,8 +21,9 @@ from image_capsule import Capsule, unpack
 from image_stages import StageLog, stage_marker
 from image_stream import (
     BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode, list_directory, listed_entry,
-    positioned_open, read_input, retry_check,
+    positioned_open, read_input, retry_check, retry_io,
 )
+from vm_process import poll_owned, wait
 
 HOME = Path("/opt/ceralive-image-job")
 UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
@@ -92,6 +94,41 @@ def resolve(source: Path, board: str, env: dict[str, str]) -> dict[str, str]:
     return result
 
 
+@contextmanager
+def ready_mirror(mirror: subprocess.Popen):
+    """Require readiness and an owned shutdown, including legacy default TERM."""
+    sent_term = False
+    ready_seen = False
+    try:
+        with selectors.DefaultSelector() as ready:
+            ready.register(mirror.stdout, selectors.EVENT_READ)
+            if not ready.select(timeout=600) or mirror.stdout.readline() != b"CERALIVE_SEALED_MIRROR_READY\n":
+                raise StreamError("sealed guest mirror did not become ready")
+        if retry_io(poll_owned, mirror, recover=True) is not None:
+            raise StreamError("sealed guest mirror exited during readiness")
+        ready_seen = True
+        yield
+    finally:
+        try:
+            if retry_io(poll_owned, mirror, recover=True) is None:
+                try:
+                    retry_io(os.kill, mirror.pid, signal.SIGTERM, recover=True)
+                    sent_term = True
+                except ProcessLookupError:
+                    pass
+            retry_io(wait, mirror, time.monotonic() + 20, recover=True)
+        except (OSError, subprocess.TimeoutExpired):
+            if retry_io(poll_owned, mirror, recover=True) is None:
+                try:
+                    retry_io(os.kill, mirror.pid, signal.SIGKILL, recover=True)
+                except ProcessLookupError:
+                    pass
+                retry_io(wait, mirror, time.monotonic() + 20, recover=True)
+            raise
+        if ready_seen and (not sent_term or mirror.returncode not in (0, -signal.SIGTERM)):
+            raise StreamError("sealed guest mirror did not remain ready through the build")
+
+
 def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     directory = capsule.directory
     env = {"PATH": os.environ["PATH"], "HOME": str(HOME), "LANG": "C.UTF-8",
@@ -157,11 +194,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
         with subprocess.Popen(["python3", str(source / "lib/sealed-inputs.py"), "serve"],
                               env=env | {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
                               stdout=subprocess.PIPE, stderr=output) as mirror:
-            try:
-                with selectors.DefaultSelector() as ready:
-                    ready.register(mirror.stdout, selectors.EVENT_READ)
-                    if not ready.select(timeout=600) or mirror.stdout.readline() != b"CERALIVE_SEALED_MIRROR_READY\n":
-                        raise StreamError("sealed guest mirror did not become ready")
+            with ready_mirror(mirror):
                 args = ["bash", str(source / "build"), capsule.board, "--rootfs-measurement"]
                 with subprocess.Popen(args, env=env, cwd=source, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, start_new_session=True) as build:
@@ -193,11 +226,6 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
                             except subprocess.TimeoutExpired:
                                 os.killpg(build.pid, signal.SIGKILL)
                                 build.wait()
-            finally:
-                mirror.terminate()
-                status = mirror.wait(timeout=20)
-                if status:
-                    raise StreamError("sealed guest mirror did not remain ready through the build")
     if retry_check(listed_entry, directory, "missing-object") is not None:
         raise StreamError("guest requested an object absent from the sealed inventory")
     out = source / "images" / capsule.board

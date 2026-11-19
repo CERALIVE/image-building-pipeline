@@ -24,7 +24,7 @@ import uuid
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
 from image_stream import (
-    CONTROL_LOG_LIMIT, IO_ATTEMPTS, ExclusiveFile, FileSyncError, Identity, Member, PositionedReader,
+    CONTROL_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, ExclusiveFile, FileSyncError, Identity, Member, PositionedReader,
     StreamError, can_rewrite, list_directory, positioned_open, read_check_text, read_once, report_error,
     retry_check, retry_io, rewrite_file, sync_file, transfer, unlink_owned, write_all,
 )
@@ -41,6 +41,7 @@ UNAVAILABLE_DIAGNOSTICS = {
     "console_tail_truncated": False,
     "control_bytes_received": 0,
 }
+RECEIPT_RETRY = RETRYABLE_IO | frozenset((errno.EINTR,))
 
 
 def encode_diagnostic_fields(fields: dict) -> bytes:
@@ -173,12 +174,26 @@ class Receipt:
                 raise ReceiptError("receipt content differs before publication")
 
     def file_sync(self) -> None:
+        terminal = self.outcome is not None
         for attempt in range(2):
             assert self.file_fd is not None and self.file_fd >= 0
+            if self.outcome is not None:
+                if self.outcome.exit_sync_calls >= 2:
+                    raise ReceiptError("terminal receipt sync budget exhausted")
+                self.outcome.exit_sync_calls += 1
+            syncing = True
             try:
-                sync_file(self.file_fd)
-            except FileSyncError as error:
-                if not can_rewrite(error) or attempt:
+                sync_file(self.file_fd, retry_interrupted=not terminal)
+                syncing = False
+                if terminal:
+                    retry_io(self._verify_payload, self.file_fd, recover=True)
+                else:
+                    retry_check(self._verify_payload, self.file_fd)
+                return
+            except OSError as error:
+                recoverable = (terminal and error.errno in RECEIPT_RETRY
+                               or syncing and isinstance(error, FileSyncError) and can_rewrite(error))
+                if not recoverable or attempt or (self.outcome is not None and self.outcome.exit_sync_calls >= 2):
                     raise
                 # Keep the failed inode linked until the fresh inode exists.
                 self.replacement = ExclusiveFile(receipt_temporary(self.path), readable=True)
@@ -186,9 +201,6 @@ class Receipt:
                 self._write_payload(self.replacement.fileno())
                 self.primary.discard()
                 self.output = self.replacement
-            else:
-                retry_check(self._verify_payload, self.file_fd)
-                return
 
     def file_close(self) -> None:
         try:
@@ -274,8 +286,9 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
                     transaction.errors.append(error)
     finally:
         try:
-            if transaction.file_fd is not None and transaction.file_fd >= 0:
-                transaction.file_close()
+            if not transaction.renamed:
+                # Both preallocated owners survive even if the first cleanup step fails.
+                transaction.temp_cleanup()
         finally:
             if transaction.directory_fd is not None:
                 transaction.dir_close()
@@ -342,13 +355,7 @@ def retire_journal(cancellation: Cancellation) -> None:
         return
     path, directory = journal
     try:
-        try:
-            retry_io(path.unlink, missing_ok=True, recover=True)
-        except MemoryError:
-            retry_io(path.unlink, missing_ok=True, recover=True)
-        except OSError as error:
-            if error.errno != errno.ENOENT:
-                raise
+        unlink_owned(path)
     except (OSError, MemoryError) as error:
         report_error(f"journal_removed=false: {error}")
         return
@@ -362,7 +369,7 @@ _PIPE_SLOTS = ctypes.c_int * 2
 _PIPE2 = ctypes.CDLL(None, use_errno=True).pipe2
 _PIPE2.argtypes = (_PIPE_SLOTS, ctypes.c_int)
 _PIPE2.restype = ctypes.c_int
-PIPE_READ_RETRY = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM,
+PIPE_READ_RETRY = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM, errno.EACCES, errno.EBUSY,
                             errno.ENOSYS, errno.ENOSPC, errno.EBADF))
 
 
@@ -706,10 +713,7 @@ class ImageJob:
                         files[name].write(chunk)
                         self.capture_hashes[name].update(chunk)
                     # Fixed caps bound growth between these observations.
-                    overlay = Path(f"/proc/self/fd/{self.state['overlay_fd']}")
-                    remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
-                    disk_headroom(((Path(self.state["overlay_directory"]), remaining_overlay),
-                                   (self.directory, 49 * GIB - self.state["retained_bytes"] - sum(counts.values()))))
+                    retry_check(self.capture_headroom, sum(counts.values()))
                 wait(process, end, self.cancellation, self.record_reaped)
                 if self.probe:
                     try:
@@ -718,6 +722,19 @@ class ImageJob:
                         self.capture_lost = True
             finally:
                 self.state["stream_bytes"] = counts["stream"]
+
+    def capture_headroom(self, bytes_received: int) -> None:
+        self.cancellation.check()
+        overlay = Path(f"/proc/self/fd/{self.state['overlay_fd']}")
+        remaining_overlay = max(0, CAPS.overlay_max - overlay.stat().st_blocks * 512)
+        disk_headroom(((Path(self.state["overlay_directory"]), remaining_overlay),
+                       (self.directory, 49 * GIB - self.state["retained_bytes"] - bytes_received)))
+
+
+def check_rewrite_space(output: ExclusiveFile) -> int:
+    size = os.fstat(output.fileno()).st_size
+    disk_headroom(((output.path.parent, size),))
+    return size
 
 
 def sync_output(output: ExclusiveFile, digest, checkpoint: Callable[[], None]) -> None:
@@ -730,9 +747,8 @@ def sync_output(output: ExclusiveFile, digest, checkpoint: Callable[[], None]) -
     except FileSyncError as error:
         if not can_rewrite(error):
             raise
-        info = retry_io(os.fstat, output.fileno(), recover=True)
-        disk_headroom(((output.path.parent, info.st_size),))
-        member = Member(output.path.name, info.st_size, digest.hexdigest())
+        size = retry_check(check_rewrite_space, output)
+        member = Member(output.path.name, size, digest.hexdigest())
         with positioned_open(output.path) as source:
             def replay(fd: int) -> None:
                 transfer(source, fd, member, checkpoint)

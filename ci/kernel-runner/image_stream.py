@@ -94,12 +94,23 @@ def report_error(error: BaseException | str) -> None:
                 pass
 
 
+def close_checked(fd: int, *, completed: bool) -> None:
+    """Report a late close failure without replacing an earlier error."""
+    try:
+        os.close(fd)
+    except OSError as error:
+        report_error(error)
+        if completed:
+            raise
+
+
 def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
     """Return a complete Linux directory scan, preserving ENOENT from getdents."""
     # glibc readdir treats an ENOENT from getdents as end of directory.
     # A safety check must distinguish a dead directory from normal EOF.
     buffer = ctypes.create_string_buffer(32 * 1024)
     fd = open_check(path, os.O_DIRECTORY)
+    completed = False
     try:
         names = []
         while (length := _GETDENTS(fd, buffer, len(buffer))) > 0:
@@ -116,9 +127,10 @@ def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
         if length < 0:
             error = ctypes.get_errno()
             raise OSError(error, os.strerror(error), path)
+        completed = True
         return names
     finally:
-        os.close(fd)
+        close_checked(fd, completed=completed)
 
 
 def retry_check(operation, *args, disappearing: bool = False):
@@ -158,14 +170,17 @@ def read_check(path: Path, limit: int = 1024 * 1024) -> bytes:
     buffer = ctypes.create_string_buffer(64 * 1024)
     result = bytearray()
     fd = open_check(path)
+    completed = False
     try:
         while chunk := read_once(fd, buffer):
             result.extend(chunk)
             if len(result) > limit:
                 raise StreamError("observation exceeded metadata limit")
-        return bytes(result)
+        data = bytes(result)
+        completed = True
+        return data
     finally:
-        os.close(fd)
+        close_checked(fd, completed=completed)
 
 
 def read_check_text(path: Path) -> str:
@@ -198,18 +213,17 @@ def sync_once(fd: int) -> None:
         raise OSError(error, os.strerror(error))
 
 
-def sync_file(fd: int, *, directory: bool = False, recover: bool = True) -> None:
-    """Sync regular files once. Directory syncing has no payload to replay."""
+def sync_file(fd: int, *, directory: bool = False, recover: bool = True,
+              retry_interrupted: bool = True) -> None:
+    """Sync data or report unsupported durability."""
     try:
         if directory:
             retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
         else:
-            # EINTR is an interrupted call, distinct from a writeback failure.
-            # Expose exhaustion without consuming a fresh-file attempt.
             try:
                 sync_once(fd)
             except OSError as error:
-                if error.errno != errno.EINTR:
+                if error.errno != errno.EINTR or not retry_interrupted:
                     raise
                 sync_once(fd)
     except OSError as error:
@@ -279,6 +293,7 @@ def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = N
                     nofollow: bool = False, checked: bool = False):
     """Own a regular input while exposing buffered reads over retry-safe pread."""
     fd = None
+    completed = False
     try:
         flags = os.O_RDONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
         if checked:
@@ -290,14 +305,10 @@ def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = N
         raw = PositionedReader(fd, checked=checked)
         with (raw if archive else BufferedReader(raw)) as stream:
             yield stream
+        completed = checked
     finally:
         if fd is not None:
-            try:
-                os.close(fd)
-            except OSError as error:
-                if checked:
-                    raise
-                report_error(error)  # A read-only close cannot invalidate consumed bytes.
+            close_checked(fd, completed=completed)
 
 
 def write_all(destination: BinaryIO | int, data: bytes) -> int:
@@ -335,16 +346,22 @@ def create_file(owner: ExclusiveFile) -> None:
 
 
 def unlink_owned(path: Path) -> None:
-    """Accept ENOENT only after a completed directory scan proves absence."""
+    """Accept ENOENT only after confirming that the owned name is gone."""
     for attempt in range(IO_ATTEMPTS):
         try:
-            path.unlink()
+            os.unlink(path)
             return
         except FileNotFoundError:
             try:
-                if path.name not in list_directory(path.parent):
-                    return
-            except OSError:
+                os.lstat(path)
+            except FileNotFoundError:
+                try:
+                    if path.name not in list_directory(path.parent):
+                        return
+                except (OSError, MemoryError):
+                    if attempt + 1 == IO_ATTEMPTS:
+                        raise
+            except (OSError, MemoryError):
                 if attempt + 1 == IO_ATTEMPTS:
                     raise
             if attempt + 1 == IO_ATTEMPTS:
