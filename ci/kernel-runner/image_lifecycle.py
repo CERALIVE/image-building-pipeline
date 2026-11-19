@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
 from functools import partial
+from io import FileIO
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,7 @@ UNAVAILABLE_DIAGNOSTICS = {
 CONTROL_READ_FAILURE_LIMIT = 3
 CONTROL_RETIRE_LIMIT = 2 * CONTROL_READ_FAILURE_LIMIT
 CONTROL_RETRY_SECONDS = 0.1
+CONTROL_CLOSE_LIMIT = 3
 
 
 def encode_diagnostic_fields(fields: dict) -> bytes:
@@ -260,6 +262,7 @@ class ImageJob:
         self.probe = probe
         self.console_read = self.console_write = -1
         self.stderr_read = -1
+        self.control_readers: dict[str, FileIO | None] = {"console": None, "diagnostic": None}
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
@@ -277,13 +280,21 @@ class ImageJob:
         self.control_failures = {"diagnostic": 0, "console": 0}
         self.control_failure_since = {"diagnostic": 0.0, "console": 0.0}
         self.discarding_control = {"diagnostic": False, "console": False}
+        self.closing_control = {"diagnostic": False, "console": False}
+        self.control_close_attempts = {"diagnostic": 0, "console": 0}
+        self.control_close_until = {"diagnostic": 0.0, "console": 0.0}
         self.probe_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
             inputs.callback(os.close, self.capsule_fd)
             self.console_read, self.console_write = os.pipe2(os.O_NONBLOCK) if probe else os.pipe()
-            inputs.callback(self.close_console_reader)
+            if probe:
+                inputs.callback(optional, self.lose_diagnostics, self.close_console_reader)
+            else:
+                inputs.callback(self.close_console_reader)
             inputs.callback(self.close_console_writer)
+            if probe:
+                self.control_readers["console"] = FileIO(self.console_read, "rb")
             self.inputs = inputs.pop_all()
 
     def __enter__(self) -> ImageJob:
@@ -316,13 +327,21 @@ class ImageJob:
             os.close(fd)
 
     def close_console_reader(self) -> None:
-        self._close_console("console_read")
+        reader = self.control_readers["console"]
+        if reader is None:
+            self._close_console("console_read")
+        else:
+            reader.close()
 
     def close_console_writer(self) -> None:
         self._close_console("console_write")
 
     def close_stderr_reader(self) -> None:
-        self._close_console("stderr_read")
+        reader = self.control_readers["diagnostic"]
+        if reader is None:
+            self._close_console("stderr_read")
+        else:
+            reader.close()
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
@@ -363,9 +382,10 @@ class ImageJob:
             self.inputs.callback(os.close, stream_read)
             writers.callback(os.close, stream_write)
             self.stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
-            self.inputs.callback(self.close_stderr_reader)
+            self.inputs.callback(optional, self.lose_diagnostics, self.close_stderr_reader)
             writers.callback(optional, self.lose_diagnostics, os.close, stderr_write)
             os.set_blocking(self.stderr_read, False)
+            self.control_readers["diagnostic"] = FileIO(self.stderr_read, "rb")
             for name, fd in (("stream", stream_read), ("diagnostic", self.stderr_read),
                              ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
@@ -384,16 +404,16 @@ class ImageJob:
             self.observe_stages = bool(optional(self.lose_diagnostics, tail.observe, chunk))
 
     def read_control(self, name: str, fd: int) -> bool:
-        """Return true for EOF or a permanently closed control reader."""
+        """Allow unregister only after the owned reader is closed."""
+        if self.closing_control[name]:
+            return self.retire_control(name)
         failures = self.control_failures[name]
-        if failures == CONTROL_RETIRE_LIMIT:
-            return True
         try:
             if self.discarding_control[name]:
                 size = os.readv(fd, self.discard_buffer)
                 self.control_bytes += size
                 self.control_failures[name] = 0
-                return size == 0
+                return size == 0 and self.retire_control(name)
             chunk = os.read(fd, 1024 * 1024)
         except Exception:
             self.capture_lost = True
@@ -401,13 +421,8 @@ class ImageJob:
             if failures == 0:
                 self.control_failure_since[name] = now
             if failures + 1 == CONTROL_RETIRE_LIMIT or now - self.control_failure_since[name] >= CONTROL_RETRY_SECONDS:
-                self.control_failures[name] = CONTROL_RETIRE_LIMIT
-                # Closing the only reader releases a blocked diagnostic writer.
-                if name == "console":
-                    self.close_console_reader()
-                else:
-                    self.close_stderr_reader()
-                return True
+                self.closing_control[name] = True
+                return self.retire_control(name)
             self.control_failures[name] = failures + 1
             if failures + 1 == CONTROL_READ_FAILURE_LIMIT:
                 self.discarding_control[name] = True
@@ -415,7 +430,31 @@ class ImageJob:
         self.control_failures[name] = 0
         if chunk:
             self.record_control(name, chunk)
-        return chunk == b""
+        return chunk == b"" and self.retire_control(name)
+
+    def retire_control(self, name: str) -> bool:
+        self.closing_control[name] = True
+        reader = self.control_readers[name]
+        assert reader is not None
+        # FileIO owns the descriptor and never closes a recycled FD on retry.
+        if reader.closed:
+            return True
+        attempts = self.control_close_attempts[name]
+        now = time.monotonic()
+        if attempts == 0:
+            self.control_close_until[name] = now + CONTROL_RETRY_SECONDS
+        elif attempts == CONTROL_CLOSE_LIMIT or now >= self.control_close_until[name]:
+            time.sleep(0.01)  # Keep ownership without spinning on the ready pipe.
+            return False
+        self.control_close_attempts[name] = attempts + 1
+        try:
+            if name == "console":
+                self.close_console_reader()
+            else:
+                self.close_stderr_reader()
+        except Exception:
+            self.capture_lost = True
+        return reader.closed
 
     def drain(self, events: selectors.BaseSelector) -> None:
         for key in events.get_map().values():

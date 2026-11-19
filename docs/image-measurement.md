@@ -108,8 +108,11 @@ the oldest complete stage lines when full.
 A control read error marks capture lost and leaves the pipe registered.
 After three consecutive errors, the launcher drains that pipe into a
 preallocated buffer and discards its contents. After six consecutive errors
-or 100 ms of unsuccessful retries, it closes the failed reader so a blocked
-diagnostic writer can return. The artifact stream uses a separate pipe.
+or 100 ms of unsuccessful retries, it starts closing the failed reader so a
+blocked diagnostic writer can return. If a close is interrupted, the reader
+stays owned and registered. The launcher makes at most three close attempts
+within 100 ms and removes the registration only after the reader is closed. The
+artifact stream uses a separate pipe.
 
 The probe's `exit.json` contains `last_observed_stage`, `sequence_complete`,
 `capture_lost`, the sanitized `console_tail` (at most 4 KiB), and

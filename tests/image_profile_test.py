@@ -61,6 +61,30 @@ ENCODE_SITES = {
     for instruction in dis.get_instructions(image_lifecycle.encode_diagnostic_fields)
     if instruction.starts_line and instruction.opname != "RESUME"
 }
+CLOSE_LINES = {
+    "retire_control": (
+        "self.closing_control[name] = True", "reader = self.control_readers[name]",
+        "assert reader is not None", "if reader.closed:", "attempts = self.control_close_attempts[name]",
+        "now = time.monotonic()", "if attempts == 0:", "if name == \"console\":",
+        "self.control_close_attempts[name] = attempts + 1", "self.close_stderr_reader()", "return reader.closed",
+        "except Exception:", "self.capture_lost = True",
+    ),
+    "close_stderr_reader": ("reader = ", "if reader is None:", "reader.close()"),
+}
+CLOSE_CASES = {
+    f"isolated:stderr-close-{attempt}-{step}-{index}": (attempt, step, needle)
+    for attempt in (1, 2) for step, needles in CLOSE_LINES.items() for index, needle in enumerate(needles)
+}
+CLOSE_CASES.update({
+    "isolated:stderr-close-1-deadline": (1, "retire_control", "self.control_close_until[name] ="),
+    "isolated:stderr-close-2-deadline": (2, "retire_control", "elif attempts =="),
+})
+CLOSE_SYSCALL_CASES = {
+    f"isolated:stderr-close-{attempt}-{edge}": (attempt, edge)
+    for attempt in (1, 2) for edge in ("before", "after", "reuse")
+}
+CLOSE_MODES = ("isolated:stderr-close-dispatch", "isolated:stderr-close-clock",
+               "isolated:stderr-close-unregister", *CLOSE_CASES, *CLOSE_SYSCALL_CASES)
 PRESTART_MODES = tuple(
     f"prestart:{step}:{error}"
     for step in ("pipe", "stream", "stderr", "console", "console-after-register")
@@ -72,7 +96,7 @@ ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "is
                    "isolated:summary-timeout:MemoryError", "isolated:fallback:MemoryError",
                    "isolated:read-dispatch:MemoryError", "isolated:unregister:OSError",
                    "isolated:stderr-baseline", "isolated:stderr-first", "isolated:stderr-second",
-                   "isolated:stderr-discard", "isolated:stderr-terminal",
+                   "isolated:stderr-discard", "isolated:stderr-terminal", *CLOSE_MODES,
                    "isolated:encode-empty:MemoryError", "isolated:encode-tail:MemoryError",
                    *(f"isolated:encode-{tail}-{site}:MemoryError"
                      for tail in ("empty", "tail") for site in sorted(ENCODE_SITES)),
@@ -361,6 +385,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def publish(source, destination) -> None:
         nonlocal during, fail_sync
+        reused = root / "reused-fd"
+        if destination == directory / "exit.json" and reused.exists():
+            assert os.readlink(f"/proc/self/fd/{reused.read_text()}") == "/dev/null"
         if pair:
             with (root / "sequence").open("a") as log:
                 print(destination.relative_to(root / "returns"), file=log)
@@ -571,13 +598,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
-        if mode in {"isolated:stderr-first", "isolated:stderr-second", "isolated:stderr-discard",
-                    "isolated:stderr-terminal"}:
+        retire_stderr = mode in {"isolated:stderr-terminal", *CLOSE_MODES}
+        if retire_stderr or mode in {"isolated:stderr-first", "isolated:stderr-second", "isolated:stderr-discard"}:
             stderr_fd = -1
             reads = 0
             discard_reads = 0
             discard_read_failed = False
             register = selectors.EpollSelector.register
+            unregister = selectors.EpollSelector.unregister
+            stderr_inode = None
             read = os.read
             readv = os.readv
             popen = subprocess.Popen
@@ -594,16 +623,30 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 return popen(args, *positional, **kwargs)
 
             def track_stderr(selector, file, events, data=None):
-                nonlocal stderr_fd
+                nonlocal stderr_fd, stderr_inode
                 if data == "diagnostic":
                     stderr_fd = file if isinstance(file, int) else file.fileno()
+                    stderr_inode = os.fstat(stderr_fd).st_ino
                 return register(selector, file, events, data)
+
+            def assert_released(selector, file):
+                if file == stderr_fd and retire_stderr:
+                    try:
+                        live = os.fstat(stderr_fd).st_ino
+                    except OSError as error:
+                        assert error.errno == errno.EBADF
+                    else:
+                        assert live != stderr_inode, "unregistered an open stderr reader"
+                    if mode == "isolated:stderr-close-unregister":
+                        (root / "close-unregister-injected").touch()
+                        raise MemoryError("fixture failed after close, before unregister")
+                return unregister(selector, file)
 
             def fault_stderr(fd, count):
                 nonlocal reads
                 if fd == stderr_fd:
                     reads += 1
-                    if mode in {"isolated:stderr-discard", "isolated:stderr-terminal"} or reads == (
+                    if retire_stderr or mode == "isolated:stderr-discard" or reads == (
                         1 if mode == "isolated:stderr-first" else 2
                     ):
                         (root / "diag-injected").write_text(str(reads))
@@ -612,7 +655,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
             def watch_discard(fd, buffers):
                 nonlocal discard_read_failed, discard_reads
-                if fd == stderr_fd and mode == "isolated:stderr-terminal":
+                if fd == stderr_fd and retire_stderr:
                     discard_reads += 1
                     assert discard_reads <= 3, "unbounded discard reads"
                     (root / "discard-retries").write_text(str(discard_reads))
@@ -629,11 +672,94 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(selectors.EpollSelector, "register", track_stderr))
             patches.enter_context(patch.object(os, "read", fault_stderr))
             patches.enter_context(patch.object(os, "readv", watch_discard))
-            if mode == "isolated:stderr-terminal":
+            if retire_stderr:
+                def retirement_clock():
+                    if mode == "isolated:stderr-close-clock":
+                        return 1.0 + (0.11 if reads >= 2 else 0.0)
+                    return 1.0
+
+                def capture_clock():
+                    if sys._getframe(1).f_code.co_name in {"read_control", "retire_control"}:
+                        return retirement_clock()
+                    return time.monotonic()
+
+                patches.enter_context(patch.object(image_lifecycle, "time",
+                                                  SimpleNamespace(monotonic=capture_clock,
+                                                                  time=time.time, sleep=time.sleep)))
+                patches.enter_context(patch.object(selectors.EpollSelector, "unregister", assert_released))
                 patches.enter_context(patch.object(subprocess, "Popen", verify_writer_signal))
+            if mode == "isolated:stderr-close-dispatch":
+                close = ImageJob.close_stderr_reader
+
+                def fail_first_close(job):
+                    if not (root / "close-injected").exists():
+                        (root / "close-injected").touch()
+                        raise MemoryError("fixture failed before close")
+                    return close(job)
+
+                patches.enter_context(patch.object(ImageJob, "close_stderr_reader", fail_first_close))
+            if mode in CLOSE_CASES or mode in CLOSE_SYSCALL_CASES:
+                target_attempt = (CLOSE_CASES.get(mode) or CLOSE_SYSCALL_CASES[mode])[0]
+                fault_handler = mode in CLOSE_CASES and CLOSE_CASES[mode][2] in {
+                    "except Exception:", "self.capture_lost = True",
+                }
+                invocation = 0
+                original = ImageJob.retire_control
+                base_reader = image_lifecycle.FileIO
+
+                def number_close(job, name):
+                    nonlocal invocation
+                    if name == "diagnostic":
+                        invocation += 1
+                    return original(job, name)
+
+                def close_error():
+                    (root / "close-injected").write_text(str(invocation))
+                    raise MemoryError("fixture close fault")
+
+                class FaultReader(base_reader):
+                    def close(self):
+                        if self.closed or self.fileno() != stderr_fd:
+                            return super().close()
+                        if ((target_attempt == 2 and invocation == 1)
+                                or (fault_handler and invocation == target_attempt)):
+                            raise MemoryError("fixture forces a second close attempt")
+                        if mode not in CLOSE_SYSCALL_CASES or invocation != target_attempt:
+                            return super().close()
+                        edge = CLOSE_SYSCALL_CASES[mode][1]
+                        if edge == "before":
+                            close_error()
+                        super().close()
+                        if edge == "reuse":
+                            recycled = os.open("/dev/null", os.O_RDONLY)
+                            if recycled != stderr_fd:
+                                os.dup2(recycled, stderr_fd)
+                                os.close(recycled)
+                                recycled = stderr_fd
+                            assert recycled == stderr_fd
+                            (root / "reused-fd").write_text(str(recycled))
+                        close_error()
+
+                patches.enter_context(patch.object(ImageJob, "retire_control", number_close))
+                patches.enter_context(patch.object(image_lifecycle, "FileIO", FaultReader))
+                if mode in CLOSE_CASES:
+                    _, method, needle = CLOSE_CASES[mode]
+                    target = original if method == "retire_control" else ImageJob.close_stderr_reader
+                    lines, first_line = inspect.getsourcelines(target)
+                    line = next(first_line + i for i, text in enumerate(lines) if text.strip().startswith(needle))
+                    monitor = sys.monitoring
+                    handle = monitor.DEBUGGER_ID
+                    monitor.use_tool_id(handle, "retirement line fault")
+
+                    def close_line(_code, lineno):
+                        if lineno == line and invocation == target_attempt and not (root / "close-injected").exists():
+                            close_error()
+
+                    monitor.register_callback(handle, monitor.events.LINE, close_line)
+                    monitor.set_local_events(handle, target.__code__, monitor.events.LINE)
         if mode in {"stages:timeout", "stages:before-header", "stages:blocked-header", "isolated:dropped",
                     "isolated:summary-timeout:MemoryError", "isolated:stderr-first", "isolated:stderr-second",
-                    "isolated:stderr-discard", "isolated:stderr-terminal"}:
+                    "isolated:stderr-discard", "isolated:stderr-terminal", *CLOSE_MODES}:
             capture = ImageJob.capture
             patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
@@ -927,7 +1053,7 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
         capacity = fcntl.fcntl(2, fcntl.F_GETPIPE_SZ)
         if capacity > 65536:
             fcntl.fcntl(2, fcntl.F_SETPIPE_SZ, 65536)
-        if mode == "isolated:stderr-terminal":
+        if mode in ("isolated:stderr-terminal", *{CLOSE_MODES!r}):
             # The first blocking write may report partial progress when
             # the reader closes. The next write must get EPIPE.
             sent = 0
@@ -1255,10 +1381,21 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 assert record["last_observed_stage"] is None and record["console_tail"] == ""
                 assert not record["console_tail_truncated"] and record["control_bytes_received"] == 0
                 assert not (root / "late-fallback-encoding").exists()
-            if operation == "stderr-terminal":
+            if operation == "stderr-terminal" or mode in CLOSE_MODES:
                 assert record["stream_bytes"] == 836 and (root / "stderr-epipe").is_file()
-                assert (root / "diag-injected").read_text() == "3"
-                assert 1 <= int((root / "discard-retries").read_text()) <= 3
+                if operation == "stderr-close-clock":
+                    assert (root / "diag-injected").read_text() == "2"
+                    assert not (root / "discard-retries").exists()
+                else:
+                    assert (root / "diag-injected").read_text() == "3"
+                    assert int((root / "discard-retries").read_text()) == 3
+                if operation == "stderr-close-dispatch":
+                    assert (root / "close-injected").is_file()
+                if operation == "stderr-close-unregister":
+                    assert (root / "close-unregister-injected").is_file()
+                if mode in CLOSE_CASES or mode in CLOSE_SYSCALL_CASES:
+                    assert (root / "close-injected").read_text() == str(
+                        (CLOSE_CASES.get(mode) or CLOSE_SYSCALL_CASES[mode])[0])
             elif operation.startswith("stderr-"):
                 assert (root / "stderr-written").exists() and record["stream_bytes"] == 836
                 assert record["control_bytes_received"] == 65537 + len(record["console_tail"])
@@ -1460,16 +1597,18 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
     helpers = (
         ("record_control", {"bool", "len"}, {"optional(self.lose_diagnostics, tail.observe, chunk)"}),
         ("read_control", {"self.record_control"},
-         {"os.readv(fd, self.discard_buffer)", "os.read(fd, 1024 * 1024)", "time.monotonic()",
-          "self.close_console_reader()", "self.close_stderr_reader()"}),
+         ("os.readv(fd, self.discard_buffer)", "os.read(fd, 1024 * 1024)", "time.monotonic()",
+          *("self.retire_control(name)",) * 4)),
+        ("retire_control", set(), {"time.monotonic()", "time.sleep(0.01)",
+                                   "self.close_console_reader()", "self.close_stderr_reader()"}),
         ("drain", {"events.get_map", "events.get_map().values", "range", "self.lose_diagnostics"},
          {"self.read_control(key.data, key.fd)"}),
         ("diagnostic_summary", {"tail.text"}, set()),
         ("lose_diagnostics", set(), set()),
-        ("_close_console", {"getattr", "setattr", "os.close"},
-         {"optional(self.lose_diagnostics, os.close, fd)"}),
-        ("close_console_reader", set(), {"self._close_console('console_read')"}),
-        ("close_stderr_reader", set(), {"self._close_console('stderr_read')"}),
+        ("_close_console", {"getattr", "setattr"},
+         {"optional(self.lose_diagnostics, os.close, fd)", "os.close(fd)"}),
+        ("close_console_reader", set(), {"self._close_console('console_read')", "reader.close()"}),
+        ("close_stderr_reader", set(), {"self._close_console('stderr_read')", "reader.close()"}),
     )
     for name, calls, exact in helpers:
         assert not (bad := unexpected(node_for(ImageJob, name), calls, exact)), (name, bad)
@@ -1491,7 +1630,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         "os.fstat(event.fd)", "open('other', 'w')", "files[name].write(b'\\n')",
         "files[name].write(chunk)", "os.fork()", "self.unlisted_call()",
         "events.register(event.fd, selectors.EVENT_READ, name)",
-        "optional(lose, self.finish_diagnostics)",
+        "optional(lose, self.finish_diagnostics)", "os.close(fd)",
     )
     # Every statement block in capture and its diagnostic helpers is tried,
     # including exception/finally, EOF, timeout, and nested readiness branches.
