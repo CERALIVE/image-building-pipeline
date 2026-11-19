@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the real launcher lifecycle against small Python children, never a VM."""
 
+import ast
 from dataclasses import asdict, dataclass, replace
 import atexit
 from contextlib import ExitStack, contextmanager
@@ -44,6 +45,23 @@ SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", 
 STAGE_MODES = ("stages:success", "stages:timeout", "stages:logging-error", "stages:at-cap",
                "stages:over-cap", "stages:blocked-header", "stages:guest-loss",
                "stages:flush-error", "stages:priority-timeout")
+HOST_DIAGNOSTICS = {
+    "os.pipe2": "pipe2", "os.close": "close", "StageTail": "StageTail",
+    "nonblocking_fd": "nonblocking_fd", "events.register": "register",
+    "self._open_log": "_open_log", "output.close": "close",
+    "sync_output": "sync_output", "os.read": "read", "tail.observe": "observe",
+    "output.write": "write", "receive_diagnostic": "receive_diagnostic", "drain": "drain",
+    "self._snapshot_diagnostics": "_snapshot_diagnostics",
+    "self._detach_diagnostic": "_detach_diagnostic", "pipe.close": "close",
+}
+ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "isolated:dropped",
+                   *(f"isolated:{step}:{error}" for step in ("pipe", "register", "read")
+                     for error in ("RuntimeError", "OSError", "MemoryError")),
+                   *(f"isolated:wrap-{step}:{error}" for step in
+                     ("close", "StageTail", "nonblocking_fd", "_open_log", "sync_output",
+                      "observe", "write", "receive_diagnostic", "drain",
+                      "_snapshot_diagnostics", "_detach_diagnostic")
+                     for error in ("RuntimeError", "OSError", "MemoryError")))
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
                  "resistant": -signal.SIGKILL, "cancel": 37}
 STARTUP_STATES = {
@@ -440,7 +458,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             def poll(self, *args):
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
-                        and mode not in (*SUCCESS_GUEST_MODES, *STAGE_MODES) and not sent):
+                        and mode not in (*SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES) and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
@@ -457,6 +475,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def fixture_return(job, verifier):
         # Only the production build's multi-GiB artifact set is substituted.
         if not pair or verifier:
+            if mode in ISOLATION_MODES:
+                assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
             return validate_return(job, verifier)
         job.cancellation.check()
         target = job.directory / "artifacts"
@@ -526,12 +546,59 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
-        if mode in {"stages:timeout", "stages:blocked-header"}:
+        if mode in {"stages:timeout", "stages:blocked-header", "isolated:dropped"}:
             capture = ImageJob.capture
             patches.enter_context(patch.object(ImageJob, "capture", lambda job, process, _: capture(job, process, 2)))
         if mode == "stages:logging-error":
             from image_stages import StageTail
             patches.enter_context(patch.object(StageTail, "observe", side_effect=OSError("fixture observer failure")))
+        if mode.count(":") == 2 and mode.startswith("isolated:"):
+            _, operation, kind = mode.split(":")
+            failure_type = {"RuntimeError": RuntimeError, "OSError": OSError, "MemoryError": MemoryError}[kind]
+            def diagnostic_failure():
+                if not (root / "diag-injected").exists():
+                    (root / "diag-injected").touch()
+                    raise failure_type("fixture console fault")
+            if operation == "pipe":
+                for name in ("pipe", "pipe2"):
+                    def fail_pipe(*args, original=getattr(os, name)):
+                        frame = sys._getframe(1)
+                        while frame is not None:
+                            if frame.f_code is ImageJob.__init__.__code__:
+                                diagnostic_failure()
+                                break
+                            frame = frame.f_back
+                        return original(*args)
+                    patches.enter_context(patch.object(os, name, fail_pipe))
+            if operation == "register":
+                register = selectors.EpollSelector.register
+                def fail_register(selector, file, events, data=None):
+                    if data == "console":
+                        diagnostic_failure()
+                    return register(selector, file, events, data)
+                patches.enter_context(patch.object(selectors.EpollSelector, "register", fail_register))
+            if operation == "read":
+                original_read = os.read
+                def fail_read(fd, length):
+                    console_fd = root / "console-inode"
+                    if console_fd.exists() and os.readlink(f"/proc/self/fd/{fd}") == console_fd.read_text():
+                        diagnostic_failure()
+                    return original_read(fd, length)
+                patches.enter_context(patch.object(os, "read", fail_read))
+            if operation.startswith("wrap-"):
+                boundary = image_lifecycle.optional
+                def fault_boundary(on_loss, action, *args, **kwargs):
+                    if action.__name__ == operation.removeprefix("wrap-"):
+                        original = action
+                        def action(*args, **kwargs):
+                            # Close through the real syscall before reporting a close error.
+                            if original.__name__ == "close":
+                                original(*args, **kwargs)
+                            diagnostic_failure()
+                            if original.__name__ != "close":
+                                return original(*args, **kwargs)
+                    return boundary(on_loss, action, *args, **kwargs)
+                patches.enter_context(patch.object(image_lifecycle, "optional", fault_boundary))
         patches.enter_context(patch.object(vm_startup, "verify_startup", fixture_verify))
         patches.enter_context(patch.object(
             vm_process, "TERM_GRACE_SECONDS", 0.2 if startup else vm_process.TERM_GRACE_SECONDS))
@@ -652,6 +719,7 @@ if mode != "slow":
     signal.signal(signal.SIGTERM, term)
 fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
+fds.update(int(arg.split("/dev/fdset/")[1]) for arg in sys.argv if "/dev/fdset/" in arg)
 (root / "owned-fds").write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
 (root / "pid").write_text(str(os.getpid()))
 with (root / "children").open("a") as logged:
@@ -674,8 +742,25 @@ if mode.startswith("pair:"):
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
-if mode in {STAGE_MODES!r}:
+if mode in {ISOLATION_MODES!r}:
+    serial = sys.argv[sys.argv.index("-serial") + 1]
+    if serial != "null":
+        console = int(serial.rsplit("/", 1)[1])
+        (root / "console-inode").write_text(os.readlink(f"/proc/self/fd/{{console}}"))
+        def serial_write(data):
+            try:
+                os.write(console, data)
+            except OSError:
+                pass
+        if mode != "isolated:baseline":
+            serial_write(b"STAGE 1 probe_start 0 1\\n")
+            serial_write(b"STAGE 2 stream_close_end 0 " + (b"3" if mode == "isolated:gap" else b"2") + b"\\n")
+    if mode != "isolated:dropped":
+        os.write(1, (root / "probe.frame").read_bytes())
+        sys.exit(0)
+if mode in {STAGE_MODES!r} or mode == "isolated:dropped":
     console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
+    os.set_blocking(console, True)
     if mode in ("stages:at-cap", "stages:over-cap"):
         os.write(1, (root / "probe.frame").read_bytes())
         for _ in range(128):
@@ -687,7 +772,7 @@ if mode in {STAGE_MODES!r}:
     os.write(console, b"Bearer FIXTURE_NOT_A_REAL_SECRET\\n" + b"x" * (70 * 1024) + b"\\n")
     os.write(console, b"STAGE 2 magic_writ")
     os.write(console, b"ten 25\\r\\n")
-    if mode == "stages:blocked-header":
+    if mode in ("stages:blocked-header", "isolated:dropped"):
         sys.path.insert(0, {str(ROOT / 'ci/kernel-runner')!r})
         from image_stages import StageLog
         from image_stream import Identity, MAGIC, encode
@@ -707,16 +792,17 @@ if mode in {STAGE_MODES!r}:
         import image_stages
         image_stages.CONSOLE = pathlib.Path(f"/proc/self/fd/{{console}}")
         image_stages.GUEST_LOG = root / "guest-stage.log"
-        # Use the real emitted records. Forward them to the serial pipe without
-        # opening a procfs symlink, which the guest logger deliberately refuses.
+        # Feed the real logger's serial records to the stand-in console.
         class ConsoleStages(StageLog):
-            def emit(self, stage, count=0):
-                super().emit(stage, count)
-                last = image_stages.GUEST_LOG.read_bytes().splitlines()[-1]
-                os.write(console, last + b"\\n")
+            def _write(self, path, line, *, guest_file=False):
+                if guest_file:
+                    return super()._write(path, line, guest_file=True)
+                if mode == "isolated:dropped" and b" member_header_begin " in line:
+                    raise BlockingIOError("fixture dropped marker")
+                return os.write(console, line) == len(line)
 
         encode(BlockedHeader(), [("verification.json", b"{{}}")],
-               Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64), ConsoleStages())
+               Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64), ConsoleStages().emit)
         sys.exit(3)
     if mode == "stages:guest-loss":
         os.write(console, b"STAGE 3 diagnostics_lost 0\\n")
@@ -937,6 +1023,29 @@ os.execvp(sys.argv[1], sys.argv[1:])
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
+        if mode in ISOLATION_MODES:
+            stalled = mode == "isolated:dropped"
+            assert (directory / "exit.json").is_file(), (mode, stderr.decode())
+            receipts = [json.loads((directory / name).read_text()) for name in ("exit.json", "teardown.json")]
+            assert receipts[0]["launcher_exit"] == launcher.returncode == int(stalled), stderr.decode()
+            for row in receipts:
+                assert row["last_observed_stage"] == row["last_stage"]
+                assert row["diagnostics_lost"] is (mode != "isolated:complete")
+                assert row["sequence_complete"] is (mode == "isolated:complete")
+                assert row["stream_bytes"] == (25 if stalled else (root / "probe.frame").stat().st_size)
+            if stalled:
+                assert receipts[0]["last_observed_stage"] == "member_prepare_end"
+                assert (root / "header-write-entered").exists()
+                assert not (root / "header-write-returned").exists()
+                assert b" member_header_begin " in (root / "guest-stage.log").read_bytes()
+                assert "member_header_begin" not in receipts[0]["console_stage_tail"]
+                assert (directory / "stream.partial").read_bytes() == b"CERALIVE_IMAGE_STREAM_V1\n"
+            else:
+                expected = json.dumps({"schema": 1, "identity": asdict(identity), "network_denied": True}).encode()
+                assert (directory / "artifacts/verification.json").read_bytes() == expected
+            if mode.count(":") == 2:
+                assert (root / "diag-injected").exists(), mode
+            return
         if mode in STAGE_MODES:
             stalled = mode in {"stages:timeout", "stages:blocked-header"}
             logging_error = mode == "stages:logging-error"
@@ -953,6 +1062,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 for row in (exit_row, teardown):
                     assert row["stream_bytes"] == (root / "probe.frame").stat().st_size
                     assert row["diagnostics_truncated"] is (mode == "stages:over-cap")
+                    assert row["diagnostics_lost"] and not row["sequence_complete"]
                 if mode == "stages:over-cap":
                     assert exit_row["last_stage"] == "stream_close_end"
                 return
@@ -1044,6 +1154,27 @@ os.execvp(sys.argv[1], sys.argv[1:])
 def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_timeout() -> None:
     for mode in STAGE_MODES:
         cancelled_fixture(mode)
+
+
+def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> None:
+    for mode in ISOLATION_MODES:
+        cancelled_fixture(mode)
+
+
+def test_diagnostic_boundary_keeps_capture_operations_in_the_fault_table() -> None:
+    tree = ast.parse(pathlib.Path(image_lifecycle.__file__).read_text())
+    calls = [call for call in ast.walk(tree) if isinstance(call, ast.Call)]
+    guarded = {ast.unparse(call.args[1]) for call in calls
+               if isinstance(call.func, ast.Name) and call.func.id == "optional"}
+    guarded.update(ast.unparse(call.args[2]) for call in calls
+                   if ast.unparse(call.func) == "self.outputs.callback" and len(call.args) > 2
+                   and ast.unparse(call.args[0]) == "optional")
+    assert guarded == set(HOST_DIAGNOSTICS)
+    indirect = {"receive_diagnostic", "drain", "_detach_diagnostic"}
+    assert not [call.lineno for call in calls
+                if ast.unparse(call.func) in {"StageTail", "tail.observe", "self._snapshot_diagnostics",
+                                            "nonblocking_fd", "os.pipe2"}
+                or (ast.unparse(call.func) in indirect and ast.unparse(call.func) != "receive_diagnostic")]
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:

@@ -93,7 +93,7 @@ There is no image matrix or `--all` path. `--image-mode probe` performs a small
 network-denial/artifact-return probe; an actual probe and attended cancellation
 check remain prerequisites for admitting expensive measurements.
 
-The probe emits `STAGE <monotonic-nanoseconds> <stage> <count>` to the guest
+The probe emits `STAGE <monotonic-nanoseconds> <stage> <count> <sequence>` to the guest
 serial console and to `/run/ceralive-image-stages.log` in the disposable guest.
 The guest log is capped at 16 KiB. Check and verdict counts are 1 for denial
 and 0 for an unexpected result or error. Import completion counts objects.
@@ -101,13 +101,18 @@ Stream markers identify member order and separate preparation, header writes,
 body writes, flush and close. Write completion counts are bytes reported by
 the guest writer.
 
-Probe `teardown.json` and `exit.json` include `last_stage`, `stream_bytes`
+Probe `teardown.json` and `exit.json` include `last_observed_stage` (also
+recorded as `last_stage`), `stream_bytes`
 received by the host, and `console_stage_tail`, up to 64 KiB of complete
 allowlisted stage lines. The receipt omits other console text. Raw probe logs
 share an 8 MiB cap. The launcher keeps draining and checking stage lines after
 that cap and records `diagnostics_truncated` if raw output was dropped.
-`diagnostics_lost` reports sink or capture errors, including loss reported by
-the guest, or missing stages on an otherwise successful return. An image guest
+The diagnostic path is optional and isolated from artifact validation and the
+committed launcher exit. A diagnostic exception records loss and drops the
+affected operation. `sequence_complete` is true only when capture has a
+gap-free numbered sequence from probe start to stream close with no reported
+loss or truncation. Otherwise `diagnostics_lost` is true, including for stalls
+where the last dropped marker could not be reported by the guest. An image guest
 deadline error names the last observed stage. A host helper timeout still
 names the helper. TERM from a supervisor produces a cancellation receipt with
 the same diagnostic fields. Diagnostics do not determine probe acceptance.

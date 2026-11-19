@@ -54,11 +54,16 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
     try:
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
+        serial = "stdio"
+        if image_job:
+            console = image_job.console_write
+            serial = ("null" if console < 0 else f"file:/dev/fdset/{console}" if image_job.probe
+                      else f"file:/proc/self/fd/{console}")
         args = [
             "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
             "-smp", "4" if image_job or image_base else "16",
             "-m", "20480" if image_job or image_base else "16384", "-display", "none", "-monitor", "none",
-            "-serial", f"file:/proc/self/fd/{image_job.console_write}" if image_job else "stdio",
+            "-serial", serial,
             "-no-reboot",
             "-drive", f"file={disk},format=qcow2,if=none,id=system",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
@@ -67,6 +72,10 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if image_job:
             from image_vm import image_arguments
             args += image_arguments(image_job)
+            if image_job.probe and console >= 0:
+                # Duplicate the inherited nonblocking writer without reopening a
+                # FIFO that might no longer have a reader.
+                args += ["-add-fd", f"fd={console},set={console}"]
         else:
             args += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0"]
         if seed:
@@ -77,7 +86,9 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         # The gh credential stays in the host's gh process; QEMU gets no host env secrets.
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
         if image_job:
-            descriptors += (image_job.capsule_fd, image_job.console_write)
+            descriptors += (image_job.capsule_fd,)
+            if console >= 0:
+                descriptors += (console,)
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         check_spawn_signals(cancellation)

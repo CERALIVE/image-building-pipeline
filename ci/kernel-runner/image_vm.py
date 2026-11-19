@@ -157,9 +157,9 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
     create_directory(directory)
-    with ImageJob(directory, identity, request["capsule"], cancellation) as job:
+    with ImageJob(directory, identity, request["capsule"], cancellation,
+                  probe=request["payload"]["operation"] == "probe") as job:
         jobs.append(job)
-        job.probe = request["payload"]["operation"] == "probe"
         job.state.update(base_sha256=request["base_sha256"], base=str(base),
                          public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
                          overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
@@ -178,8 +178,6 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
         cancellation.check()
         disk_headroom(((directory, 16 * GIB),))
         validate_return(job, request["payload"]["operation"] != "measure")
-        if job.probe and job.state["last_stage"] != "stream_close_end":
-            job.state["diagnostics_lost"] = True
         job.state["stop_reason"] = "guest exited; transport validated"
     return directory / "artifacts"
 

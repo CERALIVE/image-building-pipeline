@@ -57,6 +57,8 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
     for logging_available, route_present, fault in (
         (True, False, None), (False, False, None), (False, True, None),
         (True, False, "fstat"), (True, False, "write"), (True, False, "close"),
+        (True, False, "init:RuntimeError"), (True, False, "init:OSError"),
+        (True, False, "init:MemoryError"),
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -89,7 +91,11 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                 from image_stages import StageLog
                 with (patch("image_stages.CONSOLE", console), patch("image_stages.GUEST_LOG", stage_log)):
                     with ExitStack() as faults:
-                        if fault:
+                        if fault and fault.startswith("init:"):
+                            error = {"RuntimeError": RuntimeError, "OSError": OSError,
+                                     "MemoryError": MemoryError}[fault.split(":")[1]]
+                            failed_init = faults.enter_context(patch.object(image_guest, "StageLog", side_effect=error))
+                        elif fault:
                             operation = getattr(os, fault)
                             injected = False
 
@@ -109,7 +115,9 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                             assert route_present
                         else:
                             assert not route_present
-                        if fault:
+                        if fault and fault.startswith("init:"):
+                            failed_init.assert_called_once()
+                        elif fault:
                             assert injected
                     if logging_available and not fault:
                         # Exercise the real bounded sink past its normal probe workload.
@@ -128,12 +136,12 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                     baseline = wire.read_bytes()
                 else:
                     assert wire.read_bytes() == baseline
-            if fault:
+            if fault and not fault.startswith("init:"):
                 assert any(line.split()[2:3] == ["diagnostics_lost"]
                            for line in console.read_text().splitlines())
             if logging_available and not fault:
                 lines = console.read_text().splitlines()
-                records = [line.split() for line in lines]
+                records = [line.split()[:4] for line in lines]
                 assert [event for _, _, event, _ in records] == [
                     "probe_start", "capsule_import_begin", "capsule_import_end",
                     "source_checkout_begin", "source_checkout_end", "route_check_begin", "route_check_end",

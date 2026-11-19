@@ -10,8 +10,6 @@ from pathlib import Path
 import re
 from typing import BinaryIO, Callable, Final, Iterable, TypeAlias
 
-from image_stages import StageLog
-
 JSONValue: TypeAlias = str | bool | int | float | None | list["JSONValue"] | dict[str, "JSONValue"]
 
 LIMIT: Final = 16 * 1024**3
@@ -163,11 +161,11 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
 
 
 def encode(destination: BinaryIO, records: Iterable[tuple[str, bytes | Path]],
-           identity: Identity, stages: StageLog | None = None) -> None:
+           identity: Identity, stages: Callable[[str, int], None] | None = None) -> None:
     """Guest producer; the host independently recomputes every record hash."""
     def mark(stage: str, count: int = 0) -> None:
         if stages is not None:
-            stages.emit(stage, count)
+            stages(stage, count)
 
     def write_member(member: Member, value: bytes | Path) -> None:
         header = json.dumps(asdict(member), separators=(",", ":")).encode() + b"\n"
