@@ -3,7 +3,7 @@
 
 from dataclasses import asdict, dataclass, replace
 import atexit
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import dis
 import errno
 import fcntl
@@ -29,6 +29,8 @@ sys.path.insert(0, str(ROOT / "ci/kernel-runner"))
 import image_lifecycle
 import image_resources
 import image_vm
+import vm_process
+import vm_startup
 from image_lifecycle import ImageJob, reconcile
 from image_stream import Identity, StreamError, encode
 import vm
@@ -39,6 +41,47 @@ IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
 SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error",
                        "raising-handler", "late-exit", "unreadable-exit", "shutdown-gap")
+STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
+                 "resistant": -signal.SIGKILL, "cancel": 37}
+STARTUP_STATES = {
+    "flock": "",
+    **{f"blocked-{sig.name}": f"signal.pthread_sigmask(signal.SIG_BLOCK, {{{sig.value}}})"
+       for sig in (*vm.STOP_SIGNALS, signal.SIGCHLD, signal.SIGALRM, signal.SIGPIPE,
+                   signal.SIGVTALRM, signal.SIGPROF, signal.SIGQUIT, signal.SIGUSR1,
+                   signal.SIGUSR2, signal.SIGXFSZ)},
+    **{f"ignored-{sig.name}": f"signal.signal({sig.value}, signal.SIG_IGN)"
+       for sig in (*vm.STOP_SIGNALS, signal.SIGCHLD, signal.SIGALRM, signal.SIGPIPE,
+                   signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGVTALRM,
+                   signal.SIGPROF, signal.SIGXFSZ)},
+    "alarm": "signal.alarm(1)",
+    "itimer-real": "signal.setitimer(signal.ITIMER_REAL, 0.8, 0.1)",
+    "itimer-virtual": "signal.setitimer(signal.ITIMER_VIRTUAL, 0.8, 0.1)",
+    "itimer-prof": "signal.setitimer(signal.ITIMER_PROF, 0.8, 0.1)",
+    "pending-alarm": "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
+                     "os.kill(os.getpid(), signal.SIGALRM)",
+    **{f"closed-{fds}": f"for fd in {tuple(map(int, fds))!r}: os.close(fd)"
+       for fds in ("0", "1", "2", "01", "02", "12", "012")},
+    "extra-fds": """
+extra = os.open(root / "extra", os.O_WRONLY | os.O_CREAT, 0o600)
+reader, writer = os.pipe()
+os.write(writer, b"unexpected inherited input")
+os.dup2(reader, 73, inheritable=True)
+os.dup2(extra, 74, inheritable=True)
+(root / "pipe-id").write_text(os.readlink("/proc/self/fd/73"))
+""",
+    "cwd-umask-locale": 'os.chdir(root); os.umask(0o777); os.environ["LANG"] = "invalid"; '
+                        'os.environ["LC_ALL"] = "invalid"',
+    "no-altstack": "stack = (ctypes.c_void_p * 3)(None, 2, 0); "
+                   "assert ctypes.CDLL(None).sigaltstack(ctypes.byref(stack), None) == 0",
+}
+STARTUP_CHECK_CASES = {
+    "standard descriptors": "closed-01",
+    "no inherited extra descriptors": "extra-fds",
+    "disarmed timers": "itimer-real",
+    "signal dispositions": "ignored-SIGCHLD",
+    "empty signal mask": "blocked-SIGTERM",
+    "private umask": "cwd-umask-locale",
+}
 
 
 @contextmanager
@@ -73,6 +116,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     pair = mode.startswith("pair:")
     inherited = mode == "inherited"
+    startup = mode.removeprefix("startup:") if mode.startswith("startup:") else None
+    rejected = mode.removeprefix("startup-reject:") if mode.startswith("startup-reject:") else None
     critical_target = mode.removeprefix("pair:critical:") if mode.startswith("pair:critical:") else None
     mask_mutation = mode == "pair:mask-mutation"
     trace_terminal = critical_target is not None or mask_mutation
@@ -92,6 +137,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     fail_sync = False
     if inherited:
         (root / "status-launcher").write_text(pathlib.Path("/proc/self/status").read_text())
+
+    verify_startup = vm_startup.verify_startup
+
+    def fixture_verify(checks):
+        verify_startup(checks)
+        if startup or rejected:
+            (root / "startup-baseline").write_text(json.dumps(checks))
+        if rejected:
+            verify_startup(checks | {rejected: False})
 
     def raising_handler(_signum, _frame):
         (root / "handler-ran").touch()
@@ -248,7 +302,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             (root / "restore-attempt").touch()
             raise OSError(errno.EPERM, "fixture final mask restoration")
         previous = sigmask(how, signals)
-        if how == signal.SIG_BLOCK and signals == CATCHABLE_SIGNALS:
+        if (how == signal.SIG_BLOCK and signals == CATCHABLE_SIGNALS
+                and sys._getframe(1).f_code.co_name != "sanitize_startup"):
             assert not terminal_entered, "terminal mask was installed twice"
             terminal_entered = True
         return previous
@@ -375,12 +430,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
             def poll(self, *args):
                 if (not fault and not audit_receipts and not pair
+                        and startup not in {"success", "failure", "signal"}
                         and mode not in SUCCESS_GUEST_MODES and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
                         assert time.monotonic() < until, "fake QEMU never reached startup"
                         time.sleep(0.01)
                     cancel()
+                    if startup and (root / "startup-ready").exists():
+                        return []  # The startup matrix targets entry state, not the existing 1s poll bound.
                 return epoll.poll(*args)
 
         return Poll()
@@ -451,30 +509,37 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     if trace_terminal:
         sys.addaudithook(audit_terminal_spawns)
         sys.setprofile(terminal_profile)
-    with patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)), \
-            patch.object(image_lifecycle, "RECEIPT_STEPS", table), \
-            patch.object(image_lifecycle, "receipt", writer), \
-            patch.object(image_vm, "receipt", writer), \
-            patch.object(image_vm, "run_image", image_entry), \
+    with ExitStack() as patches:
+        patches.enter_context(patch.object(vm_startup, "verify_startup", fixture_verify))
+        patches.enter_context(patch.object(
+            vm_process, "TERM_GRACE_SECONDS", 0.2 if startup else vm_process.TERM_GRACE_SECONDS))
+        patches.enter_context(patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)))
+        for patcher in (
+            patch.object(image_lifecycle, "RECEIPT_STEPS", table),
+            patch.object(image_lifecycle, "receipt", writer),
+            patch.object(image_vm, "receipt", writer),
+            patch.object(image_vm, "run_image", image_entry),
             patch.object(os, "_exit", terminal_exit if trace_terminal
-                         else audited_exit if audit_receipts else real_exit), \
-            patch.object(os, "replace", publish), \
-            patch.object(signal, "pthread_sigmask", mask), \
-            patch.object(os, "fsync", sync), \
-            patch.object(pathlib.Path, "unlink", remove), \
-            patch.object(tempfile, "TemporaryFile", overlay), \
-            patch.object(pathlib.Path, "read_text", read_result), \
-            patch.object(pathlib.Path, "read_bytes", fixture_read_bytes), \
-            patch.object(image_vm, "validate_return", fixture_return), \
+                         else audited_exit if audit_receipts else real_exit),
+            patch.object(os, "replace", publish),
+            patch.object(signal, "pthread_sigmask", mask),
+            patch.object(os, "fsync", sync),
+            patch.object(pathlib.Path, "unlink", remove),
+            patch.object(tempfile, "TemporaryFile", overlay),
+            patch.object(pathlib.Path, "read_text", read_result),
+            patch.object(pathlib.Path, "read_bytes", fixture_read_bytes),
+            patch.object(image_vm, "validate_return", fixture_return),
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
-                           disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None), \
-            patch.object(image_vm, "load_policy", return_value=FixturePolicy()), \
-            patch.object(image_lifecycle, "disk_headroom"), \
+                           disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
+            patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
+            patch.object(image_lifecycle, "disk_headroom"),
             patch.object(image_lifecycle, "process_priority",
                          side_effect=image_resources.process_priority if inherited else None,
-                         return_value=FIXTURE_PRIORITY), \
-            patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]), \
-            patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]):
+                         return_value=FIXTURE_PRIORITY),
+            patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
+            patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
+        ):
+            patches.enter_context(patcher)
         runpy.run_path(sys.argv[0], run_name="__main__")
 
 
@@ -485,7 +550,8 @@ class FixturePolicy:
 
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
                       blocked: tuple[signal.Signals, ...] = (),
-                      ignored: tuple[signal.Signals, ...] = ()) -> None:
+                      ignored: tuple[signal.Signals, ...] = (),
+                      entry_setup: str | None = None) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
         capsule = root / "capsule"
@@ -530,11 +596,33 @@ import json, os, pathlib, signal, sys, time
 root = pathlib.Path({tmp!r})
 mode = {mode!r}
 (root / "status-qemu").write_text(pathlib.Path(f"/proc/{{os.getpid()}}/status").read_text())
+if mode.startswith("startup:"):
+    arg = next(arg for arg in sys.argv if ",id=image-input," in arg)
+    capsule = pathlib.Path(arg.split(",")[0].split("=")[1])
+    expected = (root / "capsule").stat()
+    attached = capsule.stat()
+    unexpected = []
+    for fd in pathlib.Path("/proc/self/fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except FileNotFoundError:
+            continue
+        if "/extra" in target or target == (root / "pipe-id").read_text():
+            unexpected.append(target)
+    (root / "child-baseline").write_text(json.dumps({{
+        "capsule": capsule.name not in ("0", "1", "2") and
+                   (attached.st_dev, attached.st_ino) == (expected.st_dev, expected.st_ino),
+        "extra_fds": unexpected, "lang": os.environ["LANG"], "cwd": os.getcwd(),
+        "umask": os.umask(0o077),
+    }}))
 def term(_signum, _frame):
     (root / "term").touch()
     if mode == "repeat":
         os.kill(os.getppid(), signal.SIGTERM)
-    if mode != "ignore":
+    if mode.startswith("startup:"):
+        if mode == "startup:cancel":
+            sys.exit(37)
+    elif mode != "ignore":
         sys.exit(0)
 if mode != "slow":
     signal.signal(signal.SIGTERM, term)
@@ -545,6 +633,13 @@ fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
 with (root / "children").open("a") as logged:
     print(os.getpid(), file=logged)
 (root / "ready").touch()
+if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
+    (root / "startup-ready").touch()
+if mode in ("startup:success", "startup:failure", "startup:signal"):
+    os.write(1, (root / "probe.frame").read_bytes())
+    if mode == "startup:signal":
+        os.kill(os.getpid(), signal.SIGUSR1)
+    sys.exit(37 if mode == "startup:failure" else 0)
 if mode.startswith("pair:"):
     payload = json.loads(pathlib.Path(sys.argv[sys.argv.index("-fw_cfg") + 1].split("file=")[1]).read_text())
     if payload["operation"] == "verify":
@@ -578,6 +673,15 @@ print("best-effort: prio 7")
         # participating in workstation admission or touching the real host lock.
         command = ["flock", "--exclusive", "--close", str(root / "fixture.lock"), sys.executable,
                    __file__, "--fixture-launcher", str(root), mode, str(signum.value)]
+        if entry_setup is not None:
+            setup = f"""
+import ctypes, os, pathlib, signal, sys
+root = pathlib.Path(sys.argv[1])
+(root / "pipe-id").write_text("")
+{entry_setup}
+os.execv(sys.executable, [sys.executable, *sys.argv[2:]])
+"""
+            command = [*command[:5], "-c", setup, str(root), str(pathlib.Path(__file__).resolve()), *command[6:]]
         if blocked or ignored:
             # exec keeps flock as the launcher's direct parent and passes on
             # the calling process's mask and ignored dispositions.
@@ -623,6 +727,43 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode.startswith("startup-reject:"):
+            baseline = mode.removeprefix("startup-reject:")
+            assert launcher.returncode == vm_startup.STARTUP_ERROR, stderr.decode()
+            assert f"startup baseline failed: could not establish {baseline}".encode() in stderr, (baseline, stderr)
+            assert not list(root.glob("status-*")) and not (root / "returns").exists()
+            assert not list(root.glob("job-*"))
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        if entry_setup is not None:
+            marker = json.loads((directory / "exit.json").read_text()) if (directory / "exit.json").exists() else None
+            outcome = mode.split(":")[1]
+            assert marker is not None and launcher.returncode == marker["launcher_exit"] == int(outcome != "success"), (
+                entry_setup, outcome, launcher.returncode, stderr.decode(), marker)
+            assert marker["qemu_exit"] == STARTUP_EXITS[outcome], (entry_setup, outcome, marker)
+            assert marker["qemu_reaped"] and marker["input_descriptor_closed"] and marker["overlay_descriptor_closed"]
+            assert not (root / "returns/active.json").exists()
+            child = json.loads((root / "child-baseline").read_text())
+            assert child["capsule"], (entry_setup, child)
+            assert child["extra_fds"] == [], (entry_setup, child)
+            mask, ignored_bits, caught = signal_status(root / "status-qemu")
+            # Python ignores SIGPIPE/SIGXFSZ and installs its SIGINT handler at startup.
+            assert mask == 0 and ignored_bits == sum(1 << (sig - 1) for sig in (signal.SIGPIPE, signal.SIGXFSZ))
+            assert caught == 1 << (signal.SIGINT - 1)
+            assert child["lang"] == "C.UTF-8"
+            assert child["cwd"] == "/" and child["umask"] == 0o077, (entry_setup, child)
+            checks = json.loads((root / "startup-baseline").read_text())
+            assert set(checks) == set(STARTUP_CHECK_CASES) and all(checks.values()), checks
+            assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+            assert not list(root.glob("job-*"))
+            assert json.loads((root / "leaks").read_text()) == []
+            if outcome in {"resistant", "cancel"}:
+                assert marker["stop_reason"] == "cancelled"
+                assert (root / "sent").exists() and (root / "term").exists()
+            with (root / "fixture.lock").open("rb") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
         if mode == "unreadable-exit":
             assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
             assert launcher.returncode == 1 and b"fixture final receipt readback" in stderr
@@ -790,6 +931,50 @@ def test_inherited_blocked_and_ignored_signals_do_not_reach_children() -> None:
                     vm.STOP_SIGNALS, (signal.SIGUSR1,)):
         cancelled_fixture("inherited", blocked=blocked)
     cancelled_fixture("inherited", ignored=(signal.SIGTERM,))
+
+
+def test_hostile_startup_does_not_change_guest_outcome() -> None:
+    assert set(STARTUP_CHECK_CASES.values()) <= STARTUP_STATES.keys()
+    for sig in (*vm.STOP_SIGNALS, *vm_startup.DEFAULT_SIGNALS, *vm_startup.PYTHON_IGNORES):
+        assert f"blocked-{sig.name}" in STARTUP_STATES and f"ignored-{sig.name}" in STARTUP_STATES
+    assert set(vm_startup.TIMERS) == {signal.ITIMER_REAL, signal.ITIMER_VIRTUAL, signal.ITIMER_PROF}
+    for setup in STARTUP_STATES.values():
+        for outcome in STARTUP_EXITS:
+            cancelled_fixture(f"startup:{outcome}", entry_setup=setup)
+
+
+def test_startup_verification_failure_refuses_before_spawning() -> None:
+    for baseline, state in STARTUP_CHECK_CASES.items():
+        cancelled_fixture(f"startup-reject:{baseline}", entry_setup=STARTUP_STATES[state])
+
+
+def test_echild_cannot_be_reported_as_guest_or_helper_success() -> None:
+    popen = subprocess.Popen
+
+    def fake_qemu(_args, **kwargs):
+        return popen([sys.executable, "-c", 'print("CERALIVE_JOB_DONE=0"); raise SystemExit(37)'], **kwargs)
+
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        def boot_fake():
+            with patch.object(subprocess, "Popen", fake_qemu):
+                vm.boot(pathlib.Path("/unused"), b"", "check", 2)
+
+        for operation in (
+            lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
+                        cancellation=Cancellation(), capture_output=True),
+            lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
+                        cancellation=Cancellation()),
+            boot_fake,
+        ):
+            try:
+                operation()
+            except vm_process.ChildStatusError as error:
+                assert "exit status unavailable for owned child PID" in str(error)
+            else:
+                raise AssertionError("ECHILD turned a known failure into success")
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
 
 
 def test_no_qemu_or_helper_spawn_under_terminal_mask() -> None:
@@ -1425,7 +1610,21 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--fixture-launcher"]:
         fixture_launcher(pathlib.Path(sys.argv[2]), sys.argv[3], signal.Signals(int(sys.argv[4])))
         raise AssertionError("launcher did not exit")
+    startup_tests = (
+        test_hostile_startup_does_not_change_guest_outcome,
+        test_startup_verification_failure_refuses_before_spawning,
+        test_echild_cannot_be_reported_as_guest_or_helper_success,
+    )
     tests = [test for name, test in list(globals().items()) if name.startswith("test_")]
+    match sys.argv[1:]:
+        case []:
+            pass
+        case ["--startup"]:
+            tests = list(startup_tests)
+        case ["--lifecycle"]:
+            tests = [test for test in tests if test not in startup_tests]
+        case _:
+            raise SystemExit("usage: image_profile_test.py [--startup | --lifecycle]")
     for test in tests:
         test()
         print(f"PASS {test.__name__}")

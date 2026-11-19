@@ -578,12 +578,23 @@ declare strace as a test tool.
 
 ### Teardown and publication
 
-At startup, the launcher installs its TERM, INT and HUP handlers, then
-clears the inherited signal mask. It logs a cleared mask or replaced ignored
-stop handlers. A stop already pending at startup is handled as cancellation.
-Before fork, the launcher requires a clean mask and no ignored stop signals.
-Exec resets caught stop handlers to default in QEMU and its helpers. The
-launcher refuses to spawn children after terminal finalization begins.
+The launcher sanitizes its process state before admission. It blocks signals
+while disarming real, virtual and profiling timers and consuming pending
+timer signals. It installs TERM, INT and HUP handlers, restores default
+dispositions for child reaping and the other tracked signals, then clears
+the inherited mask. A stop already pending is handled as cancellation.
+It reserves standard descriptors, filling any missing stream with
+`/dev/null`, closes all other inherited descriptors, and sets umask `077`.
+If verification of this baseline fails, it reports a startup error and
+exits 78 before starting a helper or guest.
+
+Relative arguments are resolved from the caller's directory. QEMU and its
+helpers use `/` as their working directory, an absolute tool search path,
+and `LANG=C.UTF-8`. The separate host-only registration command retains its
+GitHub configuration and uses the same fixed locale. At exec, QEMU and its
+helpers have default dispositions for the tracked signals. The launcher
+reaps only the owned PID with `waitpid` and rejects an unavailable exit
+status. Child creation is forbidden after terminal finalization begins.
 
 Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
 idle I/O loop checks for cancellation at least once per second. The launcher

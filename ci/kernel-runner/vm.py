@@ -20,7 +20,11 @@ import time
 
 import yaml
 from image_lifecycle import job_disk, report_error
-from vm_process import STOP_SIGNALS, Cancellation, check_spawn_signals, read_check_script, run, terminate, wait
+from vm_process import (
+    CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
+    child_pipes, read_check_script, run, terminate, wait,
+)
+from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
 HERE = Path(__file__).resolve().parent
 IMAGE_URL = "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img"
@@ -71,17 +75,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
             args += ["-drive", f"file={source_bundle.resolve()},format=raw,if=none,id=source,readonly=on",
                      "-device", "virtio-blk-pci,drive=source,serial=ceralive-source"]
         # The gh credential stays in the host's gh process; QEMU gets no host env secrets.
-        env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
         if image_job:
             descriptors += (image_job.capsule_fd, image_job.console_write)
+        if any(private_fd < 3 for private_fd in descriptors):
+            raise RuntimeError("guest descriptor aliases a standard stream")
         check_spawn_signals(cancellation)
-        with subprocess.Popen(args, pass_fds=descriptors, env=env,
+        process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
                                    preexec_fn=partial(die_with_parent, os.getpid()),
                                    stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE if image_job else subprocess.STDOUT,
-                                   restore_signals=True) as process:
+                                   restore_signals=True)
+        with child_pipes(process):
             lines: list[bytes] = []
 
             def console() -> None:
@@ -121,6 +127,14 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
 
 
 def main(cancellation: Cancellation) -> int:
+    try:
+        changes = sanitize_startup(cancellation)
+    except (OSError, ValueError, KeyError, RuntimeError, StartupError) as error:
+        report_error(f"startup baseline failed: {error}")
+        return STARTUP_ERROR
+    for change in changes:
+        report_error(change)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("build-base", "run", "check", "image"))
     parser.add_argument("--base", required=True, type=Path)
@@ -250,7 +264,8 @@ def main(cancellation: Cancellation) -> int:
                 "-f", f"name=kernel-release-{os.getpid()}", "-F", f"runner_group_id={args.group_id}",
                 "-f", "labels[]=self-hosted", "-f", "labels[]=Linux", "-f", "labels[]=X64",
                 "-f", "labels[]=ceralive-kernel-vm", "-f", "work_folder=_work",
-            ], cancellation=cancellation, capture_output=True, timeout=180, preexec_fn=child_setup)
+            ], cancellation=cancellation, capture_output=True, timeout=180,
+                registration=True, preexec_fn=child_setup)
             payload = json.loads(response.stdout)["encoded_jit_config"].encode()
             if not payload or b"\n" in payload:
                 raise RuntimeError("invalid JIT response")
@@ -268,15 +283,6 @@ def exit_launcher() -> None:
     cancellation = Cancellation()
     status = 1
     try:
-        ignored = [sig.name for sig in STOP_SIGNALS if signal.getsignal(sig) == signal.SIG_IGN]
-        for signum in STOP_SIGNALS:
-            signal.signal(signum, cancellation.request)
-        # Install handlers first so a pending stop is handled as cancellation.
-        inherited_mask = signal.pthread_sigmask(signal.SIG_SETMASK, set())
-        if inherited_mask:
-            report_error(f"cleared inherited signal mask: {sorted(map(int, inherited_mask))}")
-        if ignored:
-            report_error(f"replaced inherited ignored stop signals: {', '.join(ignored)}")
         status = main(cancellation)
     except SystemExit as exc:
         if type(exc.code) is int and 0 < exc.code <= 255:

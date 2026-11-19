@@ -56,9 +56,8 @@ def validate_base(base: Path, expected_sha256: str,
     if (base.is_symlink() or not base.is_file() or base.stat().st_mode & 0o222
             or digest_file(base, cancellation.check) != expected_sha256):
         raise AdmissionError("image base must be independently verified and read-only")
-    info = run(["qemu-img", "info", "--output=json", str(base)],
+    info = run(["qemu-img", "info", "--output=json", str(base.absolute())],
                cancellation=cancellation, capture_output=True, timeout=30,
-               env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"},
                preexec_fn=partial(die_with_parent, os.getpid()))
     row = json.loads(info.stdout)
     specific = row.get("format-specific", {}).get("data", {})

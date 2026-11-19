@@ -18,7 +18,7 @@ import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
-from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, run, wait
+from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
 
 
 class ReceiptError(OSError):
@@ -293,16 +293,16 @@ class ImageJob:
                 self.outputs.callback(sync_output, output)
                 files[name] = output
             try:
-                while events.get_map() or process.poll() is None:
+                while events.get_map() or poll_owned(process) is None:
                     self.cancellation.check()
                     now = time.monotonic()
                     if now >= end:
                         raise subprocess.TimeoutExpired("image guest", seconds)
-                    if now >= next_priority_check and process.poll() is None:
+                    if now >= next_priority_check and poll_owned(process) is None:
                         try:
                             self.state["qemu_priority"] = process_priority(process.pid, self.cancellation)
                         except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
-                            if process.poll() is None:
+                            if poll_owned(process) is None:
                                 raise
                         next_priority_check = now + 5
                     try:
