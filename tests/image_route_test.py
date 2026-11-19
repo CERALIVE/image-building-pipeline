@@ -632,14 +632,102 @@ def test_partial_mirror_marker_cannot_outlive_readiness_deadline() -> None:
                 mirror.wait(timeout=2)
 
 
+def test_control_reads_retry_zero_progress_at_ready_ack_and_eof() -> None:
+    from itertools import product
+
+    child = """
+import sys
+print('CERALIVE_SEALED_MIRROR_READY', flush=True)
+assert sys.stdin.buffer.read(1) == b'S'
+print('CERALIVE_SEALED_MIRROR_STOPPED', flush=True)
+"""
+    read = os.read
+    ready = b"CERALIVE_SEALED_MIRROR_READY\n"
+    ack = b"CERALIVE_SEALED_MIRROR_STOPPED\n"
+    for error, position in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM,
+                                    errno.ENOSYS, errno.EACCES, errno.EBUSY), (0, len(ready), len(ready + ack))):
+        with subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE) as mirror:
+            fd = mirror.stdout.fileno()
+            received = bytearray()
+            injected = False
+
+            def fault(number, size):
+                nonlocal injected
+                if number != fd:
+                    return read(number, size)
+                if not injected and len(received) == position:
+                    injected = True
+                    raise OSError(error, "fixture control read")
+                result = read(number, min(size, 7))
+                received.extend(result)
+                return result
+
+            with patch.object(image_guest.os, "read", fault), image_guest.ready_mirror(mirror):
+                pass
+            assert injected and received == ready + ack and mirror.returncode == 0, (error, position)
+
+
+def test_full_mirror_control_pipe_respects_shutdown_deadline() -> None:
+    child = "import signal; print('CERALIVE_SEALED_MIRROR_READY', flush=True); signal.pause()"
+    with subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE) as mirror:
+        def watchdog(*_args):
+            raise AssertionError("shutdown request exceeded the outer watchdog")
+
+        previous = signal.signal(signal.SIGALRM, watchdog)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 2)
+            with patch.object(image_guest, "MIRROR_STOP_SECONDS", 0.15):
+                try:
+                    with image_guest.ready_mirror(mirror):
+                        fd = mirror.stdin.fileno()
+                        os.set_blocking(fd, False)
+                        try:
+                            while os.write(fd, b"x" * 4096):
+                                pass
+                        except BlockingIOError:
+                            pass
+                        os.set_blocking(fd, True)
+                except StreamError:
+                    pass
+                else:
+                    raise AssertionError("full control pipe accepted")
+            assert mirror.returncode is not None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+
+
 def test_managed_mirror_can_acknowledge_only_after_its_last_request() -> None:
     server = pathlib.Path(__file__).resolve().parents[1] / "lib/sealed-inputs.py"
     program = """
-import os, runpy, signal, sys
+import io, hashlib, os, runpy, signal, sys
 from pathlib import Path
 serve = runpy.run_path(sys.argv[1])['serve']
 request, close = int(sys.argv[2]), int(sys.argv[3])
 mode = sys.argv[4]
+work = Path(sys.argv[5])
+fault = sys.argv[6:9]
+points = []
+hit = mode in ('hit', 'short-object', 'short-send')
+data = b'sealed fixture bytes'
+digest = hashlib.sha256(data).hexdigest()
+url = 'https://fixture.invalid/sealed'
+if hit:
+    (work / digest).write_bytes(data)
+
+def trace(frame, event, _value):
+    if frame.f_code.co_name != 'do_GET' or frame.f_code.co_filename != sys.argv[1]:
+        return None
+    if event in ('line', 'return'):
+        point = [str(frame.f_lineno), event]
+        points.append(':'.join(point))
+        if fault[:2] == point:
+            sys.settrace(None)
+            raise {'MemoryError': MemoryError, 'OSError': OSError, 'BaseException': BaseException}[fault[2]]()
+    return trace
+
 class Listener:
     def __init__(self, _address, handler): self.handler = handler
     def __enter__(self): return self
@@ -650,23 +738,56 @@ class Listener:
         if mode == 'foreign':
             signal.raise_signal(signal.SIGTERM)
         handler = self.handler.__new__(self.handler)
-        handler.path = 'https://fixture.invalid/missing'
+        handler.path = url if hit else 'https://fixture.invalid/missing'
         handler.send_error = lambda _: None
+        handler.send_response = lambda _: None
+        handler.send_header = lambda *_: None
+        handler.end_headers = lambda: None
+        handler.wfile = io.BytesIO()
+        if mode == 'short-object':
+            handler.end_headers = lambda: (work / digest).write_bytes(data[:-1])
+        if mode == 'short-send':
+            write = handler.wfile.write
+            handler.wfile.write = lambda body: write(body[:-1])
         if mode == 'marker-error':
             def fail(*_args): raise OSError('fixture missing-object marker')
             Path.write_text = fail
-        handler.do_GET()
-serve.__globals__.update(HTTPServer=Listener, inventory=lambda _: {'objects': []},
+        if mode == 'unclassified':
+            def classify(_): raise MemoryError('fixture lookup allocation')
+            serve.__globals__['canonical_url'] = classify
+        try:
+            if mode in ('hit', 'miss'):
+                sys.settrace(trace)
+            handler.do_GET()
+        except Exception:
+            if not fault and mode not in ('unclassified', 'short-object', 'short-send'):
+                raise
+            # socketserver normally catches handler exceptions before continuing.
+            self.handle_error(None, None)
+        finally:
+            sys.settrace(None)
+            if mode in ('hit', 'miss'):
+                (work / 'placements').write_text('\\n'.join(points))
+        if mode == 'hit' and not fault:
+            assert handler.wfile.getvalue() == data
+        if mode in ('short-object', 'short-send'):
+            assert handler.wfile.getvalue() == data[:-1]
+    def handle_error(self, *_args): pass
+objects = [{'urls': [url], 'sha256': digest}] if hit else []
+serve.__globals__.update(HTTPServer=Listener, inventory=lambda _: {'objects': objects},
                          mirror_validities=lambda _: [])
-serve(Path(sys.argv[5]), managed=True)
+serve(work, managed=True)
 """
     with tempfile.TemporaryDirectory() as tmp:
         marker = pathlib.Path(tmp) / "missing-object"
-        for mode in ("healthy", "miss", "marker-error", "foreign"):
+        placements = marker.with_name("placements")
+
+        def replay(mode, expected, fault=()):
+            placements.unlink(missing_ok=True)
             read_end, write_end = os.pipe()
             try:
                 with subprocess.Popen([sys.executable, "-B", "-c", program, str(server),
-                                       str(read_end), str(write_end), mode, tmp],
+                                       str(read_end), str(write_end), mode, tmp, *fault],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, pass_fds=(read_end, write_end)) as mirror:
                     try:
@@ -674,15 +795,26 @@ serve(Path(sys.argv[5]), managed=True)
                             if mode != "healthy":
                                 os.write(write_end, b"R")
                     except (StreamError, BrokenPipeError):
-                        assert mode != "healthy", mode
+                        assert not expected, (mode, fault)
                     else:
-                        assert mode == "healthy", mode
-                    assert mirror.returncode == (0 if mode == "healthy" else 1), mode
-                    assert marker.exists() == (mode == "miss"), mode
-                    marker.unlink(missing_ok=True)
+                        assert expected, (mode, fault)
+                    assert mirror.returncode == (0 if expected else 1), (mode, fault)
+                assert marker.exists() == (mode == "miss") or fault, (mode, fault)
+                marker.unlink(missing_ok=True)
+                return placements.read_text().splitlines() if placements.exists() else []
             finally:
                 os.close(read_end)
                 os.close(write_end)
+
+        for mode in ("healthy", "miss", "marker-error", "foreign", "unclassified", "short-object", "short-send"):
+            replay(mode, mode == "healthy")
+        for mode in ("hit", "miss"):
+            baseline = set(replay(mode, mode == "hit"))
+            assert baseline
+            for point in sorted(baseline):
+                for kind in ("MemoryError", "OSError", "BaseException"):
+                    assert point in replay(mode, False, (*point.split(":"), kind)), (mode, point, kind)
+            print(f"Mirror {mode}: {len(baseline)} statement and return placements", flush=True)
 
 
 def test_nested_slot_directory_close_does_not_leak_or_replace_read_failure() -> None:

@@ -255,6 +255,9 @@ def serve(directory: Path, *, managed: bool = False) -> None:
     validities = mirror_validities(directory)
     mapping = {}
     missing = False
+    request_complete = False
+    handler_error = False
+    started = served = 0
     for row in inventory(directory)["objects"]:
         for url in row["urls"]:
             url = canonical_url(url)
@@ -265,7 +268,9 @@ def serve(directory: Path, *, managed: bool = False) -> None:
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            nonlocal missing
+            nonlocal missing, request_complete, started, served
+            request_complete = False
+            started += 1
             now = datetime.now(timezone.utc)
             if any(row.deadline is not None and not row.date <= now <= row.deadline for row in validities):
                 missing = True
@@ -290,21 +295,40 @@ def serve(directory: Path, *, managed: bool = False) -> None:
                 self.send_error(status)
                 return
             self.send_response(200)
-            self.send_header("Content-Length", str(file.stat().st_size))
+            remaining = file.stat().st_size
+            self.send_header("Content-Length", str(remaining))
             self.end_headers()
             with file.open("rb") as source:
-                shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+                if not managed:
+                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+                    return
+                while remaining:
+                    chunk = source.read(min(remaining, 1024 * 1024))
+                    if not chunk or self.wfile.write(chunk) != len(chunk):
+                        raise SealedError("sealed mirror response did not complete")
+                    remaining -= len(chunk)
+                if source.read(1):
+                    raise SealedError("sealed mirror object exceeded advertised length")
+            served += 1
+            request_complete = True
 
         def log_message(self, _format: str, *args: str) -> None:
             # The complete request inventory is already recorded privately.
             return
+
+    class ManagedServer(HTTPServer):
+        def handle_error(self, request, client_address) -> None:
+            nonlocal handler_error
+            handler_error = True
+            super().handle_error(request, client_address)
 
     def stop(_signal, _frame):
         raise SystemExit(int(missing or managed))
 
     previous = signal.signal(signal.SIGTERM, stop)
     try:
-        with HTTPServer(("127.0.0.1", 3142), Handler) as server:
+        server_type = ManagedServer if managed else HTTPServer
+        with server_type(("127.0.0.1", 3142), Handler) as server:
             if managed:
                 control = sys.stdin.fileno()
                 with selectors.DefaultSelector() as events:
@@ -316,7 +340,10 @@ def serve(directory: Path, *, managed: bool = False) -> None:
                         if not ready:
                             continue
                         if any(key.fileobj is server for key, _ in ready):
+                            request_complete = False
                             server.handle_request()
+                            if missing or handler_error or not request_complete or served != started:
+                                raise SealedError("sealed mirror request did not complete")
                         elif os.read(control, 1) == b"S":
                             break
                         else:
@@ -325,7 +352,7 @@ def serve(directory: Path, *, managed: bool = False) -> None:
                 print("CERALIVE_SEALED_MIRROR_READY", flush=True)
                 while not missing:
                     server.handle_request()
-        if managed and not missing:
+        if managed and not missing and not handler_error and served == started:
             print("CERALIVE_SEALED_MIRROR_STOPPED", flush=True)
             return
     finally:

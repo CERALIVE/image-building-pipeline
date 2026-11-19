@@ -20,7 +20,7 @@ import time
 from image_capsule import Capsule, unpack
 from image_stages import StageLog, stage_marker
 from image_stream import (
-    BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode, list_directory, listed_entry,
+    BUILD_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, ExclusiveFile, Identity, StreamError, encode, list_directory, listed_entry,
     positioned_open, read_input, retry_check, retry_io,
 )
 from vm_process import poll_owned, wait
@@ -28,6 +28,7 @@ from vm_process import poll_owned, wait
 HOME = Path("/opt/ceralive-image-job")
 MIRROR_READY_SECONDS = 600
 MIRROR_STOP_SECONDS = 20
+MIRROR_RETRY = RETRYABLE_IO | {errno.EINTR}
 UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
 
 
@@ -96,21 +97,26 @@ def resolve(source: Path, board: str, env: dict[str, str]) -> dict[str, str]:
     return result
 
 
-def mirror_marker(fd: int, marker: bytes, deadline: float) -> None:
+def mirror_io(events: selectors.BaseSelector, deadline: float, operation, *args):
+    """Retry a zero-progress control operation only after fresh readiness."""
+    for attempt in range(IO_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not events.select(remaining):
+            raise StreamError("sealed mirror control operation timed out")
+        try:
+            return operation(*args)
+        except OSError as error:
+            if error.errno not in MIRROR_RETRY or attempt + 1 == IO_ATTEMPTS:
+                raise
+
+
+def mirror_marker(events: selectors.BaseSelector, fd: int, marker: bytes, deadline: float) -> None:
     received = bytearray()
-    with selectors.DefaultSelector() as events:
-        events.register(fd, selectors.EVENT_READ)
-        while len(received) < len(marker):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not events.select(remaining):
-                raise StreamError("sealed mirror control marker timed out")
-            try:
-                data = os.read(fd, len(marker) - len(received))
-            except BlockingIOError:
-                continue
-            received.extend(data)
-            if not data or not marker.startswith(received):
-                raise StreamError("sealed mirror control marker is incomplete or invalid")
+    while len(received) < len(marker):
+        data = mirror_io(events, deadline, os.read, fd, len(marker) - len(received))
+        received.extend(data)
+        if not data or not marker.startswith(received):
+            raise StreamError("sealed mirror control marker is incomplete or invalid")
 
 
 @contextmanager
@@ -119,18 +125,26 @@ def ready_mirror(mirror: subprocess.Popen):
     try:
         output = mirror.stdout.fileno()
         os.set_blocking(output, False)
-        mirror_marker(output, b"CERALIVE_SEALED_MIRROR_READY\n", time.monotonic() + MIRROR_READY_SECONDS)
-        if retry_io(poll_owned, mirror, recover=True) is not None:
-            raise StreamError("sealed guest mirror exited during readiness")
-        yield
-        deadline = time.monotonic() + MIRROR_STOP_SECONDS
-        if mirror.stdin is None or retry_io(poll_owned, mirror, recover=True) is not None:
-            raise StreamError("sealed guest mirror exited before shutdown request")
-        retry_io(os.write, mirror.stdin.fileno(), b"S", recover=True)
-        mirror_marker(output, b"CERALIVE_SEALED_MIRROR_STOPPED\n", deadline)
-        retry_io(wait, mirror, deadline, recover=True)
-        if mirror.returncode != 0 or os.read(output, 1):
-            raise StreamError("sealed guest mirror did not shut down cleanly")
+        with selectors.DefaultSelector() as response:
+            response.register(output, selectors.EVENT_READ)
+            mirror_marker(response, output, b"CERALIVE_SEALED_MIRROR_READY\n",
+                          time.monotonic() + MIRROR_READY_SECONDS)
+            if retry_io(poll_owned, mirror, recover=True) is not None:
+                raise StreamError("sealed guest mirror exited during readiness")
+            yield
+            deadline = time.monotonic() + MIRROR_STOP_SECONDS
+            if mirror.stdin is None or retry_io(poll_owned, mirror, recover=True) is not None:
+                raise StreamError("sealed guest mirror exited before shutdown request")
+            control = mirror.stdin.fileno()
+            os.set_blocking(control, False)
+            with selectors.DefaultSelector() as request:
+                request.register(control, selectors.EVENT_WRITE)
+                if mirror_io(request, deadline, os.write, control, b"S") != 1:
+                    raise StreamError("sealed mirror shutdown request was not written")
+            mirror_marker(response, output, b"CERALIVE_SEALED_MIRROR_STOPPED\n", deadline)
+            retry_io(wait, mirror, deadline, recover=True)
+            if mirror.returncode != 0 or mirror_io(response, deadline, os.read, output, 1):
+                raise StreamError("sealed guest mirror did not shut down cleanly")
     finally:
         if retry_io(poll_owned, mirror, recover=True) is None:
             try:

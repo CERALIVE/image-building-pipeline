@@ -25,6 +25,12 @@ CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 CHILD_CWD = "/"
 CHILD_LOCALE = "C.UTF-8"
+_SIGNAL_SET = ctypes.c_ulong * (128 // ctypes.sizeof(ctypes.c_ulong))
+_SIGPENDING = ctypes.CDLL(None, use_errno=True).sigpending
+_SIGPENDING.argtypes = (ctypes.POINTER(_SIGNAL_SET),)
+_SIGPENDING.restype = ctypes.c_int
+# These Linux signals are all in the first sigset_t word.
+_STOP_PENDING = sum(1 << (sig - 1) for sig in STOP_SIGNALS)
 
 
 def close_transport(release: Callable[[], None], on_loss: Callable[[], None] | None = None,
@@ -87,7 +93,7 @@ class Cancellation:
     """Signal state and the authoritative status of a renamed exit receipt."""
 
     __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "exit_sync_calls", "finalizing",
-                 "saved_dispositions", "safe_journal")
+                 "saved_dispositions", "safe_journal", "_pending", "_pending_ref")
 
     def __init__(self) -> None:
         self.requested = False
@@ -96,6 +102,8 @@ class Cancellation:
         self.exit_status: int | None = None
         self.exit_sync_calls = 0
         self.finalizing = False
+        self._pending = _SIGNAL_SET()
+        self._pending_ref = ctypes.pointer(self._pending)
         self.saved_dispositions: dict[int, signal.Handlers | Callable] = {}
         self.safe_journal: tuple[Path, Path] | None = None
 
@@ -104,6 +112,14 @@ class Cancellation:
 
     def check(self) -> None:
         if self.requested:
+            raise Cancelled("runner cancelled")
+
+    def check_commit(self) -> None:
+        self.check()
+        if _SIGPENDING(self._pending_ref) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        if self._pending[0] & _STOP_PENDING:
             raise Cancelled("runner cancelled")
 
     def begin_finalization(self) -> bool:

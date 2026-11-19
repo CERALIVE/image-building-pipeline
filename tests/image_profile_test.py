@@ -1472,7 +1472,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if tail_case:
             native_write, native_pread, native_read = os.write, os.pread, image_lifecycle.read_once
             native_signal = signal.signal
-            native_pending = signal.sigpending
+            native_pending = vm_process._SIGPENDING
             native_mkdir = pathlib.Path.mkdir
             frame_cuts = ()
             if tail_case[0].startswith("frame-read-"):
@@ -1489,10 +1489,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     size = min(size, next((cut - offset for cut in frame_cuts if cut > offset), size))
                 return native_pread(fd, size, offset)
 
-            def tail_pending():
+            def tail_pending(mask):
                 if receipt_phase(sys._getframe(1)) == "exit":
                     tail_signal_at("checkpoint")
-                return native_pending()
+                return native_pending(mask)
 
             def tail_read(fd, size):
                 caller = sys._getframe(1)
@@ -1527,11 +1527,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     tail_fault("capture-open")
                 return native_open(path, flags, *args, **kwargs)
 
-            def tail_close(fd):
+            def tail_close(fd, release=native_close):
                 phase = receipt_phase(sys._getframe(1))
                 directory_fd = os.path.isdir(f"/proc/self/fd/{fd}") if phase else False
                 target = os.readlink(f"/proc/self/fd/{fd}") if sys._getframe(1).f_code.co_name == "close" else ""
-                native_close(fd)
+                release(fd)
                 if phase:
                     point = f"{phase}-{'dir' if directory_fd else 'file'}-close"
                     tail_signal_at(point)
@@ -1540,6 +1540,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     tail_fault("artifact-close")
                 if target == str(directory / "stream.partial"):
                     tail_fault("capture-close")
+
+            class TailFileIO(io.FileIO):
+                def close(self):
+                    if not self.closed:
+                        tail_close(self.fileno(), lambda _fd: super(TailFileIO, self).close())
 
             def tail_write(fd, data):
                 phase = receipt_phase(sys._getframe(1))
@@ -1566,10 +1571,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(os, "open", tail_open))
             patches.enter_context(patch.object(image_lifecycle, "read_once", tail_read))
             patches.enter_context(patch.object(os, "close", tail_close))
+            patches.enter_context(patch("image_stream.FileIO", TailFileIO))
             patches.enter_context(patch.object(os, "write", tail_write))
             patches.enter_context(patch.object(os, "pread", tail_pread))
             patches.enter_context(patch.object(signal, "signal", tail_signal))
-            patches.enter_context(patch.object(signal, "sigpending", tail_pending))
+            patches.enter_context(patch.object(vm_process, "_SIGPENDING", tail_pending))
             patches.enter_context(patch.object(pathlib.Path, "mkdir", tail_mkdir))
         if teardown_fault:
             wall_time = time.time
@@ -3871,40 +3877,193 @@ def test_readback_allocation_after_second_sync_preserves_verified_receipt() -> N
         assert list(root.iterdir()) == [marker] and json.loads(marker.read_bytes()) == row
 
 
+def test_verified_replacement_survives_allocation_at_final_checkpoint() -> None:
+    import image_stream
+
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        marker = pathlib.Path(temporary) / "exit.json"
+        row = {"launcher_exit": 0, "stop_reason": "verified"}
+        sync, pending = image_stream.sync_once, vm_process._SIGPENDING
+        calls = 0
+        checkpoints = 0
+
+        def sync_once(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError(errno.EIO, "fixture first sync")
+            sync(fd)
+
+        def checkpoint(mask):
+            nonlocal checkpoints
+            checkpoints += 1
+            assert calls == 2
+            if checkpoints == 1:
+                raise MemoryError("fixture pending signals after verification")
+            return pending(mask)
+
+        with patch.object(image_stream, "sync_once", sync_once), patch.object(vm_process, "_SIGPENDING", checkpoint):
+            image_lifecycle.receipt(marker, row, outcome=Cancellation())
+        assert calls == checkpoints == 2
+        assert json.loads(marker.read_bytes()) == row
+
+
+def test_verified_receipt_steps_survive_each_reached_allocation_site() -> None:
+    import image_stream
+
+    def replay(name, fault, locations):
+        with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / name
+            flag = Cancellation() if name == "exit.json" else None
+            row = {"launcher_exit": 0, "stop_reason": "verified"}
+            before = descriptor_snapshot()
+            native_sync = image_stream.sync_once
+            count = 0
+            verified = False
+            injected = False
+            methods = image_lifecycle.Receipt
+            watched = {fn.__code__ for fn in (methods.file_sync, methods.file_close, methods.mask_block,
+                                             methods.rename, methods._publish, methods._record_rename,
+                                             Cancellation.check_commit, image_stream.ExclusiveFile.close)}
+
+            def sync(fd):
+                nonlocal count
+                count += 1
+                if count == 1:
+                    raise OSError(errno.EIO, "fixture first sync")
+                native_sync(fd)
+
+            def trace(frame, event, _value):
+                nonlocal verified, injected
+                code = frame.f_code
+                if code is methods._verify_payload.__code__ and event == "return":
+                    verified = frame.f_locals["self"].verified_inode is not None
+                if code in watched and verified and event in ("line", "return"):
+                    site = (code.co_qualname, frame.f_lineno, event)
+                    if site == fault:
+                        injected = True
+                        sys.settrace(None)
+                        raise MemoryError("fixture after receipt verification")
+                    locations.add(site)
+                return trace
+
+            with patch.object(image_stream, "sync_once", sync):
+                sys.settrace(trace)
+                try:
+                    image_lifecycle.receipt(marker, row, outcome=flag)
+                finally:
+                    sys.settrace(None)
+            assert injected == (fault is not None) and verified and count == 2, (name, fault, count)
+            assert descriptor_snapshot() == before, (name, fault)
+            assert list(root.iterdir()) == [marker] and json.loads(marker.read_bytes()) == row, (name, fault)
+
+    for name in ("transport-validation.json", "teardown.json", "exit.json"):
+        sites = set()
+        replay(name, None, sites)
+        assert sites
+        for fault in sorted(sites):
+            replay(name, fault, set())
+        print(f"{name}: {len(sites)} post-verification line and return placements", flush=True)
+
+
+def test_diagnostic_allocation_keeps_first_writeback_failure() -> None:
+    import image_stream
+
+    class BrokenDiagnostics(list):
+        def append(self, _error):
+            raise MemoryError("fixture error recorder")
+
+    init = image_lifecycle.Receipt.__init__
+
+    def initialize(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self.errors = BrokenDiagnostics()
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        errors = iter((errno.EIO, errno.ENOSPC))
+
+        def sync_once(_fd):
+            raise OSError(next(errors), "fixture required sync")
+
+        with patch.object(image_lifecycle.Receipt, "__init__", initialize), \
+                patch.object(image_stream, "sync_once", sync_once):
+            try:
+                image_lifecycle.receipt(root / "exit.json", {"launcher_exit": 0}, outcome=Cancellation())
+            except image_lifecycle.ReceiptError as failure:
+                assert isinstance(failure.__cause__, image_stream.FileSyncError)
+                assert failure.__cause__.errno == errno.ENOSPC
+            else:
+                raise AssertionError("failed receipt accepted")
+        assert not list(root.iterdir())
+
+
 def test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor() -> None:
-    from image_stream import ExclusiveFile
+    import image_stream
 
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
         native_close = os.close
         source = root / "sentinel"
         source.write_bytes(b"distinct descriptor")
-        with ExclusiveFile(root / "owned") as owner:
+        replacement = None
+
+        class LateClose(io.FileIO):
+            def close(self):
+                nonlocal replacement
+                if self.closed:
+                    return
+                fd = self.fileno()
+                super().close()
+                replacement = os.open(source, os.O_RDONLY)
+                assert replacement == fd
+                raise MemoryError("fixture late allocation after real close")
+
+        with patch.object(image_stream, "FileIO", LateClose), image_stream.ExclusiveFile(root / "owned") as owner:
             owner.open()
             owned_fd = owner.fileno()
-            replacement = None
-
-            def close(fd):
-                nonlocal replacement
-                native_close(fd)
-                if fd == owned_fd and replacement is None:
-                    replacement = os.open(source, os.O_RDONLY)
-                    assert replacement == owned_fd
-                    raise MemoryError("fixture late allocation after real close")
-
             try:
-                with patch.object(os, "close", close):
-                    try:
-                        owner.close()
-                    except MemoryError:
-                        pass
-                    owner.discard()
+                try:
+                    owner.close()
+                except MemoryError:
+                    pass
+                else:
+                    raise AssertionError("post-release fault was not injected")
+                owner.discard()
                 assert replacement == owned_fd
                 assert os.read(replacement, 32) == b"distinct descriptor"
                 assert sorted(path.name for path in root.iterdir()) == ["sentinel"]
             finally:
                 if replacement is not None and pathlib.Path(f"/proc/self/fd/{replacement}").exists():
                     native_close(replacement)
+
+
+def test_exclusive_close_fault_before_release_leaves_owner_retryable() -> None:
+    import image_stream
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        fd_map = descriptor_snapshot()
+        interrupted = False
+
+        class EarlyClose(io.FileIO):
+            def close(self):
+                nonlocal interrupted
+                if not self.closed and not interrupted:
+                    interrupted = True
+                    raise MemoryError("fixture allocation before close")
+                super().close()
+
+        with patch.object(image_stream, "FileIO", EarlyClose), image_stream.ExclusiveFile(root / "owned") as owner:
+            owner.open()
+            try:
+                owner.close()
+            except MemoryError:
+                pass
+            owner.discard()
+            assert interrupted and not list(root.iterdir())
+        assert descriptor_snapshot() == fd_map
 
 
 def test_attempt_preparation_and_journal_survive_transient_io() -> None:
@@ -4847,7 +5006,11 @@ if __name__ == "__main__":
                                  test_terminal_receipt_readback_restarts_and_uses_the_remaining_attempt,
                                  test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults,
                                  test_readback_allocation_after_second_sync_preserves_verified_receipt,
-                                 test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor),
+                                 test_verified_replacement_survives_allocation_at_final_checkpoint,
+                                 test_verified_receipt_steps_survive_each_reached_allocation_site,
+                                 test_diagnostic_allocation_keeps_first_writeback_failure,
+                                 test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor,
+                                 test_exclusive_close_fault_before_release_leaves_owner_retryable),
         "--admission-restart": (test_priority_syscall_error_restarts_the_whole_observation,
                                 test_late_disk_error_restarts_store_admission_before_execution),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),

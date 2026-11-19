@@ -29,7 +29,7 @@ from image_stream import (
     retry_check, retry_io, rewrite_file, sync_file, transfer, unlink_owned, write_all,
 )
 from vm_process import (
-    POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
+    POLL_SECONDS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
     register_close, run, wait,
 )
 
@@ -125,6 +125,10 @@ class Receipt:
         self.probe = probe
         self.directory_fd: int | None = None
         self.renamed = False
+        self.verified_inode: os.stat_result | None = None
+        self._candidate_inode: os.stat_result | None = None
+        self._checkpoint = outcome.check_commit if outcome is not None and row.get("stop_reason") != "cancelled" else None
+        self._publish_prepared = self._publish
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
 
     @property
@@ -172,8 +176,11 @@ class Receipt:
         with PositionedReader(fd, checked=True) as source:
             if any(source.read(len(fragment)) != fragment for fragment in self.payload) or source.read(1):
                 raise ReceiptError("receipt content differs before publication")
+        self.verified_inode = self._candidate_inode
 
     def file_sync(self) -> None:
+        if self.verified_inode is not None:
+            return
         terminal = self.outcome is not None
         for attempt in range(2):
             assert self.file_fd is not None and self.file_fd >= 0
@@ -181,6 +188,7 @@ class Receipt:
                 if self.outcome.exit_sync_calls >= 2:
                     raise ReceiptError("terminal receipt sync budget exhausted")
             try:
+                self._candidate_inode = retry_io(os.fstat, self.file_fd, recover=True)
                 sync_file(self.file_fd, terminal_budget=self.outcome)
                 try:
                     retry_io(self._verify_payload, self.file_fd, recover=True)
@@ -220,21 +228,42 @@ class Receipt:
 
     def mask_block(self) -> None:
         if self.outcome is not None:
-            if not self.outcome.begin_finalization():
+            try:
+                masked = self.outcome.begin_finalization()
+            except MemoryError:
+                masked = self.outcome.begin_finalization()
+            if not masked:
                 report_error("finalization signal mask unverified; catchable signals ignored")
 
-    def rename(self) -> None:
-        def publish() -> None:
-            if self.outcome is not None and self.row["stop_reason"] != "cancelled":
-                self.outcome.check()
-                if retry_io(signal.sigpending, recover=True).intersection(STOP_SIGNALS):
-                    raise Cancelled("runner cancelled")
-            os.replace(self.temporary, self.path)
+    def _publish(self) -> None:
+        if self._checkpoint is not None:
+            self._checkpoint()
+        os.replace(self.temporary, self.path)
 
-        retry_io(publish, recover=True)
+    def _record_rename(self) -> None:
         if self.outcome is not None:
             self.outcome.exit_status = self.status
         self.renamed = True
+
+    def rename(self) -> None:
+        try:
+            if self.file_fd != -1 or self.verified_inode is None:
+                raise ReceiptError("receipt is not verified and closed")
+            retry_io(self._publish_prepared, recover=True)
+            self._record_rename()
+        except MemoryError:
+            # Preserve this inode across the checkpoint. If rename ran, do
+            # not replay it or reopen cancellation after publication.
+            try:
+                published = retry_io(self.path.lstat, recover=True)
+            except FileNotFoundError:
+                published = None
+            if (published is None or published.st_ino != self.verified_inode.st_ino
+                    or published.st_dev != self.verified_inode.st_dev):
+                if self.file_fd != -1:
+                    raise ReceiptError("receipt is not closed")
+                retry_io(self._publish_prepared, recover=True)
+            self._record_rename()
 
     def dir_open(self) -> None:
         if self.renamed:
@@ -257,6 +286,15 @@ class Receipt:
         for error in self.errors:
             report_error(error)
 
+    def _step(self, action, resume: bool) -> None:
+        try:
+            action(self)
+        except MemoryError:
+            if not resume or self.verified_inode is None:
+                raise
+            if not self.renamed:
+                action(self)
+
 
 # The order and failure policy here also drive the complete fault matrix.
 RECEIPT_STEPS = (
@@ -266,6 +304,7 @@ RECEIPT_STEPS = (
     (Receipt.dir_open, True), (Receipt.dir_sync, True),
     (Receipt.dir_close, True), (Receipt.temp_cleanup, True), (Receipt.log_errors, True),
 )
+_VERIFIED_STEPS = (Receipt.file_sync, Receipt.file_close, Receipt.mask_block, Receipt.rename)
 
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
@@ -278,14 +317,17 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             if failure is not None and not cleanup and not transaction.renamed:
                 continue
             try:
-                action(transaction)
+                transaction._step(action, action in _VERIFIED_STEPS)
             except BaseException as error:
                 if failure is None:
                     failure = error
                 if action is Receipt.log_errors:
                     report_error(error)
                 elif not isinstance(error, Cancelled):
-                    transaction.errors.append(error)
+                    try:
+                        transaction.errors.append(error)
+                    except MemoryError:
+                        report_error(error)
     finally:
         try:
             if not transaction.renamed and (transaction.primary.fd is not None

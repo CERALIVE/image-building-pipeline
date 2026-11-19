@@ -7,7 +7,7 @@ import ctypes
 from dataclasses import asdict, dataclass
 import errno
 import hashlib
-from io import BufferedReader, RawIOBase
+from io import BufferedReader, FileIO, RawIOBase
 import json
 import os
 from pathlib import Path
@@ -340,7 +340,7 @@ def create_file(owner: ExclusiveFile) -> None:
     flags = (os.O_RDWR if owner.readable else os.O_WRONLY) | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
     for attempt in range(IO_ATTEMPTS):
         try:
-            owner.fd = os.open(owner.path, flags, owner.mode)
+            owner._fd = os.open(owner.path, flags, owner.mode)
         except OSError as error:
             if attempt + 1 == IO_ATTEMPTS or error.errno not in RETRYABLE_IO | CHECK_RETRY:
                 raise
@@ -381,7 +381,15 @@ class ExclusiveFile:
         self.path = path
         self.mode = mode
         self.readable = readable
-        self.fd: int | None = None
+        self._file = FileIO.__new__(FileIO)
+        self._attached = False
+        self._fd: int | None = None
+
+    @property
+    def fd(self) -> int | None:
+        if self._attached:
+            return -1 if self._file.closed else self._file.fileno()
+        return self._fd
 
     def open(self) -> None:
         create_file(self)
@@ -407,7 +415,8 @@ class ExclusiveFile:
         except OSError as error:
             report_error(error)
         unlink_owned(self.path)
-        self.fd = None
+        self._fd = None
+        self._attached = False
 
     def fileno(self) -> int:
         return self.fd if self.fd is not None else -1
@@ -423,10 +432,13 @@ class ExclusiveFile:
         """Unbuffered writes have nothing to flush."""
 
     def close(self) -> None:
-        fd = self.fd
-        if fd is not None and fd >= 0:
-            # A late exception must never let cleanup close a reused number.
-            self.fd = -1; os.close(fd)
+        if self._fd is None:
+            return
+        if not self._attached:
+            if self._file.closed:
+                self._file.__init__(self._fd, "r+b" if self.readable else "wb")
+            self._attached = True
+        self._file.close()
 
 
 def rewrite_file(path: Path, replay: Callable[[int], None]) -> None:

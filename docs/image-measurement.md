@@ -788,8 +788,13 @@ replacement if the budget permits. Each write attempt requires a complete
 positioned readback of the prepared bytes and EOF before rename. All receipt
 kinds use the same bounded retry for readback I/O errors. One allocation
 failure restarts comparison on the synced inode without repeating sync.
-A byte mismatch rejects the receipt. Other regular-file consumers retain
-their bounded EINTR retry.
+A byte mismatch rejects the receipt. The transaction retains the verified
+inode through a one-shot allocation failure at the final cancellation
+checkpoint. The checkpoint uses a preallocated Linux signal set. Rename
+requires the writable descriptor to be closed. If a fault interrupts the
+rename handoff, the verified inode identity distinguishes a completed rename
+from one that still needs the cancellation check. Other regular-file consumers
+retain their bounded EINTR retry.
 Decoded artifacts replay from the captured envelope and recheck their member
 digest. Staging captures replay only if the bytes match the digest accumulated
 as the launcher read the guest pipe and the additional disk space is available.
@@ -857,11 +862,15 @@ The slot, firmware and sealed-mirror checks require complete directory
 observations. The guest uses the mirror shipped in the base with the selected
 source's existing build and capsule contracts. After the build, it requests
 shutdown over the mirror's private stdin pipe. The mirror finishes its active
-request, closes its listener, and acknowledges shutdown only if it detected
-no miss. Both the acknowledgement and a collected zero exit status are required.
-The guest separately checks for the missing-object marker. TERM and KILL are
-cleanup signals after failure. They cannot establish a successful measurement.
-Readiness and shutdown markers use bounded nonblocking reads.
+request and closes its listener. An accepted request stays incomplete until a
+verified hit has served the advertised body length and reached source EOF.
+An incomplete request, a miss, a dispatcher error or mismatched request counts
+prevents acknowledgement. The guest requires
+the acknowledgement, a collected zero exit status and control pipe EOF. It
+separately checks for the missing-object marker. TERM and KILL are cleanup
+signals after failure. Control reads and the shutdown request use nonblocking
+I/O. A transient zero-progress error gets a new readiness check within the
+original deadline.
 The offline probe requires an empty JSON list of default routes
 and ENETUNREACH or EHOSTUNREACH for every selected TCP endpoint. ECONNREFUSED
 indicates a reachable endpoint, and ETIMEDOUT supplies no conclusive evidence.
