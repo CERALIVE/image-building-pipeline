@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import errno
 import os
 from pathlib import Path
+import re
 import resource
 from typing import Final, TypedDict
 
@@ -79,30 +80,60 @@ def cgroup_limits(pid: int | str) -> int:
     membership = Path(f"/proc/{pid}/cgroup").read_text().strip()
     if not membership.startswith("0::/"):
         raise AdmissionError("image profile requires unified cgroup v2")
-    group = Path("/sys/fs/cgroup") / membership[4:].lstrip("/")
-    ancestors = (group, *group.parents)
-    roots = [path for path in ancestors if path.is_relative_to("/sys/fs/cgroup")]
+    root = Path("/sys/fs/cgroup")
+    relative = Path(membership[4:])
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise AdmissionError("image profile requires a dedicated non-root cgroup")
+    group = root / relative
     memory = []
     quotas = []
     swaps = []
     weights = []
-    for path in roots:
-        for field, values in (("memory.max", memory), ("memory.swap.max", swaps)):
-            file = path / field
-            if file.is_file():
-                value = file.read_text().strip()
+
+    def read(path: Path, field: str) -> str:
+        try:
+            return (path / field).read_text().strip()
+        except FileNotFoundError as error:
+            raise AdmissionError(f"missing required cgroup control {path / field}") from error
+
+    def number(value: str) -> int:
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("expected an unsigned decimal integer")
+        return int(value)
+
+    # Controllers expose these controls on non-root cgroups. A missing
+    # workload or ancestor control cannot be filled in from another sample.
+    try:
+        for path in (group, *group.parents):
+            if path == root:
+                break
+            for field, values in (("memory.max", memory), ("memory.swap.max", swaps)):
+                value = read(path, field)
                 if value != "max":
-                    values.append(int(value))
-        cpu = path / "cpu.max"
-        if cpu.is_file():
-            quota, period = cpu.read_text().split()
+                    values.append(number(value))
+            quota, period = read(path, "cpu.max").split()
+            period = number(period)
+            if period == 0:
+                raise ValueError("CPU period is zero")
             if quota != "max":
-                quotas.append(int(quota) / int(period))
-        io = path / "io.weight"
-        if io.is_file():
-            for line in io.read_text().splitlines():
-                if line.startswith("default "):
-                    weights.append(int(line.split()[1]))
+                cpu_quota = number(quota)
+                if cpu_quota == 0:
+                    raise ValueError("CPU quota is zero")
+                quotas.append(cpu_quota / period)
+            defaults = []
+            for line in read(path, "io.weight").splitlines():
+                selector, value = line.split()
+                weight = number(value)
+                if not 1 <= weight <= 10000 or (selector != "default" and not re.fullmatch(r"[0-9]+:[0-9]+", selector)):
+                    raise ValueError("invalid I/O weight")
+                if selector == "default":
+                    defaults.append(weight)
+            if len(defaults) != 1:
+                raise ValueError("expected one default I/O weight")
+            weights.append(defaults[0])
+        weight = number(read(group, "cpu.weight"))
+    except ValueError as error:
+        raise AdmissionError(f"invalid cgroup limit: {error}") from error
     if not memory or min(memory) != CAPS.memory_max:
         raise AdmissionError("image profile needs effective MemoryMax = 24 GiB")
     if not quotas or min(quotas) > CAPS.cpus:
@@ -111,8 +142,7 @@ def cgroup_limits(pid: int | str) -> int:
         raise AdmissionError("image profile needs effective MemorySwapMax=0")
     if not weights or min(weights) > 10:
         raise AdmissionError("image profile needs effective IOWeight <= 10")
-    cpu_weight = group / "cpu.weight"
-    if not cpu_weight.is_file() or not 1 <= (weight := int(cpu_weight.read_text())) <= MAX_CPU_WEIGHT:
+    if not 1 <= weight <= MAX_CPU_WEIGHT:
         raise AdmissionError(f"image profile needs CPUWeight <= {MAX_CPU_WEIGHT} on its cgroup")
     return weight
 
@@ -163,7 +193,7 @@ def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservati
 
 def cgroup_admission() -> None:
     """Check the launcher before any image preparation or guest is started."""
-    cgroup_limits("self")
+    retry_check(cgroup_limits, "self")
     require_process_priority(0)
     if len(os.sched_getaffinity(0)) != CAPS.cpus:
         raise AdmissionError("image profile needs four selected CPUs")

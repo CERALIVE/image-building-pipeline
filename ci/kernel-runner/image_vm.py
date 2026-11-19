@@ -18,7 +18,7 @@ from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
 from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
-from image_stream import Identity, StreamError, decode, verify_sidecar, list_directory, retry_check
+from image_stream import Identity, StreamError, decode, exact_json, list_directory, retry_check, unique_object, verify_sidecar
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -141,6 +141,70 @@ def admit_output_store(store: Path, identity: Identity, base: Path, base_sha256:
     disk_admission(base.parent, store, retained)
     return trust, retained
 
+def returned_json(path: Path):
+    return json.loads(path.read_text(), object_pairs_hook=unique_object)
+
+
+def measurement_stages(row, identity: Identity, public_root: str, members) -> dict:
+    stages = dict.fromkeys(("resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
+                           "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock",
+                           "parity", "raw-slots"), 0)
+    artifacts = {
+        member.id: {"sha256": member.sha256, "bytes": member.length} for member in members
+        if member.id in {"rootfs.tar", "packages.lock.json", "rootfs_a.ext4", "rootfs_b.ext4", "rootfs_a.reserve",
+                         "rootfs_b.reserve", "rootfs_a.header", "rootfs_b.header", "boot.scr", "boot.scr.sha256"}
+    }
+    if type(row) is not dict:
+        raise StreamError("invalid measurement receipt")
+    kernel = row.get("kernel_version")
+    metadata = row.get("metadata_validity")
+    if type(kernel) is not str or not kernel or type(metadata) is not dict:
+        raise StreamError("invalid measurement metadata")
+    repositories = metadata.get("repositories")
+    if (type(repositories) is not list or not repositories
+            or not exact_json(metadata, {"schema": 1, "purpose": "rootfs-measurement", "repositories": repositories})):
+        raise StreamError("invalid measurement repository metadata")
+    for repository in repositories:
+        if (type(repository) is not dict
+                or repository.keys() != {"repository", "release_date", "release_sha256", "freshness_checked", "freshness"}
+                or any(type(repository[key]) is not str
+                       for key in ("repository", "release_date", "release_sha256", "freshness"))
+                or type(repository["freshness_checked"]) is not bool
+                or repository["freshness"] != ("checked" if repository["freshness_checked"] else "NOT checked")):
+            raise StreamError("invalid measurement repository record")
+    expected = {
+        "schema": 1, "purpose": "rootfs-measurement", "build_mode": "production", "board": identity.board,
+        "source_commit": identity.commit, "source_date_epoch": identity.epoch, "input_sha256": identity.input_sha256,
+        "public_root_der_sha256": public_root, "kernel_version": kernel, "stages": stages,
+        "slot_only_additions": ["usr/lib/ceralive/boot/boot.scr", "usr/lib/ceralive/boot/boot.scr.sha256"],
+        "metadata_validity": metadata, "artifacts": artifacts, "signed_candidate": False,
+    }
+    if not exact_json(row, expected):
+        raise StreamError("measurement receipt identity, stage or artifact mismatch")
+    return stages
+
+
+def validate_verification(row, identity: Identity, inventory: dict) -> None:
+    if type(row) is not dict:
+        raise StreamError("invalid verifier receipt")
+    slots = row.get("slots")
+    if (type(slots) is not list or len(slots) != 2
+            or not exact_json(row, {"schema": 1, "verified": True, "build_identity": asdict(identity),
+                                    "artifacts": inventory, "slots": slots})):
+        raise StreamError("independent verifier disagrees with host-selected identity or inventory")
+    labels = set()
+    for slot in slots:
+        if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained", "nvidia_references"}
+                or type(slot["slot"]) is not str or slot["slot"] not in ("rootfs_a", "rootfs_b")
+                or type(slot["reserve"]) is not str or not slot["reserve"]
+                or any(type(slot[key]) is not list or not slot[key] or any(type(item) is not str for item in slot[key])
+                       for key in ("removed", "retained", "nvidia_references"))):
+            raise StreamError("invalid verifier slot record")
+        labels.add(slot["slot"])
+    if labels != {"rootfs_a", "rootfs_b"}:
+        raise StreamError("missing or duplicate verifier slot")
+
+
 def validate_return(job: ImageJob, verifier: bool) -> None:
     target = job.directory / "artifacts"
     create_directory(target)
@@ -157,29 +221,12 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
     if {member.id for member in members} != expected:
         raise StreamError("returned artifact set is incomplete")
     if not verifier:
-        measurement = json.loads((target / "measurement.json").read_text())
-        stages = measurement["stages"]
-        if (measurement["schema"] != 1 or (measurement["purpose"], measurement["build_mode"], measurement["board"],
-             measurement["source_commit"], measurement["source_date_epoch"], measurement["input_sha256"])
-                != ("rootfs-measurement", "production", job.identity.board, job.identity.commit,
-                    job.identity.epoch, job.identity.input_sha256)
-                or measurement["public_root_der_sha256"] != job.state["public_root_der_sha256"]
-                or measurement["signed_candidate"] is not False
-                or not isinstance(stages, dict)
-                or set(stages) != {
-                    "resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
-                    "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock", "parity", "raw-slots"}
-                or any(type(code) is not int or code != 0 for code in stages.values())):
-            raise StreamError("measurement receipt identity or stage failure")
-        for member in members:
-            if member.id in measurement["artifacts"] and measurement["artifacts"][member.id] != {
-                "sha256": member.sha256, "bytes": member.length,
-            }:
-                raise StreamError("measurement artifact digest disagrees with host")
+        stages = measurement_stages(returned_json(target / "measurement.json"), job.identity,
+                                    job.state["public_root_der_sha256"], members)
         rootfs = next(member for member in members if member.id == "rootfs.tar")
         verify_sidecar(target / "rootfs.tar.sha256", rootfs)
         verify_sidecar(target / "boot.scr.sha256", next(member for member in members if member.id == "boot.scr"))
-        job.state["guest_claimed_stage_exits"] = measurement["stages"]
+        job.state["guest_claimed_stage_exits"] = stages
     sync_directory(target)
     receipt(job.directory / "transport-validation.json",
             {"schema": 1, "identity": asdict(job.identity),
@@ -318,8 +365,9 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     artifacts = execute(base, directory / "build", request, cancellation, jobs)
     cancellation.check()
     if args.image_mode == "probe":
-        result = json.loads((artifacts / "verification.json").read_text())
-        if result != {"schema": 1, "identity": asdict(identity), "network_denied": True}:
+        result = returned_json(artifacts / "verification.json")
+        if (type(result) is not dict or result.get("network_denied") is not True
+                or not exact_json(result, {"schema": 1, "identity": asdict(identity), "network_denied": True})):
             raise StreamError("offline probe receipt mismatch")
         return None
     capsule = directory / "verifier-input.tar"
@@ -334,11 +382,7 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
-    result = json.loads((verified / "verification.json").read_text())
-    if (result["schema"] != 1 or result["verified"] is not True
-            or result["build_identity"] != asdict(identity) or result["artifacts"] != inventory
-            or {row["slot"] for row in result["slots"]} != {"rootfs_a", "rootfs_b"}):
-        raise StreamError("independent verifier disagrees with host-selected identity or inventory")
+    validate_verification(returned_json(verified / "verification.json"), identity, inventory)
     capsule.unlink()
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),

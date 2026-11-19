@@ -85,6 +85,17 @@ def unique_object(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
     return result
 
 
+def exact_json(value, expected) -> bool:
+    """Compare JSON records without treating booleans, integers and floats as equal."""
+    if type(value) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return value.keys() == expected.keys() and all(exact_json(value[k], v) for k, v in expected.items())
+    if isinstance(expected, list):
+        return len(value) == len(expected) and all(exact_json(v, e) for v, e in zip(value, expected))
+    return value == expected
+
+
 def retry_io(operation, *args, recover: bool = False, no_retry: frozenset[int] = frozenset(), **kwargs):
     """Retry safe operations at most three times including the first call."""
     for attempt in range(IO_ATTEMPTS):
@@ -223,8 +234,8 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
                 manifest = json.loads(manifest_bytes.getvalue(), object_pairs_hook=unique_object)
             except ValueError as exc:
                 raise StreamError("invalid terminal manifest") from exc
-            if manifest != {"schema": 1, "identity": asdict(expected),
-                            "members": [asdict(item) for item in members]}:
+            if not exact_json(manifest, {"schema": 1, "identity": asdict(expected),
+                                         "members": [asdict(item) for item in members]}):
                 raise StreamError("terminal manifest identity or inventory mismatch")
             if not members or source.read(1):
                 raise StreamError("empty stream or trailing bytes")

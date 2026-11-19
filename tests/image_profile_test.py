@@ -436,6 +436,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             def poll(self, *args):
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
+                        and not mode.startswith(("stderr-flood:", "probe-invalid:"))
                         and mode not in SUCCESS_GUEST_MODES and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
@@ -449,10 +450,19 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return Poll()
 
     validate_return = image_vm.validate_return
+    capture = ImageJob.capture
+
+    def fixture_capture(job, process, seconds):
+        if mode.startswith("stderr-flood:"):
+            assert process.stderr is None, "launcher received a guest stderr read end"
+        return capture(job, process, seconds)
 
     def fixture_return(job, verifier):
         # Only the production build's multi-GiB artifact set is substituted.
         if not pair or verifier:
+            if mode.startswith("stderr-flood:"):
+                assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
+                assert not (job.directory / "diagnostic.partial").exists()
             return validate_return(job, verifier)
         job.cancellation.check()
         target = job.directory / "artifacts"
@@ -533,6 +543,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(tempfile, "TemporaryFile", overlay),
             patch.object(pathlib.Path, "read_text", read_result),
             patch.object(pathlib.Path, "read_bytes", fixture_read_bytes),
+            patch.object(ImageJob, "capture", fixture_capture),
             patch.object(image_vm, "validate_return", fixture_return),
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
@@ -543,6 +554,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                          return_value=FIXTURE_PRIORITY),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
             patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
+            # Keep priority observations independent of the runner's inherited I/O class.
+            patch.object(image_resources._LIBC, "syscall",
+                         return_value=(2 << image_resources.IOPRIO_CLASS_SHIFT) | 7),
         ):
             patches.enter_context(patcher)
         runpy.run_path(sys.argv[0], run_name="__main__")
@@ -572,10 +586,22 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         base.write_bytes(b"public base")
         base.chmod(0o444)
         identity = replace(IDENTITY, input_sha256=hashlib.sha256(capsule.read_bytes()).hexdigest())
-        with (root / "probe.frame").open("wb") as output:
-            encode(output, [("verification.json", json.dumps({
-                "schema": 1, "identity": asdict(identity), "network_denied": True,
-            }).encode())], identity)
+        result = {"schema": 1, "identity": asdict(identity), "network_denied": True}
+        if mode.startswith("probe-invalid:"):
+            field, encoded = mode.split(":", 2)[1:]
+            target = result["identity"] if field.startswith("identity.") else result
+            target[field.rsplit(".", 1)[-1]] = json.loads(encoded)
+        payload = json.dumps(result).encode()
+        frame = io.BytesIO()
+        encode(frame, [("verification.json", payload)], identity)
+        if mode.startswith("stderr-flood:"):
+            padding = 0
+            for _ in range(3):
+                padding += 787_274 - frame.tell()
+                frame = io.BytesIO()
+                encode(frame, [("verification.json", payload + b" " * padding)], identity)
+            assert frame.tell() == 787_274
+        (root / "probe.frame").write_bytes(frame.getvalue())
         qemu_img = root / "qemu-img"
         qemu_img.write_text(f"""#!{sys.executable}
 import json, os, pathlib, signal, sys, time
@@ -642,6 +668,20 @@ with (root / "children").open("a") as logged:
 (root / "ready").touch()
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
+if mode.startswith(("stderr-flood:", "probe-invalid:")):
+    assert os.readlink("/proc/self/fd/2") == "/dev/null"
+    if mode.startswith("stderr-flood:"):
+        count = int(mode.split(":")[1]) * 1024**2
+        block = b"x" * 65536
+        for _ in range(count // len(block)):
+            assert os.write(2, block) == len(block)
+        (root / "flood-completed").write_text(str(count))
+    with (root / "probe.frame").open("rb") as frame:
+        while chunk := frame.read(65536):
+            remaining = memoryview(chunk)
+            while remaining:
+                remaining = remaining[os.write(1, remaining):]
+    sys.exit(0)
 if mode in ("startup:success", "startup:failure", "startup:signal"):
     os.write(1, (root / "probe.frame").read_bytes())
     if mode == "startup:signal":
@@ -653,7 +693,9 @@ if mode.startswith("pair:"):
         sys.path.insert(0, {str(ROOT / 'ci/kernel-runner')!r})
         from image_stream import Identity, encode
         result = {{"schema": 1, "verified": True, "build_identity": payload["build_identity"],
-                  "artifacts": payload["artifacts"], "slots": [{{"slot": "rootfs_a"}}, {{"slot": "rootfs_b"}}]}}
+                  "artifacts": payload["artifacts"], "slots": [
+                      {{"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
+                        "nvidia_references": ["nvidia/nouveau.ko"]}} for slot in ("rootfs_a", "rootfs_b")]}}
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
@@ -734,6 +776,19 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode.startswith(("stderr-flood:", "probe-invalid:")):
+            marker = json.loads((directory / "exit.json").read_text())
+            assert marker["qemu_exit"] == 0 and marker["qemu_reaped"] is True
+            if mode.startswith("stderr-flood:"):
+                assert launcher.returncode == marker["launcher_exit"] == 0, stderr
+                assert (root / "flood-completed").read_text() == str(int(mode.split(":")[1]) * 1024**2)
+                assert not (directory / "diagnostic.partial").exists()
+                assert marker["stream_bytes"] == 787_274
+            else:
+                assert (directory / "transport-validation.json").is_file(), (mode, stderr, marker)
+                assert launcher.returncode == marker["launcher_exit"] == 1, (mode, stderr)
+                assert not (directory.parent / "acceptance.json").exists()
+            return
         if mode.startswith("startup-reject:"):
             baseline = mode.removeprefix("startup-reject:")
             assert launcher.returncode == vm_startup.STARTUP_ERROR, stderr.decode()
@@ -1288,7 +1343,10 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                         verification.write_text(json.dumps({
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
-                            "slots": [{"slot": "rootfs_a"}, {"slot": "rootfs_b"}],
+                            "slots": [
+                                {"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
+                                 "nvidia_references": ["nvidia/nouveau.ko"]} for slot in ("rootfs_a", "rootfs_b")
+                            ],
                         }))
                     return artifacts
 
@@ -1530,7 +1588,12 @@ def test_image_admission_requires_effective_cgroup_caps() -> None:
         snapshot = files.copy()
         if field:
             snapshot["/sys/fs/cgroup/image/" + field] = invalid
-        with patch.object(pathlib.Path, "read_text", lambda path: snapshot[str(path)]), \
+        def read_text(path):
+            if str(path) not in snapshot:
+                raise FileNotFoundError(errno.ENOENT, "fixture missing control", str(path))
+            return snapshot[str(path)]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
                 patch.object(pathlib.Path, "is_file", lambda path: str(path) in snapshot), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
                 patch.object(image_resources.os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
@@ -1559,7 +1622,13 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
                                     (9, "memory.swap.max", False)):
         snapshot = {path: value for path, value in files.items()
                     if pathlib.Path(path).name != missing}
-        with patch.object(pathlib.Path, "read_text", lambda path: snapshot[str(path)]), \
+
+        def read_text(path):
+            if str(path) not in snapshot:
+                raise FileNotFoundError(errno.ENOENT, "fixture missing control", str(path))
+            return snapshot[str(path)]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
                 patch.object(pathlib.Path, "is_file", lambda path: str(path) in snapshot), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
                 patch.object(image_resources.os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
@@ -1747,6 +1816,95 @@ def test_priority_syscall_error_restarts_the_whole_observation() -> None:
             except image_resources.IOPriorityError:
                 assert failures == 3 or error == errno.EPERM
         assert steps == ["cpu", "cgroup", "ioprio"] * (1 if error == errno.EPERM else min(failures + 1, 3))
+
+
+def test_cgroup_sample_retries_whole_observation_or_refuses() -> None:
+    child, parent = "/sys/fs/cgroup/parent/child", "/sys/fs/cgroup/parent"
+    membership = "/proc/123/cgroup"
+    caps = {"memory.max": str(24 * image_resources.GIB), "memory.swap.max": "0",
+            "cpu.max": "400000 100000", "io.weight": "default 10\n"}
+    files = {f"{level}/{name}": value for level in (child, parent) for name, value in caps.items()}
+    files.update({membership: "0::/parent/child\n", f"{child}/cpu.weight": "10"})
+    transient = (errno.EIO, errno.EINTR, errno.EAGAIN)
+    for path, code in product(files, (*transient, errno.EPERM, errno.ENOENT)):
+        seen = []
+
+        def read_text(file):
+            name = str(file)
+            if name == path and name not in seen:
+                seen.append(name)
+                raise OSError(code, "fixture cgroup read", name)
+            seen.append(name)
+            if name not in files:
+                raise FileNotFoundError(errno.ENOENT, "controller file absent", name)
+            return files[name]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
+                patch.object(pathlib.Path, "is_file", lambda p: str(p) in files):
+            if code in transient:
+                assert image_resources.retry_check(image_resources.cgroup_limits, 123) == 10
+                assert seen.count(membership) == 2 and seen.count(path) == 2, (path, code, seen)
+            else:
+                try:
+                    image_resources.retry_check(image_resources.cgroup_limits, 123)
+                except (OSError, image_resources.AdmissionError):
+                    assert path in seen, (path, code)
+                else:
+                    raise AssertionError((path, code, "inconclusive sample accepted"))
+
+    files[f"{child}/memory.max"] = str(8 * image_resources.GIB)
+    for failure in ("metadata", "malformed"):
+        def read_text(file):
+            if str(file) not in files:
+                raise FileNotFoundError(errno.ENOENT, "controller file absent", str(file))
+            return "invalid" if failure == "malformed" and str(file) == f"{child}/memory.max" else files[str(file)]
+
+        def is_file(file):
+            return str(file) in files and not (failure == "metadata" and str(file) == f"{child}/memory.max")
+
+        with patch.object(pathlib.Path, "read_text", read_text), patch.object(pathlib.Path, "is_file", is_file):
+            try:
+                image_resources.retry_check(image_resources.cgroup_limits, 123)
+            except image_resources.AdmissionError:
+                pass
+            else:
+                raise AssertionError(f"accepted child limit after {failure}")
+
+    for code in transient:
+        reads = []
+
+        def failed_read(path):
+            name = str(path)
+            reads.append(name)
+            if name == f"{child}/memory.max":
+                raise OSError(code, "persistent fixture cgroup read", name)
+            return files[name]
+
+        with patch.object(pathlib.Path, "read_text", failed_read):
+            try:
+                image_resources.retry_check(image_resources.cgroup_limits, 123)
+            except OSError as error:
+                assert error.errno == code
+                assert reads == [membership, f"{child}/memory.max"] * 3
+            else:
+                raise AssertionError("persistent cgroup error accepted")
+
+
+def test_full_launcher_probe_stderr_flood() -> None:
+    for mib in (3, 8):
+        cancelled_fixture(f"stderr-flood:{mib}")
+
+
+def test_probe_exact_result_types_never_commit_success() -> None:
+    for field, values in {
+        "schema": (True, 1.0, "1", None),
+        "network_denied": (1, "true", 0, 1.0, None, False),
+        "identity": ([], None),
+        "identity.attempt": (1,), "identity.board": (False,), "identity.commit": (None,),
+        "identity.input_sha256": (False,), "identity.epoch": (float(IDENTITY.epoch), "123", None),
+    }.items():
+        for value in values:
+            cancelled_fixture(f"probe-invalid:{field}:{json.dumps(value)}")
 
 
 if __name__ == "__main__":

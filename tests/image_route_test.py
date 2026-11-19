@@ -3,6 +3,7 @@
 
 import errno
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -13,6 +14,8 @@ import sys
 import tempfile
 import tarfile
 import time
+from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,6 +23,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 import image_guest
 import image_verify
+import image_vm
 from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
 from image_capsule import unpack
 from image_verify import compare_slot
@@ -342,6 +346,25 @@ elif sys.argv[1] == 'ack':
 
 def test_measure_uses_base_mirror_for_historical_and_current_sources() -> None:
     spawn = subprocess.Popen
+    server = pathlib.Path(__file__).resolve().parents[1] / "lib/sealed-inputs.py"
+    mirror_code = """
+import hashlib, http.server, pathlib, runpy, sys
+script, objects, address = map(pathlib.Path, sys.argv[1:])
+module = runpy.run_path(str(script))
+serve = module["serve"]
+digest = hashlib.sha256((objects / "data").read_bytes()).hexdigest()
+(objects / "data").rename(objects / digest)
+class LoopbackServer(http.server.HTTPServer):
+    def __init__(self, requested, handler):
+        assert requested == ("127.0.0.1", 3142)
+        super().__init__(("127.0.0.1", 0), handler)
+        address.write_text(str(self.server_port))
+serve.__globals__.update(HTTPServer=LoopbackServer, mirror_validities=lambda _: (),
+                         inventory=lambda _: {"objects": [{
+                             "urls": ["https://deb.debian.org/debian/fixture"], "sha256": digest
+                         }]})
+serve(objects, managed=True)
+"""
     for revision in ("14bf9c4ab61d340951f5b8a46e988df2e5445c98", "c" * 40):
         for missed in (False, True):
             with tempfile.TemporaryDirectory() as temporary:
@@ -368,20 +391,26 @@ def test_measure_uses_base_mirror_for_historical_and_current_sources() -> None:
                         ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"), "data"),
                 }}
                 launches = []
+                replies = []
+                address = root / "mirror-port"
 
                 def start(args, **kwargs):
                     launches.append(args)
                     if args[-1] == "serve-managed":
                         assert args[1] == str(pathlib.Path(image_guest.__file__).with_name("sealed-inputs.py"))
-                        child = ("import sys\nprint('CERALIVE_SEALED_MIRROR_READY', flush=True)\n"
-                                 "assert sys.stdin.buffer.read(1) == b'S'\n"
-                                 f"if {missed!r}: raise SystemExit(1)\n"
-                                 "print('CERALIVE_SEALED_MIRROR_STOPPED', flush=True)\n")
-                    else:
-                        assert args == ["bash", str(source / "build"), board, "--rootfs-measurement"]
-                        assert kwargs["env"]["CERALIVE_IMAGE_BUILD_COMMIT"] == revision
-                        child = "pass"
-                    return spawn([sys.executable, "-B", "-c", child], **kwargs)
+                        return spawn([sys.executable, "-B", "-c", mirror_code,
+                                      str(server), str(objects), str(address)], **kwargs)
+                    assert args == ["bash", str(source / "build"), board, "--rootfs-measurement"]
+                    assert kwargs["env"]["CERALIVE_IMAGE_BUILD_COMMIT"] == revision
+                    connection = http.client.HTTPConnection("127.0.0.1", int(address.read_text()), timeout=2)
+                    try:
+                        name = "missing" if missed else "fixture"
+                        connection.request("GET", f"http://deb.debian.org/debian/{name}")
+                        response = connection.getresponse()
+                        replies.append((response.status, response.read()))
+                    finally:
+                        connection.close()
+                    return spawn([sys.executable, "-B", "-c", "pass"], **kwargs)
 
                 with patch.object(image_guest, "HOME", home), patch.object(image_guest.shutil, "copyfile"), \
                         patch.object(image_guest, "command", return_value="data"), \
@@ -395,6 +424,97 @@ def test_measure_uses_base_mirror_for_historical_and_current_sources() -> None:
                     else:
                         assert not missed and len(records) == 20, (revision, records)
                 assert len(launches) == 2, (revision, missed, launches)
+                if missed:
+                    assert len(replies) == 1 and replies[0][0] == 404
+                    assert (objects / "missing-object").is_file()
+                else:
+                    assert replies == [(200, b"offline fixture")]
+                    assert not (objects / "missing-object").exists()
+
+
+def wrong_typed_records(record):
+    def fields(value, path):
+        if type(value) in (int, bool):
+            replacements = (float(value), str(value), None, bool(value) if type(value) is int else int(value))
+        else:
+            replacements = ({dict: [], list: {}, str: 1}[type(value)], None)
+        for invalid in replacements:
+            yield path, invalid
+        if type(value) is dict:
+            for key, child in value.items():
+                yield from fields(child, (*path, key))
+        if type(value) is list:
+            for index, child in enumerate(value):
+                yield from fields(child, (*path, index))
+
+    for path, replacement in fields(record, ()):
+        if not path:
+            yield path, replacement
+            continue
+        changed = deepcopy(record)
+        parent = changed
+        for key in path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = replacement
+        yield path, changed
+
+
+def test_measurement_and_verifier_records_reject_every_wrong_typed_field() -> None:
+    root = "d" * 64
+    members = tuple(Member(name, 1, "a" * 64) for name in (
+        "rootfs.tar", "packages.lock.json", "rootfs_a.ext4", "rootfs_b.ext4", "rootfs_a.reserve",
+        "rootfs_b.reserve", "rootfs_a.header", "rootfs_b.header", "boot.scr", "boot.scr.sha256"))
+    row = {
+        "schema": 1, "purpose": "rootfs-measurement", "build_mode": "production",
+        "board": IDENTITY.board, "source_commit": IDENTITY.commit, "source_date_epoch": IDENTITY.epoch,
+        "input_sha256": IDENTITY.input_sha256, "public_root_der_sha256": root, "kernel_version": "fixture",
+        "stages": dict.fromkeys(("resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
+                                 "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock",
+                                 "parity", "raw-slots"), 0),
+        "slot_only_additions": ["usr/lib/ceralive/boot/boot.scr", "usr/lib/ceralive/boot/boot.scr.sha256"],
+        "metadata_validity": {"schema": 1, "purpose": "rootfs-measurement", "repositories": [{
+            "repository": "firstparty", "release_date": "2026-11-19T00:00:00+00:00",
+            "release_sha256": "e" * 64, "freshness_checked": False, "freshness": "NOT checked",
+        }]},
+        "artifacts": {member.id: {"sha256": member.sha256, "bytes": member.length} for member in members},
+        "signed_candidate": False,
+    }
+    inventory = {member.id: member.sha256 for member in members}
+    verifier = {"schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": inventory, "slots": [
+        {"slot": slot, "reserve": "reserved", "removed": ["amdgpu"], "retained": ["nvidia"],
+         "nvidia_references": ["nvidia/nouveau.ko"]} for slot in ("rootfs_a", "rootfs_b")
+    ]}
+    for record, check, args in (
+        (row, image_vm.measurement_stages, (IDENTITY, root, members)),
+        (verifier, image_vm.validate_verification, (IDENTITY, inventory)),
+    ):
+        check(record, *args)
+        for path, invalid in wrong_typed_records(record):
+            try:
+                check(invalid, *args)
+            except StreamError:
+                pass
+            else:
+                raise AssertionError(f"accepted wrong type at {path}")
+
+
+def test_terminal_manifest_rejects_every_wrong_typed_field() -> None:
+    from image_stream import MAGIC
+
+    content = b"{}"
+    member = Member("verification.json", len(content), hashlib.sha256(content).hexdigest())
+    first = MAGIC + json.dumps(asdict(member)).encode() + b"\n" + content
+    manifest = {"schema": 1, "identity": asdict(IDENTITY), "members": [asdict(member)]}
+
+    def frame(row):
+        data = json.dumps(row).encode()
+        header = Member("manifest", len(data), hashlib.sha256(data).hexdigest())
+        return first + json.dumps(asdict(header)).encode() + b"\n" + data
+
+    with tempfile.TemporaryDirectory() as temporary:
+        assert decode(io.BytesIO(frame(manifest)), pathlib.Path(temporary), IDENTITY) == (member,)
+    for _, invalid in wrong_typed_records(manifest):
+        rejected(frame(invalid))
 
 
 if __name__ == "__main__":

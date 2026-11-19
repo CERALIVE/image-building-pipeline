@@ -62,9 +62,16 @@ ananicy-cpp's `Heavy_CPU` can change QEMU from nice 10 to 9 without changing
 the cgroup. The launcher tolerates that adjustment, checks the running QEMU
 process and its cgroup about every five seconds, and stops the attempt if the
 priority floor or required limits are lost at a check. The exit receipt
-includes the last QEMU observation of `nice`, the I/O class (via `ioprio_get`), and
+includes the last complete QEMU observation of `nice`, the I/O class (via `ioprio_get`), and
 `cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
 is refused for the measurement guest.
+
+The sampler excludes the cgroup v2 mount root, where these per-cgroup
+controls can be absent. The workload and each non-root ancestor must expose
+`memory.max`, `memory.swap.max`, `cpu.max` and `io.weight`. The workload also
+needs `cpu.weight`. A missing, unreadable or malformed required control
+refuses admission. A transient EIO, EINTR or EAGAIN restarts the whole sample
+within the retry bound.
 
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,
