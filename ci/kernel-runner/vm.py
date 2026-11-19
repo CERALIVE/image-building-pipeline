@@ -301,7 +301,7 @@ def main(cancellation: Cancellation) -> int:
 
 
 def exit_launcher() -> None:
-    """Return the status in the published image receipt through the only exit point."""
+    """Exit with the committed image status, using readback only for verification."""
     cancellation = Cancellation()
     status = 1
     try:
@@ -316,15 +316,11 @@ def exit_launcher() -> None:
     finally:
         try:
             if cancellation.exit_receipt is not None:
-                status = 1
+                committed = cancellation.exit_status
+                status = 1 if committed is None else committed
                 # Final receipt publication keeps signals blocked through this exit.
-                try:
-                    published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
-                    if type(published) is not int or published not in (0, 1):
-                        raise ValueError("invalid launcher_exit in image receipt")
-                    status = published
-                except BaseException as exc:
-                    report_error(exc)
+                if committed is not None:
+                    verify_exit_receipt(cancellation.exit_receipt, committed)
             else:
                 for stream in (sys.stdout, sys.stderr):
                     try:
@@ -333,6 +329,20 @@ def exit_launcher() -> None:
                         report_error(exc)
         finally:
             os._exit(status)
+
+
+def verify_exit_receipt(path: Path, committed: int) -> None:
+    """Check the committed receipt without granting the read authority over exit."""
+    try:
+        try:
+            raw = path.read_bytes()
+        except InterruptedError:
+            raw = path.read_bytes()
+        published = json.loads(raw)["launcher_exit"]
+        if type(published) is not int or published != committed:
+            raise ValueError("image receipt disagrees with committed launcher_exit")
+    except Exception as error:
+        report_error(error)
 
 
 if __name__ == "__main__":

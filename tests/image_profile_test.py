@@ -186,7 +186,7 @@ def descriptor_snapshot() -> dict[int, tuple[str, int, int]]:
 
 
 def waits_for_guest_ready(mode: str) -> bool:
-    return (not mode.startswith(("fault:", "receipt-step:", "pair:"))
+    return (not mode.startswith(("fault:", "receipt-step:", "pair:", "readback:", "teardown-memory:", "commit-memory:"))
             and mode not in ("audit-mutation", "startup:success", "startup:failure", "startup:signal",
                              "isolated:validated-helper",
                              *SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *PRESTART_MODES))
@@ -275,6 +275,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     lost_pid_file = root / "lost-child-pid"
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
+    teardown_fault = mode.removeprefix("teardown-memory:") if mode.startswith("teardown-memory:") else ""
+    commit_fault = mode.removeprefix("commit-memory:") if mode.startswith("commit-memory:") else ""
     pair = mode.startswith("pair:")
     inherited = mode == "inherited"
     startup = mode.removeprefix("startup:") if mode.startswith("startup:") else None
@@ -380,8 +382,18 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return status
 
     def fixture_read_bytes(path):
-        if mode == "unreadable-exit" and path == directory / "exit.json":
-            raise OSError(errno.EIO, "fixture final receipt readback")
+        if path == directory / "exit.json" and (mode == "unreadable-exit" or mode.startswith("readback:")):
+            mark = root / "readback-injected"
+            if mode == "unreadable-exit" or not mark.exists():
+                mark.touch()
+                errors = {
+                    "readback:eintr": InterruptedError(errno.EINTR, "fixture final receipt readback"),
+                    "readback:oserror": OSError(errno.EIO, "fixture final receipt readback"),
+                    "readback:memory": MemoryError("fixture final receipt readback"),
+                    "unreadable-exit": OSError(errno.EIO, "fixture final receipt readback"),
+                }
+                raise errors[mode]
+            (root / "readback-retried").touch()
         if path == directory.parent / "exit.json" and trace_terminal:
             inject_terminal("readback:before")
             result = read_bytes(path)
@@ -402,6 +414,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def inject_step(action, transaction):
         nonlocal during
         final = transaction.path == directory / "exit.json"
+        if (teardown_fault == action.__name__ and transaction.path == directory / "teardown.json"
+                and not (root / "injected").exists()):
+            (root / "injected").touch()
+            if action.__name__ in {"file_close", "dir_close", "temp_cleanup"}:
+                action(transaction)
+            raise MemoryError("fixture teardown receipt allocation")
         if final:
             with (root / "steps").open("a") as log:
                 print(action.__name__, file=log)
@@ -487,8 +505,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             raise OSError(errno.EIO, f"fixture {step}")
         cancel()
 
+    def teardown_memory(point: str) -> None:
+        if teardown_fault == point and not (root / "injected").exists():
+            (root / "injected").touch()
+            raise MemoryError(f"fixture teardown allocation at {point}")
+
     def publish(source, destination) -> None:
         nonlocal during, fail_sync
+        if destination == directory / "teardown.json":
+            fault_at("teardown-rename")
         if pair:
             with (root / "sequence").open("a") as log:
                 print(destination.relative_to(root / "returns"), file=log)
@@ -572,6 +597,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if path == directory / "stream.partial":
             fault_at("stream-unlink")
         if path == root / "returns/active.json":
+            teardown_memory("journal-unlink")
             fault_at("journal-unlink")
         return unlink(path, *args, **kwargs)
 
@@ -627,6 +653,39 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             if mode in (*ISOLATION_MODES, "stages:at-cap", "stages:over-cap"):
                 assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
             validate_return(job, verifier)
+            if commit_fault:
+                run_code = run_image.__code__
+                measure_code = image_vm.measure_image.__code__
+                passed_validation = False
+                source, first = inspect.getsourcelines(run_image)
+                last = first + next(i for i, line in enumerate(source) if "except Cancelled as exc" in line)
+                statement_points = {first + node.lineno - 1 for node in ast.walk(ast.parse(dedent("".join(source))))
+                                    if isinstance(node, (ast.Assign, ast.Expr, ast.Return))}
+                seen = set()
+
+                def commit_trace(frame, event, _arg):
+                    nonlocal passed_validation
+                    if frame.f_code is measure_code and event == "return":
+                        passed_validation = True
+                    if (frame.f_code is run_code and passed_validation and event == "line"
+                            and frame.f_lineno in statement_points and frame.f_lineno < last):
+                        point = str(frame.f_lineno)
+                        if commit_fault == "baseline" and point not in seen:
+                            seen.add(point)
+                            with (root / "commit-points").open("a") as log:
+                                print(point, file=log)
+                        if commit_fault == point:
+                            sys.settrace(None)
+                            (root / "injected").touch()
+                            raise MemoryError(f"fixture finalization at {point}")
+                    return commit_trace
+
+                sys.settrace(commit_trace)
+                frame = sys._getframe(1)
+                while frame is not None:
+                    if frame.f_code in {run_code, measure_code}:
+                        frame.f_trace = commit_trace
+                    frame = frame.f_back
             if mode == "isolated:validated-helper":
                 step = (root / "child-fault").read_text().partition(":")[0]
                 run(["qemu-img", step, str(root / "base")],
@@ -680,7 +739,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 "--attempt", IDENTITY.attempt, "--board", IDENTITY.board, "--image-mode",
                 "measure" if pair else "probe"]
     table = (tuple((step_fixture(action), cleanup) for action, cleanup in image_lifecycle.RECEIPT_STEPS)
-             if audit_receipts else image_lifecycle.RECEIPT_STEPS)
+             if audit_receipts or teardown_fault else image_lifecycle.RECEIPT_STEPS)
     real_exit = os._exit
 
     def audited_exit(status):
@@ -711,6 +770,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     real_receipt = writer
 
     def check_lost_child_at_receipt(path, row, **kwargs):
+        if path == directory / "teardown.json":
+            teardown_memory("receipt")
         if path.parent == directory and path.name in {"teardown.json", "exit.json"} and lost_pid_file.exists():
             pid = lost_pid_file.read_text()
             assert not pathlib.Path(f"/proc/{pid}").exists(), (path.name, pid)
@@ -745,14 +806,15 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         child_fault = (root / "child-fault").read_text() if (root / "child-fault").exists() else ""
         signal_fault = (root / "signal-fault").read_text() if (root / "signal-fault").exists() else ""
         check_descriptors = (ownership_case.exists() or pidfd_case.exists() or pipe_fault or registration_fault
-                             or child_fault or signal_fault
+                             or child_fault or signal_fault or teardown_fault or commit_fault
+                             or mode.startswith("readback:") or mode == "unreadable-exit"
                              or mode in (*BACKUP_SELECTOR_CLOSE_MODES, *READER_CLEANUP_MODES, *PRESTART_MODES))
         if check_descriptors:
             def checked_exit(status):
                 final_fds = descriptor_snapshot()
                 assert initial_fds is not None, "startup did not establish a descriptor baseline"
                 (root / "descriptor-check").write_text(json.dumps([initial_fds, final_fds]))
-                if child_fault or signal_fault:
+                if child_fault or signal_fault or teardown_fault or commit_fault:
                     children = pathlib.Path(f"/proc/self/task/{launcher_pid}/children").read_text().split()
                     (root / "launcher-children").write_text(json.dumps(children))
                 real_exit(status)
@@ -1260,10 +1322,39 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                                 return original(*args, **kwargs)
                     return boundary(on_loss, action, *args, **kwargs)
                 patches.enter_context(patch.object(image_lifecycle, "optional", fault_boundary))
+        if teardown_fault:
+            wall_time = time.time
+            directory_sync = image_lifecycle.sync_directory
+
+            def teardown_time():
+                if sys._getframe(1).f_code is ImageJob.__exit__.__code__:
+                    teardown_memory("timestamp")
+                return wall_time()
+
+            def teardown_directory_sync(path):
+                if sys._getframe(1).f_code is ImageJob.__exit__.__code__:
+                    teardown_memory("journal-sync")
+                return directory_sync(path)
+
+            patches.enter_context(patch.object(time, "time", teardown_time))
+            patches.enter_context(patch.object(image_lifecycle, "sync_directory", teardown_directory_sync))
+        if commit_fault:
+            path_join = pathlib.Path.__truediv__
+
+            def guard_commit_path(path, child):
+                joined = path_join(path, child)
+                if joined == exit_path and sys._getframe(1).f_globals.get("__name__") == image_vm.__name__:
+                    assert not (root / "pid").exists(), "exit destination was allocated after spawn"
+                    (root / "commit-path-prepared").touch()
+                return joined
+
+            exit_path = directory / "exit.json"
+            patches.enter_context(patch.object(pathlib.Path, "__truediv__", guard_commit_path))
         patches.enter_context(patch.object(vm_startup, "verify_startup", fixture_verify))
         patches.enter_context(patch.object(
             vm_process, "TERM_GRACE_SECONDS",
-            0.2 if startup or signal_fault and mode == "ignore" else vm_process.TERM_GRACE_SECONDS))
+            0.2 if startup or signal_fault and mode == "ignore" or mode == "stages:priority-kill-fast"
+            else vm_process.TERM_GRACE_SECONDS))
         patches.enter_context(patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)))
         for patcher in (
             patch.object(image_lifecycle, "RECEIPT_STEPS", table),
@@ -1287,7 +1378,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             *(() if mode in UNREGISTER_MODES else (patch.object(image_lifecycle, "disk_headroom"),)),
             patch.object(image_lifecycle, "process_priority",
                          side_effect=(priority_timeout
-                                      if mode == "stages:priority-timeout"
+                                      if mode.startswith("stages:priority-")
                                       else priority_sample),
                          return_value=FIXTURE_PRIORITY),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
@@ -1317,7 +1408,8 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         lost_already_collected = ":lost-already-collected:" in child_fault
         lost_return = ":lost-return:" in child_fault or lost_already_collected
         sweep = ":sweep" in child_fault
-        if waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault:
+        priority_failure = mode.startswith("stages:priority-")
+        if waits_for_guest_ready(mode) or priority_failure or mode == "isolated:exclusive" or qemu_fault:
             os.mkfifo(root / "guest-ready")
         if mode.startswith("isolated:unregister"):
             os.mkfifo(root / "unregister-ready")
@@ -1419,6 +1511,8 @@ def term(_signum, _frame):
         sys.exit(0)
 if mode != "slow":
     signal.signal(signal.SIGTERM, term)
+if {priority_failure!r}:
+    signal.pthread_sigmask(signal.SIG_BLOCK, {{signal.SIGTERM}})
 fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
 fds.update(int(arg.split("/dev/fdset/")[1]) for arg in sys.argv if "/dev/fdset/" in arg)
@@ -1431,7 +1525,21 @@ with (root / "children").open("a") as logged:
 (root / "ready").touch()
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
-if {(waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault) and not sweep!r}:
+if {priority_failure!r}:
+    console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
+    os.set_blocking(console, True)
+    payload = b"STAGE 1 probe_start 0\\r\\n" * 4000
+    assert len(payload) == 92000
+    with (root / "guest-ready").open("wb", buffering=0) as ready:
+        ready.write(b"1")
+    assert signal.sigwait({{signal.SIGTERM}}) == signal.SIGTERM
+    (root / "term-before-write").write_text(str(time.monotonic()))
+    if mode.startswith("stages:priority-kill"):
+        assert fcntl.fcntl(console, fcntl.F_SETPIPE_SZ, 4096) == 4096
+        os.write(console, payload)
+        raise AssertionError("undrained serial write unexpectedly completed")
+    term(signal.SIGTERM, None)
+if {(waits_for_guest_ready(mode) or mode == "isolated:exclusive" or qemu_fault) and not (sweep or priority_failure)!r}:
     with (root / "guest-ready").open("wb", buffering=0) as ready:
         ready.write(b"1")
 if {lost_return and qemu_fault!r}:
@@ -1554,7 +1662,8 @@ if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-tim
             signal.pause()
         sys.exit(0)
     os.write(1, b"CERALIVE_IMAGE_STREAM_V1\\n")
-if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(("fault:", "receipt-step:")):
+if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(
+        ("fault:", "receipt-step:", "readback:", "teardown-memory:", "commit-memory:")):
     os.write(1, (root / "probe.frame").read_bytes())
     sys.exit(0)
 while True:
@@ -1602,7 +1711,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             env={"PATH": f"{root}:/usr/bin:/bin", "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1"},
             start_new_session=True, stdout=subprocess.PIPE, stderr=stderr_target,
         ) as launcher:
-            seconds = 27 if mode == "ignore" else 5 if full_stderr else 8
+            seconds = 27 if mode in {"ignore", "stages:priority-kill"} else 5 if full_stderr else 8
             try:
                 _, stderr = launcher.communicate(timeout=seconds)
                 stderr = stderr or b""
@@ -1807,10 +1916,45 @@ os.execvp(sys.argv[1], sys.argv[1:])
             with (root / "fixture.lock").open("rb") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
-        if mode == "unreadable-exit":
-            assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
-            assert launcher.returncode == 1 and b"fixture final receipt readback" in stderr
+        if mode == "unreadable-exit" or mode.startswith("readback:"):
+            row = json.loads((directory / "exit.json").read_text())
+            assert launcher.returncode == row["launcher_exit"] == 0, (mode, row, stderr)
+            assert row["qemu_reaped"] and row["qemu_exit"] == 0 and row["stream_bytes"] == 836
+            assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+            assert (root / "readback-injected").exists()
+            assert (root / "readback-retried").exists() == (mode == "readback:eintr")
+            assert (b"fixture final receipt readback" in stderr) == (mode != "readback:eintr")
             assert json.loads((root / "leaks").read_text()) == []
+            assert (directory / "teardown.json").exists() and not (root / "returns/active.json").exists()
+            assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+            return
+        if mode.startswith(("teardown-memory:", "commit-memory:")) or mode == "fault:fail:teardown-rename":
+            assert not (root / "returns/active.json").exists(), (mode, stderr)
+            assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+            assert not list(root.rglob(".receipt-*")), (mode, stderr)
+            assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+            teardown_path = directory / "teardown.json"
+            exit_path = directory / "exit.json"
+            if mode.startswith("commit-memory:"):
+                assert (root / "commit-path-prepared").exists()
+                assert launcher.returncode == json.loads(exit_path.read_text())["launcher_exit"] == 0, (mode, stderr)
+                assert json.loads(teardown_path.read_text())["qemu_reaped"]
+                if mode == "commit-memory:baseline":
+                    return {"points": (root / "commit-points").read_text().splitlines()}
+            elif mode in {"teardown-memory:timestamp", "teardown-memory:journal-unlink"}:
+                assert launcher.returncode == json.loads(exit_path.read_text())["launcher_exit"] == 0, (mode, stderr)
+                row = json.loads(teardown_path.read_text())
+                assert row["qemu_reaped"] and row["qemu_exit"] == 0
+                assert (row["ended_at"] is None) == (mode == "teardown-memory:timestamp")
+            else:
+                assert launcher.returncode == 1, (mode, stderr)
+                if exit_path.exists():
+                    assert json.loads(exit_path.read_text())["launcher_exit"] == 1
+                surviving = {"dir_open", "dir_sync", "dir_close", "temp_cleanup", "log_errors", "journal-sync"}
+                assert teardown_path.exists() == (mode.removeprefix("teardown-memory:") in surviving), (mode, stderr)
+            assert (root / "injected").exists(), (mode, stderr)
+            if (root / "launcher-children").exists():
+                assert json.loads((root / "launcher-children").read_text()) == []
             return
         if mode == "audit-mutation":
             assert launcher.returncode == 0, stderr.decode()
@@ -1981,14 +2125,25 @@ os.execvp(sys.argv[1], sys.argv[1:])
             if ownership_case is not None:
                 stable["close_inventory"] = json.loads((root / "ownership-inventory").read_text())
             return stable
-        if mode in STAGE_MODES:
+        if mode in STAGE_MODES or priority_failure:
             stalled = mode in {"stages:timeout", "stages:before-header", "stages:blocked-header"}
             logging_error = mode == "stages:logging-error"
             exit_row = json.loads((directory / "exit.json").read_text())
             teardown = json.loads((directory / "teardown.json").read_text())
-            if mode == "stages:priority-timeout":
+            if priority_failure:
                 assert launcher.returncode == exit_row["launcher_exit"] == 1
                 assert b"ioprio_get fixture" in stderr and b"image guest (last stage" not in stderr
+                elapsed = time.monotonic() - float((root / "term-before-write").read_text())
+                assert not (root / "returns/active.json").exists()
+                assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
+                if mode.startswith("stages:priority-kill"):
+                    grace = 0.2 if mode.endswith("-fast") else vm_process.TERM_GRACE_SECONDS
+                    assert elapsed <= grace + 2, elapsed
+                    assert exit_row["qemu_exit"] == teardown["qemu_exit"] == -signal.SIGKILL
+                else:
+                    assert (root / "term").exists()
+                    assert exit_row["qemu_exit"] == teardown["qemu_exit"] == 0
+                assert exit_row["qemu_reaped"] and teardown["qemu_reaped"]
                 return
             if mode in {"stages:at-cap", "stages:over-cap"}:
                 assert launcher.returncode == exit_row["launcher_exit"] == 0, stderr.decode()
@@ -2096,6 +2251,13 @@ os.execvp(sys.argv[1], sys.argv[1:])
 def test_probe_receipts_record_safe_console_tail_and_last_stage_on_success_and_timeout() -> None:
     for mode in STAGE_MODES:
         cancelled_fixture(mode)
+
+
+def test_priority_failure_reaps_at_the_serial_write_boundary() -> None:
+    for _ in range(20):
+        cancelled_fixture("stages:priority-timeout")
+        cancelled_fixture("stages:priority-kill-fast")
+    cancelled_fixture("stages:priority-kill")
 
 
 def test_diagnostic_acquisition_and_sequence_are_independent_of_the_probe() -> None:
@@ -2808,6 +2970,8 @@ def test_every_catchable_signal_stays_blocked_through_committed_pair_exit() -> N
 def test_single_exit_point_uses_readback_after_return_or_exception() -> None:
     cancelled_fixture("late-exit")
     cancelled_fixture("unreadable-exit")
+    for fault in ("eintr", "oserror", "memory"):
+        cancelled_fixture(f"readback:{fault}")
 
 
 def test_each_receipt_step_preserves_commit_and_releases_owned_resources() -> None:
@@ -2818,6 +2982,21 @@ def test_each_receipt_step_preserves_commit_and_releases_owned_resources() -> No
     for step, _cleanup in image_lifecycle.RECEIPT_STEPS:
         for action in ("exception", "oserror", "systemexit", "interrupt", "term-before", "term-during", "memory"):
             cancelled_fixture(f"receipt-step:{step.__name__}:{action}")
+
+
+def test_teardown_survives_allocation_faults_without_stranding_the_journal() -> None:
+    for point in ("timestamp", "receipt", "journal-unlink", "journal-sync",
+                  *(step.__name__ for step, _ in image_lifecycle.RECEIPT_STEPS)):
+        cancelled_fixture(f"teardown-memory:{point}")
+    cancelled_fixture("fault:fail:teardown-rename")
+
+
+def test_validated_probe_retries_each_commit_preparation_allocation() -> None:
+    baseline = cancelled_fixture("commit-memory:baseline")
+    assert baseline is not None and len(baseline["points"]) >= 7
+    for point in baseline["points"]:
+        cancelled_fixture(f"commit-memory:{point}")
+    print(f"{len(baseline['points'])} post-validation commit statements", flush=True)
 
 
 def test_receipt_audit_detects_executed_work_outside_step_table() -> None:
@@ -2836,6 +3015,7 @@ def test_failed_verifier_receipt_does_not_publish_pair_acceptance() -> None:
         real_receipt = image_lifecycle.receipt
 
         def measure(_args, _parser, _cancellation, jobs):
+            image_vm.prepare_exit_receipt(attempt, False, _cancellation)
             for directory in (build, verifier):
                 state = {"stop_reason": "transport validated", "identity": asdict(IDENTITY)}
                 jobs.append(SimpleNamespace(directory=directory, state=state))
@@ -2930,6 +3110,7 @@ def test_pair_publication_failure_and_signal_matrix() -> None:
 
                     def measure(_args, _parser, flag, jobs):
                         nonlocal active_name
+                        image_vm.prepare_exit_receipt(attempt, False, flag)
                         for directory in (build, verifier):
                             state = {"identity": info, "stop_reason": "guest exited; transport validated"}
                             jobs.append(SimpleNamespace(directory=directory, state=state))
@@ -3466,6 +3647,9 @@ if __name__ == "__main__":
         fixture_launcher(pathlib.Path(sys.argv[2]), sys.argv[3], signal.Signals(int(sys.argv[4])))
         raise AssertionError("launcher did not exit")
     selections = {
+        "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
+        "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,
+                           test_validated_probe_retries_each_commit_preparation_allocation),
         "--transport": TransportCases.tests, "--ownership": OwnershipCases.tests,
         "--process": ProcessCases.tests,
         "--helper-process": PreparationHelperCases.tests,

@@ -151,13 +151,19 @@ The launcher retries interrupted operations where safe, falls back for
 optional operations, and preserves the artifact, verdict and exit status.
 A required I/O, validation or publication operation that cannot complete
 still fails closed. Exceptions in diagnostics use pre-encoded unavailable
-fields without affecting the verdict. A one-shot `MemoryError` before the
-probe receipt rename gets one retry of the same outcome after cleanup. After
-rename the committed receipt decides the exit status.
+fields without affecting the verdict. The launcher prepares the exit receipt
+paths and diagnostic fallback bytes before guest launch. A one-shot
+`MemoryError` in probe finalization before rename gets one retry of the same
+outcome. On successful rename the launcher records the committed exit status
+in its preallocated slot. Verification retries an interrupted read once.
+Verification failure is reported without changing the receipt or exit status.
 
 An arbitrary main-path `MemoryError` fails the attempt with a nonzero exit.
 On the tested post-spawn paths the launcher writes teardown, reaps its child,
-closes owned descriptors, and removes the active journal. A failed exit
+closes owned descriptors, and removes the active journal. Teardown uses a
+null `ended_at` if the timestamp cannot be obtained because of an allocation
+failure. If teardown cannot be written after the child and overlay are safely
+released, the launcher still retires the journal and exits nonzero. A failed exit
 receipt may be absent. A success receipt requires both a real successful
 guest exit and independent artifact validation. Persistent allocation
 failure and kernel OOM termination are outside cooperative cleanup. Admission
@@ -168,7 +174,8 @@ collected QEMU's wait status. If pidfd signalling is unavailable or fails,
 the launcher signals its own unreaped child by PID. ESRCH already means the
 child is gone. `waitpid` collects the status independently of the pidfd.
 The launcher gives TERM up to 20 seconds, then sends KILL and collects the
-exit status. Only collecting the wait status records a reap. Handle cleanup
+exit status. Escalation does not depend on the guest closing or draining an
+output pipe. Only collecting the wait status records a reap. Handle cleanup
 can mark capture lost without changing that status or the probe outcome.
 
 The guest flushes and closes the artifact port before attempting

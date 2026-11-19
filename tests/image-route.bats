@@ -98,6 +98,18 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image launcher retires the journal and retries commit after allocation faults" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --finalization
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image launcher reaps at the blocked serial write boundary" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --term-boundary
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image profile pair publication and admission preserve lifecycle guarantees" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --pair-and-admission
   printf '%s\n' "$output"

@@ -21,7 +21,9 @@ import tarfile
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
-from image_lifecycle import ImageJob, ReceiptError, create_directory, receipt, reconcile, report_error, sync_directory
+from image_lifecycle import (
+    ImageJob, ReceiptError, create_directory, receipt, receipt_temporary, reconcile, report_error, sync_directory,
+)
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import Identity, StreamError, decode, verify_sidecar
@@ -160,6 +162,7 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
     """One owned overlay, exit receipt and independent host transport validation."""
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
+    artifacts = directory / "artifacts"
     create_directory(directory)
     with ImageJob(directory, identity, request["capsule"], cancellation,
                   probe=request["payload"]["operation"] == "probe") as job:
@@ -183,7 +186,7 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
         disk_headroom(((directory, 16 * GIB),))
         validate_return(job, request["payload"]["operation"] != "measure")
         job.state["stop_reason"] = "guest exited; transport validated"
-    return directory / "artifacts"
+    return artifacts
 
 
 def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
@@ -192,6 +195,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     jobs: list[ImageJob] = []
     error = None
     accepted_sha = None
+    retry_commit = args.image_mode == "probe"
     try:
         acceptance = measure_image(args, parser, cancellation, jobs)
         if acceptance is not None:
@@ -202,18 +206,18 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         return 1
     except IMAGE_ERRORS as exc:
         error = exc
-    if not jobs:
-        if error is not None:
-            report_error(error)
-        return 1
-
-    build = jobs[0]
-    probe = args.image_mode == "probe"
-    path = (build.directory if probe else build.directory.parent) / "exit.json"
-    cancellation.exit_receipt = path
-    retry_commit = probe
     while True:
         try:
+            if not jobs:
+                if error is not None:
+                    report_error(error)
+                return 1
+            if cancellation.exit_status is not None:
+                return cancellation.exit_status
+            build = jobs[0]
+            probe = args.image_mode == "probe"
+            path = cancellation.exit_receipt
+            assert path is not None
             if cancellation.requested:
                 error = Cancelled("runner cancelled")
             status = int(error is not None)
@@ -227,12 +231,15 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                 row["pair_complete"] = not status
                 if not status:
                     row["acceptance_sha256"] = accepted_sha
-            # Rename commits the receipt that the CLI will read to determine its status.
-            receipt(path, row, outcome=cancellation, diagnostic=error, probe=build if probe else None)
+            receipt(path, row, outcome=cancellation, diagnostic=error, probe=build if probe else None,
+                    temporary=cancellation.exit_temporary)
+            return status
         except Cancelled as exc:
             error = exc
             continue
         except (OSError, MemoryError) as exc:
+            if cancellation.exit_status is not None:
+                return cancellation.exit_status
             allocation_fault = isinstance(exc, MemoryError) or (
                 isinstance(exc, ReceiptError) and isinstance(exc.__cause__, MemoryError))
             # The receipt transaction absorbs step failures after its rename.
@@ -241,7 +248,12 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                 continue
             report_error(exc)
             return 1
-        return row["launcher_exit"]
+
+
+def prepare_exit_receipt(directory: Path, probe: bool, cancellation: Cancellation) -> None:
+    """Allocate the final transaction paths before the attempt can spawn a child."""
+    cancellation.exit_receipt = (directory / "build" if probe else directory) / "exit.json"
+    cancellation.exit_temporary = receipt_temporary(cancellation.exit_receipt)
 
 
 def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
@@ -275,15 +287,19 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     disk_admission(base.parent, store, retained)
     directory = store / identity.attempt
     create_directory(directory)
+    probe = args.image_mode == "probe"
+    prepare_exit_receipt(directory, probe, cancellation)
+    probe_result = directory / "build/artifacts/verification.json" if probe else None
+    expected_probe = {"schema": 1, "identity": asdict(identity), "network_denied": True} if probe else None
     CAPS.qemu_limit()
     request = {"capsule": args.input_capsule, "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {
                    "schema": 1, "identity": asdict(identity), "operation": args.image_mode, "trust": trust}}
     artifacts = execute(base, directory / "build", request, cancellation, jobs)
     cancellation.check()
-    if args.image_mode == "probe":
-        result = json.loads((artifacts / "verification.json").read_text())
-        if result != {"schema": 1, "identity": asdict(identity), "network_denied": True}:
+    if probe_result is not None:
+        result = json.loads(probe_result.read_text())
+        if result != expected_probe:
             raise StreamError("offline probe receipt mismatch")
         return None
     capsule = directory / "verifier-input.tar"

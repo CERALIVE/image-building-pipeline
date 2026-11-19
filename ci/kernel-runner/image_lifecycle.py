@@ -88,15 +88,21 @@ def create_directory(path: Path, *, parents: bool = False) -> None:
     sync_directory(path.parent)
 
 
+def receipt_temporary(path: Path) -> Path:
+    return path.parent / (".receipt-" + uuid.uuid4().hex)
+
+
 class Receipt:
     """Own the receipt's temporary file, rename and cleanup as a single transaction."""
 
     def __init__(self, path: Path, row: dict, outcome: Cancellation | None,
-                 diagnostic: BaseException | None, probe: ImageJob | None = None) -> None:
+                 diagnostic: BaseException | None, probe: ImageJob | None = None,
+                 temporary: Path | None = None) -> None:
         self.path = path
         self.row = row
         self.outcome = outcome
-        self.temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
+        self.temporary = temporary or receipt_temporary(path)
+        self.status = row["launcher_exit"] if outcome is not None else None
         self.file: TextIO | BinaryIO | None = None
         self.probe = probe
         self.directory_fd: int | None = None
@@ -152,6 +158,8 @@ class Receipt:
             if signal.sigpending().intersection(STOP_SIGNALS):
                 raise Cancelled("runner cancelled")
         os.replace(self.temporary, self.path)
+        if self.outcome is not None:
+            self.outcome.exit_status = self.status
         self.renamed = True
 
     def dir_open(self) -> None:
@@ -182,8 +190,9 @@ RECEIPT_STEPS = (
 
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
-            diagnostic: BaseException | None = None, probe: ImageJob | None = None) -> None:
-    transaction = Receipt(path, row, outcome, diagnostic, probe)
+            diagnostic: BaseException | None = None, probe: ImageJob | None = None,
+            temporary: Path | None = None) -> None:
+    transaction = Receipt(path, row, outcome, diagnostic, probe, temporary)
     failure: BaseException | None = None
     for action, cleanup in RECEIPT_STEPS:
         if failure is not None and not cleanup and not transaction.renamed:
@@ -329,12 +338,15 @@ class ImageJob:
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.capture_scope = ExitStack()
-        self.active = directory.parents[1] / "active.json"
+        self.active_directory = directory.parents[1]
+        self.active = self.active_directory / "active.json"
+        self.teardown = directory / "teardown.json"
+        self.teardown_temporary = receipt_temporary(self.teardown)
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
                       "launcher": process_identity(os.getpid()), "acquired_at": time.time(),
                       "stop_reason": "not started", "qemu_reaped": False,
                       "stream_budget": CAPS.stream_max,
-                      "input_descriptor_closed": False, "overlay_descriptor_closed": False}
+                      "input_descriptor_closed": False, "overlay_descriptor_closed": False, "ended_at": None}
         if probe:
             self.fallback_fields = encode_diagnostic_fields(UNAVAILABLE_DIAGNOSTICS)
         self.stage_tail = None
@@ -361,24 +373,33 @@ class ImageJob:
         return self
 
     def __exit__(self, _type, error, _traceback) -> None:
-        # Attempt every descriptor close even if an earlier close or sync fails.
-        with self.outputs:
-            try:
-                self.capture_scope.close()
-            finally:
-                self.inputs.close()
-            self.state["input_descriptor_closed"] = True
-        if isinstance(error, ChildContainmentError):
-            # Retain the unfinished journal and do not publish a terminal receipt.
-            return
-        self.state["ended_at"] = time.time()
-        if error:
-            self.state["stop_reason"] = type(error).__name__
-        receipt(self.directory / "teardown.json", self.state)
-        if (self.state["overlay_descriptor_closed"] and "overlay_inode" in self.state
-                and ("qemu" not in self.state or self.state["qemu_reaped"])):
-            self.active.unlink(missing_ok=True)
-            sync_directory(self.active.parent)
+        containment_unknown = isinstance(error, ChildContainmentError)
+        try:
+            # Attempt every descriptor close even if an earlier close or sync fails.
+            with self.outputs:
+                try:
+                    self.capture_scope.close()
+                finally:
+                    self.inputs.close()
+                self.state["input_descriptor_closed"] = True
+            if not containment_unknown:
+                try:
+                    self.state["ended_at"] = time.time()
+                except MemoryError:
+                    pass  # The preallocated null timestamp records unavailable timing.
+                if error is not None:
+                    self.state["stop_reason"] = type(error).__name__
+                receipt(self.teardown, self.state, temporary=self.teardown_temporary)
+        finally:
+            # A failed receipt must not pin a safely closed attempt in the journal.
+            if (not containment_unknown and self.state["overlay_descriptor_closed"]
+                    and "overlay_inode" in self.state
+                    and ("qemu" not in self.state or self.state["qemu_reaped"])):
+                try:
+                    self.active.unlink(missing_ok=True)
+                except (InterruptedError, MemoryError):
+                    self.active.unlink(missing_ok=True)
+                sync_directory(self.active_directory)
 
     def lose_diagnostics(self) -> None:
         self.capture_lost = True

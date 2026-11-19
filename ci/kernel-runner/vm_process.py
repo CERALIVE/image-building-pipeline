@@ -82,11 +82,16 @@ class ChildContainmentError(OSError):
 
 
 class Cancellation:
-    """A one-way flag set by the main thread's signal handler."""
+    """Signal state and the authoritative status of a renamed exit receipt."""
 
-    requested = False
-    exit_receipt: Path | None = None
-    finalizing = False
+    __slots__ = ("requested", "exit_receipt", "exit_temporary", "exit_status", "finalizing")
+
+    def __init__(self) -> None:
+        self.requested = False
+        self.exit_receipt: Path | None = None
+        self.exit_temporary: Path | None = None
+        self.exit_status: int | None = None
+        self.finalizing = False
 
     def request(self, _signum: int, _frame) -> None:
         self.requested = True
