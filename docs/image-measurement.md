@@ -121,10 +121,14 @@ releases its artifact writer before capture so it can see EOF, and teardown
 still owns the writer if that release fails.
 
 The host acquires QEMU and helper processes through the same cleanup scope.
-It takes ownership before registering the child's pipes. If registration fails,
-it stops and reaps the child and closes even the pipes whose registration
-never ran. A helper failure during an active image attempt records a failed
-outcome. Admission failures before an attempt still produce no attempt receipt.
+Each child installs the Linux parent-death signal and reports its PID over a
+private socket before exec. The launcher can kill and reap that exact child
+if `Popen` raises after creating it. A helper's output buffers and selector
+are prepared before spawn. If pipe or selector registration fails, teardown
+reaps the child and releases both registered and unregistered pipes.
+A helper setup failure during an active image attempt records a failed
+outcome through the same exit receipt transaction, including after artifact
+validation. Admission failures before an attempt still produce no attempt receipt.
 
 If pidfd registration fails, the launcher keeps the handle until it has
 collected QEMU's wait status. If pidfd signalling is unavailable or fails,

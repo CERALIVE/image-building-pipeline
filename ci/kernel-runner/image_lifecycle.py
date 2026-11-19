@@ -50,7 +50,6 @@ class ReceiptError(OSError):
 @contextmanager
 def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = None):
     """Shared anonymous disk lifecycle used by vm.py's kernel and image paths."""
-    from vm import die_with_parent
     overlay_file = tempfile.TemporaryFile(prefix="job-", dir=base.parent)
     try:
         disk_fd = overlay_file.fileno()
@@ -59,7 +58,7 @@ def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = Non
         overlay = Path(f"/proc/self/fd/{disk_fd}")
         run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2",
              "-b", str(base), str(overlay)], cancellation=cancellation or Cancellation(),
-            pass_fds=(disk_fd,), preexec_fn=partial(die_with_parent, os.getpid()), timeout=180)
+            pass_fds=(disk_fd,), timeout=180)
         yield overlay, disk_fd
     finally:
         close_transport(overlay_file.close)

@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+import ctypes
 import errno
+from functools import partial
 from io import FileIO
 import os
 from pathlib import Path
 import selectors
 import signal
+import socket
 import subprocess
 import time
 from typing import Callable
 
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
+SPAWN_REPORT_SECONDS = 5
 CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 CHILD_CWD = "/"
@@ -126,6 +130,44 @@ def register_child_pipes(stack: ExitStack, process: subprocess.Popen) -> None:
             register_close(stack, role, pipe.close)
 
 
+def die_with_parent(parent: int, *, report_pid: socket.socket | None = None) -> None:
+    """Bind the child to its creator and identify it before exec."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if os.getppid() != parent:
+        os.kill(os.getpid(), signal.SIGKILL)
+    if report_pid is not None:
+        report_pid.sendall(str(os.getpid()).encode("ascii"))
+
+
+def reap_failed_spawn(receiver: socket.socket, on_reaped: Callable[[int], None] | None) -> None:
+    """Recover a child even when the parent never received its Popen object."""
+    try:
+        identity = receiver.recv(32)
+    except TimeoutError:
+        # A stopped child may not have reached preexec. Parent death still
+        # triggers SIGKILL or the child's parent check when it resumes.
+        return
+    if not identity:
+        return
+    pid = int(identity)
+    try:
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if not waited:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        # Popen may already have collected the child on exec failure.
+        return
+    if on_reaped is not None:
+        on_reaped(os.waitstatus_to_exitcode(status))
+
+
 @contextmanager
 def spawn_owned(args: list[str], *, cancellation: Cancellation, registration: bool = False,
                 on_reaped: Callable[[int], None] | None = None,
@@ -139,13 +181,21 @@ def spawn_owned(args: list[str], *, cancellation: Cancellation, registration: bo
     with ExitStack() as pipes, ExitStack() as handles:
         try:
             try:
-                process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD,
-                                           env=child_environment(registration=registration), **options)
+                receiver, sender = socket.socketpair(type=socket.SOCK_SEQPACKET)
+                with receiver, sender:
+                    receiver.settimeout(SPAWN_REPORT_SECONDS)
+                    setup = partial(die_with_parent, os.getpid(), report_pid=sender)
+                    try:
+                        process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD, preexec_fn=setup,
+                                                   env=child_environment(registration=registration), **options)
+                    except (MemoryError, OSError, subprocess.SubprocessError) as error:
+                        close_transport(sender.close)
+                        reap_failed_spawn(receiver, on_reaped)
+                        # A failed constructor may keep partial stdio owners in its traceback.
+                        raise ChildSetupError(f"cannot start child {args[0]}") from error.with_traceback(None)
                 children.append(process)
                 register_child_pipes(pipes, process)
-            except (MemoryError, OSError) as error:
-                if process is None:
-                    raise
+            except (MemoryError, OSError, subprocess.SubprocessError) as error:
                 raise ChildSetupError(f"cannot register child {args[0]}") from error
             if on_loss is not None:
                 try:
@@ -288,12 +338,17 @@ def run(args: list[str], *, timeout: int, cancellation: Cancellation,
     if capture_output:
         options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.monotonic() + timeout
-    with spawn_owned(args, cancellation=cancellation, registration=registration, **options) as process:
-        with ExitStack() as owners:
+    owners = None
+    try:
+        try:
+            owners = ExitStack()
+            output = [bytearray(), bytearray()]
+            events = selectors.PollSelector()
+            register_close(owners, "helper-selector", events.close)
+        except (MemoryError, OSError) as error:
+            raise ChildSetupError(f"cannot prepare helper output {args[0]}") from error
+        with spawn_owned(args, cancellation=cancellation, registration=registration, **options) as process:
             try:
-                output = [bytearray(), bytearray()]
-                events = selectors.PollSelector()
-                register_close(owners, "helper-selector", events.close)
                 if capture_output:
                     events.register(process.stdout, selectors.EVENT_READ, 0)
                     events.register(process.stderr, selectors.EVENT_READ, 1)
@@ -314,7 +369,10 @@ def run(args: list[str], *, timeout: int, cancellation: Cancellation,
                             events.unregister(key.fileobj)
                 except InterruptedError:
                     continue
-        wait(process, deadline, cancellation)
+            wait(process, deadline, cancellation)
+    finally:
+        if owners is not None:
+            owners.close()
     cancellation.check()
     stdout, stderr = map(bytes, output) if capture_output else (None, None)
     result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)

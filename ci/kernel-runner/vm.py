@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-import ctypes
 from contextlib import ExitStack
-from functools import partial
 import hashlib
 from io import FileIO
 import json
@@ -23,7 +21,8 @@ import time
 import yaml
 from image_lifecycle import job_disk, report_error
 from vm_process import (
-    STOP_SIGNALS, Cancellation, close_transport, read_check_script, register_close, run, spawn_owned, wait,
+    STOP_SIGNALS, Cancellation, close_transport, die_with_parent, read_check_script, register_close, run,
+    spawn_owned, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -32,16 +31,6 @@ IMAGE_URL = "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudim
 IMAGE_SHA = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
 RUNNER_VERSION = "2.338.2"
 RUNNER_SHA = "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
-
-
-def die_with_parent(parent: int) -> None:
-    """Kernel-enforced cleanup still works when the launcher receives SIGKILL."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(1, signal.SIGKILL, 0, 0, 0):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
-    if os.getppid() != parent:
-        os.kill(os.getpid(), signal.SIGKILL)
 
 
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
@@ -117,7 +106,6 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                     reader.join()
 
         with spawn_owned(args, cancellation=cancellation, pass_fds=descriptors,
-                         preexec_fn=partial(die_with_parent, os.getpid()),
                          stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, on_loss=on_loss,
                          on_reaped=image_job.record_reaped if image_job else None,
                          after_reap=finish_capture) as process:
@@ -178,7 +166,6 @@ def main(cancellation: Cancellation) -> int:
         raise RuntimeError("run vm.py directly under flock --exclusive --close")
     die_with_parent(parent)
     cancellation.check()
-    child_setup = partial(die_with_parent, os.getpid())
     base = args.base.resolve()
     if "," in str(base):
         parser.error("commas are not supported in VM disk paths")
@@ -201,16 +188,16 @@ def main(cancellation: Cancellation) -> int:
             image = work / "ubuntu.img"
             run(["curl", "-fSL", "--connect-timeout", "30", "--max-time", "900",
                  IMAGE_URL, "-o", str(image)], cancellation=cancellation,
-                preexec_fn=child_setup, timeout=900)
+                 timeout=900)
             with image.open("rb") as downloaded:
                 image_digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
             if image_digest != IMAGE_SHA:
                 raise RuntimeError("Ubuntu cloud image digest mismatch")
             disk = work / "base.qcow2"
             run(["qemu-img", "convert", "-O", "qcow2", str(image), str(disk)],
-                cancellation=cancellation, preexec_fn=child_setup, timeout=300)
+                cancellation=cancellation, timeout=300)
             run(["qemu-img", "resize", str(disk), "128G" if args.profile == "image" else "240G"],
-                cancellation=cancellation, preexec_fn=child_setup, timeout=180)
+                cancellation=cancellation, timeout=180)
             files = []
             for source, destination in (
                 ("provision.sh", "/root/provision.sh"),
@@ -249,7 +236,7 @@ def main(cancellation: Cancellation) -> int:
             seed = work / "seed.iso"
             run(["xorriso", "-as", "mkisofs", "-quiet", "-volid", "cidata",
                  "-joliet", "-rock", "-o", str(seed), str(work / "user-data"), str(work / "meta-data")],
-                cancellation=cancellation, preexec_fn=child_setup, timeout=180)
+                cancellation=cancellation, timeout=180)
             boot(disk, b"", "base", args.timeout, seed, image_base=args.profile == "image",
                  cancellation=cancellation)
             if args.profile == "image" and disk.stat().st_blocks * 512 > 32 * 1024**3:
@@ -280,8 +267,7 @@ def main(cancellation: Cancellation) -> int:
                 "-f", f"name=kernel-release-{os.getpid()}", "-F", f"runner_group_id={args.group_id}",
                 "-f", "labels[]=self-hosted", "-f", "labels[]=Linux", "-f", "labels[]=X64",
                 "-f", "labels[]=ceralive-kernel-vm", "-f", "work_folder=_work",
-            ], cancellation=cancellation, capture_output=True, timeout=180,
-                registration=True, preexec_fn=child_setup)
+            ], cancellation=cancellation, capture_output=True, timeout=180, registration=True)
             payload = json.loads(response.stdout)["encoded_jit_config"].encode()
             if not payload or b"\n" in payload:
                 raise RuntimeError("invalid JIT response")

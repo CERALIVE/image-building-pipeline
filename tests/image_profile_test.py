@@ -188,6 +188,7 @@ def descriptor_snapshot() -> dict[int, tuple[str, int, int]]:
 def waits_for_guest_ready(mode: str) -> bool:
     return (not mode.startswith(("fault:", "receipt-step:", "pair:"))
             and mode not in ("audit-mutation", "startup:success", "startup:failure", "startup:signal",
+                             "isolated:validated-helper",
                              *SUCCESS_GUEST_MODES, *STAGE_MODES, *ISOLATION_MODES, *PRESTART_MODES))
 
 
@@ -621,6 +622,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             if mode in (*ISOLATION_MODES, "stages:at-cap", "stages:over-cap"):
                 assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
             validate_return(job, verifier)
+            if mode == "isolated:validated-helper":
+                image_resources.process_priority(os.getpid(), job.cancellation)
             if mode == "isolated:fallback:MemoryError":
                 class NoLateDefaults(dict):
                     def __or__(self, other):
@@ -787,6 +790,36 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 if child_fault:
                     target, operation, kind = child_fault.split(":")
                     popen = subprocess.Popen
+                    if operation == "selector-stack":
+                        stack = vm_process.ExitStack
+
+                        def fail_selector_stack():
+                            caller = sys._getframe(1)
+                            args = caller.f_locals.get("args", ())
+                            if caller.f_code is vm_process.run.__code__ and (
+                                args[1] if args[0] == "qemu-img" else args[0]
+                            ) == target:
+                                (root / "child-injected").touch()
+                                raise DIAGNOSTIC_ERRORS[kind]("fixture selector stack allocation")
+                            return stack()
+
+                        patches.enter_context(patch.object(vm_process, "ExitStack", fail_selector_stack))
+                    if operation.startswith("prepare/"):
+                        point = int(operation.split("/")[1])
+
+                        def prepare_trace(frame, event, _arg):
+                            if frame.f_code is not vm_process.run.__code__:
+                                return None
+                            args = frame.f_locals["args"]
+                            if (args[1] if args[0] == "qemu-img" else args[0]) != target:
+                                return None
+                            if event == "line" and frame.f_lineno == point:
+                                (root / "child-injected").touch()
+                                sys.settrace(None)
+                                raise DIAGNOSTIC_ERRORS[kind]("fixture helper preparation")
+                            return prepare_trace
+
+                        sys.settrace(prepare_trace)
 
                     def inject_child(args, *positional, **kwargs):
                         command = args[1] if args[0] == "qemu-img" else args[0]
@@ -795,6 +828,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                             if command == "qemu-system-x86_64":
                                 (root / "spawned-qemu").write_text(str(process.pid))
                             return process
+                        if operation == "baseline":
+                            (root / "child-injected").touch()
+                            raise vm_process.ChildSetupError("fixture helper setup")
                         if command == "qemu-system-x86_64":
                             kwargs.update(stdin=subprocess.PIPE, stderr=subprocess.PIPE)
                         else:
@@ -806,6 +842,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                         if command == "qemu-system-x86_64":
                             (root / "spawned-qemu").write_text(str(process.pid))
                             wait_for_guest()
+                        if operation == "before-return":
+                            (root / "child-injected").touch()
+                            raise DIAGNOSTIC_ERRORS[kind]("fixture lost Popen result")
+                        if operation == "selector-stack":
+                            return process
                         function, point = operation.split("/")
                         point, _, role = point.partition("@")
                         watched = {
@@ -1110,7 +1151,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(image_lifecycle, "process_priority",
                          side_effect=(priority_timeout
                                       if mode == "stages:priority-timeout"
-                                      else image_resources.process_priority if inherited or child_fault else None),
+                                      else image_resources.process_priority
+                                      if inherited or child_fault and mode != "isolated:validated-helper" else None),
                          return_value=FIXTURE_PRIORITY),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
             patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
@@ -1192,7 +1234,9 @@ elif sys.argv[1] == "create":
     if {mode!r} == "overlay":
         root = pathlib.Path({tmp!r})
         (root / "pid").write_text(str(os.getpid()))
-        (root / "owned-fds").write_text(json.dumps([os.readlink(sys.argv[-1])]))
+        inventory = root / "owned-fds.tmp"
+        inventory.write_text(json.dumps([os.readlink(sys.argv[-1])]))
+        inventory.replace(root / "owned-fds")
         (root / "sent").write_text(str(time.monotonic()))
         os.kill(os.getppid(), signal.SIGTERM)
         time.sleep(60)
@@ -1239,7 +1283,9 @@ if mode != "slow":
 fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
 fds.update(int(arg.split("/dev/fdset/")[1]) for arg in sys.argv if "/dev/fdset/" in arg)
-(root / "owned-fds").write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
+inventory = root / "owned-fds.tmp"
+inventory.write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
+inventory.replace(root / "owned-fds")
 (root / "pid").write_text(str(os.getpid()))
 with (root / "children").open("a") as logged:
     print(os.getpid(), file=logged)
@@ -1264,7 +1310,7 @@ if mode.startswith("pair:"):
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
-if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError":
+if mode in (*{ISOLATION_MODES!r}, "isolated:validated-helper") and mode != "isolated:summary-timeout:MemoryError":
     serial = sys.argv[sys.argv.index("-serial") + 1]
     if serial != "null":
         console = int(serial.rsplit("/", 1)[1])
@@ -1304,7 +1350,7 @@ if mode in {ISOLATION_MODES!r} and mode != "isolated:summary-timeout:MemoryError
         sent = 0
         while sent < len(frame):
             sent += os.write(1, frame[sent:])
-        if {child_target in ("ionice", *PREPARATION_HELPERS)!r}:
+        if {child_target in ("ionice", *PREPARATION_HELPERS) and mode != "isolated:validated-helper"!r}:
             signal.pause()
         sys.exit(0)
 if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-timeout:MemoryError"):
@@ -1460,11 +1506,13 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert (root / ("signal-injected" if signal_fault else "child-injected")).exists(), stderr
             assert json.loads((root / "launcher-children").read_text()) == [], (mode, signal_fault, child_fault, stderr)
             assert not (root / "returns/active.json").exists()
-            waits = (root / "launcher-waits").read_text().splitlines()
+            wait_log = root / "launcher-waits"
+            waits = wait_log.read_text().splitlines() if wait_log.exists() else []
             if child_fault:
-                fault_pid = (root / "fault-pid").read_text()
-                assert len([entry for entry in waits if entry.split()[0] == fault_pid]) == 1, waits
-                assert not pathlib.Path(f"/proc/{fault_pid}").exists()
+                if (root / "fault-pid").exists():
+                    fault_pid = (root / "fault-pid").read_text()
+                    assert len([entry for entry in waits if entry.split()[0] == fault_pid]) == 1, waits
+                    assert not pathlib.Path(f"/proc/{fault_pid}").exists()
             if not child_fault.startswith("info:"):
                 exit_row, teardown = [json.loads((directory / name).read_text())
                                       for name in ("exit.json", "teardown.json")]
@@ -1512,6 +1560,12 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert exit_row["stop_reason"] == "ChildSetupError", (exit_row, stderr)
             assert teardown["input_descriptor_closed"] and teardown["overlay_descriptor_closed"]
             assert json.loads((root / "leaks").read_text()) == []
+            if mode == "isolated:validated-helper":
+                assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+                assert (directory / "transport-validation.json").is_file()
+                fields = ("launcher_exit", "stop_reason", "qemu_reaped", "qemu_exit", "stream_bytes",
+                          "input_descriptor_closed", "overlay_descriptor_closed")
+                return {key: exit_row[key] for key in fields}
             return
         if signal_fault and mode == "stages:priority-timeout":
             assert exit_row["stop_reason"] == "TimeoutExpired", (exit_row, stderr)
@@ -1919,7 +1973,8 @@ def test_pidfd_signal_faults_preserve_launcher_reaping_and_receipts() -> None:
     cancelled_fixture("ignore", signal_fault="ENOSYS")
 
 
-def check_post_spawn_faults(targets: tuple[str, ...]) -> None:
+def check_post_spawn_faults(targets: tuple[str, ...], *, mode: str = "isolated:complete",
+                            baseline: dict | None = None) -> None:
     def lines(function, first, last):
         source, start = inspect.getsourcelines(function)
         first = next(i for i, line in enumerate(source) if first in line)
@@ -1930,21 +1985,27 @@ def check_post_spawn_faults(targets: tuple[str, ...]) -> None:
     spawn_lines = lines(spawn, "children.append(", "register_child_pipes(")
     pipe_lines = tuple(dict.fromkeys(statement_lines(vm_process.register_child_pipes.__code__)))
     callback_line = lines(vm_process.register_close, "stack.callback(", "stack.callback(")[0]
-    helper_lines = lines(vm_process.run, "output = [bytearray()", "events.register(process.stderr,")
+    helper_lines = lines(vm_process.run, "if capture_output:", "events.register(process.stderr,")[-3:]
+    prepare_lines = lines(vm_process.run, "owners = ExitStack()", 'register_close(owners, "helper-selector"')
     for target in targets:
         roles = ("child-stdin", "child-stderr") if target == "qemu-system-x86_64" else (
             "child-stdin", "child-stdout", "child-stderr")
         points = [*(f"spawn/{line}" for line in spawn_lines),
                   *(f"pipes/{line}" for line in pipe_lines),
                   "pipes/return",
-                  *(f"callback/{callback_line}@{role}" for role in roles)]
+                  *(f"callback/{callback_line}@{role}" for role in roles),
+                  "before-return"]
+        if target != "qemu-system-x86_64":
+            points.extend(f"prepare/{line}" for line in prepare_lines)
         if target in ("info", "ionice", "gh"):
             points.extend(f"helper/{line}" for line in helper_lines)
         for point in points:
             for error in ("MemoryError", "OSError"):
                 case = f"{target}:{point}:{error}"
                 try:
-                    cancelled_fixture("isolated:complete", child_fault=case)
+                    outcome = cancelled_fixture(mode, child_fault=case)
+                    if baseline is not None:
+                        assert outcome == baseline, (outcome, baseline)
                 except (AssertionError, OSError) as failure:
                     failure.add_note(case)
                     raise
@@ -1956,6 +2017,16 @@ def test_post_spawn_faults_reap_each_child_and_close_its_pipes() -> None:
 
 def test_post_spawn_faults_cover_preparation_and_registration_helpers() -> None:
     check_post_spawn_faults(tuple(PREPARATION_HELPERS))
+
+
+def test_helper_failures_preserve_the_validated_probe_receipt() -> None:
+    mode = "isolated:validated-helper"
+    baseline = cancelled_fixture(mode, child_fault="ionice:baseline:MemoryError")
+    assert baseline is not None and baseline["stream_bytes"] == 836
+    for operation in ("selector-stack", "before-return"):
+        for error in ("MemoryError", "OSError"):
+            assert cancelled_fixture(mode, child_fault=f"ionice:{operation}:{error}") == baseline
+    check_post_spawn_faults(("ionice",), mode=mode, baseline=baseline)
 
 
 def statement_lines(code) -> tuple[str, ...]:
@@ -2241,7 +2312,8 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
 def test_live_and_teardown_closes_go_through_transport_guard() -> None:
     def unguarded(tree, acquisitions):
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-        stack_closes = {"self.inputs.close()", "job.outputs.close()", "writers.close()", "pipes.close()"}
+        stack_closes = {"self.inputs.close()", "job.outputs.close()", "writers.close()",
+                        "pipes.close()", "owners.close()"}
         constructors = {
             "selectors.DefaultSelector", "selectors.PollSelector", "selectors.EpollSelector",
             "selectors.SelectSelector", "open", "os.open", "os.fdopen", "FileIO", "os.memfd_create",
@@ -2273,7 +2345,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             if isinstance(node, ast.With):
                 for item in node.items:
                     if ast.unparse(item.context_expr) not in {
-                        "ExitStack()", "self.outputs",
+                        "ExitStack()", "self.outputs", "receiver", "sender",
                         "job_disk(base, job, cancellation)",
                         "ImageJob(directory, identity, request['capsule'], cancellation, "
                         "probe=request['payload']['operation'] == 'probe')",
@@ -3070,6 +3142,7 @@ class ProcessCases:
     tests = (
         test_pidfd_signal_faults_preserve_launcher_reaping_and_receipts,
         test_post_spawn_faults_reap_each_child_and_close_its_pipes,
+        test_helper_failures_preserve_the_validated_probe_receipt,
     )
 
 

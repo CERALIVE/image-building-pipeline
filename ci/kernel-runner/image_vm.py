@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-from functools import partial
 import hashlib
 import json
 import os
@@ -51,14 +50,12 @@ def image_arguments(job: ImageJob) -> list[str]:
 def validate_base(base: Path, expected_sha256: str,
                   cancellation: Cancellation | None = None) -> None:
     """Require the selected immutable base to reference no additional host file."""
-    from vm import die_with_parent
     cancellation = cancellation or Cancellation()
     if (base.is_symlink() or not base.is_file() or base.stat().st_mode & 0o222
             or digest_file(base, cancellation.check) != expected_sha256):
         raise AdmissionError("image base must be independently verified and read-only")
     info = run(["qemu-img", "info", "--output=json", str(base.absolute())],
-               cancellation=cancellation, capture_output=True, timeout=30,
-               preexec_fn=partial(die_with_parent, os.getpid()))
+               cancellation=cancellation, capture_output=True, timeout=30)
     row = json.loads(info.stdout)
     specific = row.get("format-specific", {}).get("data", {})
     if (row["format"] != "qcow2" or row["virtual-size"] != 128 * GIB
