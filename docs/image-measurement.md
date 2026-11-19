@@ -58,9 +58,12 @@ ananicy-cpp's `Heavy_CPU` can change QEMU from nice 10 to 9 without changing
 the cgroup. The launcher tolerates that adjustment, checks the running QEMU
 process and its cgroup about every five seconds, and stops the attempt if the
 priority floor or required limits are lost at a check. The exit receipt
-includes the last QEMU observation of `nice`, `ionice` (via util-linux), and
-`cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
-is refused for the measurement guest.
+includes the last QEMU observation of `nice`, `ionice`, and
+`cpu_weight` when a live sample was available. The launcher reads I/O priority
+directly using Linux `ioprio_get` on the owned QEMU PID. It rejects realtime
+I/O or a sample it cannot verify while QEMU remains alive. Realtime CPU
+scheduling is also refused. `qemu-img info` and `qemu-img create` finish and
+are reaped before boot. QEMU is the only child during capture.
 
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,
@@ -121,11 +124,10 @@ releases its artifact writer before capture so it can see EOF, and teardown
 still owns the writer if that release fails.
 
 The host acquires QEMU and helper processes through the same cleanup scope.
-Each child installs the Linux parent-death signal and reports its PID over a
-private socket before exec. The launcher can kill and reap that exact child
-if `Popen` raises after creating it. A helper's output buffers and selector
-are prepared before spawn. If pipe or selector registration fails, teardown
-reaps the child and releases both registered and unregistered pipes.
+It prepares the cleanup stacks, pipe callbacks, optional pidfd owner and
+helper output selector before spawn. Each child keeps the existing Linux
+parent-death signal. Once a spawn returns a process, setup failure still
+reaps it and closes every parent pipe.
 A helper setup failure during an active image attempt records a failed
 outcome through the same exit receipt transaction, including after artifact
 validation. Admission failures before an attempt still produce no attempt receipt.

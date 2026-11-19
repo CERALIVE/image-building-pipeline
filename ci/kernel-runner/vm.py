@@ -21,7 +21,7 @@ import time
 import yaml
 from image_lifecycle import job_disk, report_error
 from vm_process import (
-    STOP_SIGNALS, Cancellation, close_transport, die_with_parent, read_check_script, register_close, run,
+    STOP_SIGNALS, Cancellation, ChildSetupError, close_transport, die_with_parent, read_check_script, register_close, run,
     spawn_owned, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
@@ -40,7 +40,12 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
     """Pass the one-job credential in an anonymous RAM fd, not argv or a file."""
     cancellation = cancellation or (image_job.cancellation if image_job else Cancellation())
     cancellation.check()
-    with ExitStack() as startup, ExitStack() as writers:
+    try:
+        startup = ExitStack()
+        writers = ExitStack()
+    except (MemoryError, OSError) as error:
+        raise ChildSetupError("cannot prepare guest ownership") from error
+    with startup, writers:
         config = FileIO("/dev/null", "wb", opener=lambda _path, _flags: os.memfd_create(
             "ceralive-job", os.MFD_CLOEXEC))
         on_loss = image_job.lose_diagnostics if image_job and image_job.probe else None
@@ -88,7 +93,6 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
             artifact_writer = stdout = image_job.prepare_probe_transport(writers)
             stderr = subprocess.DEVNULL
         lines: list[bytes] = []
-        reader = None
 
         def console() -> None:
             for line in process.stdout:
@@ -102,20 +106,33 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                 if artifact_writer is not None:
                     close_transport(artifact_writer.close, on_loss)
             finally:
-                if reader:
+                if reader is not None and reader.ident is not None:
                     reader.join()
 
-        with spawn_owned(args, cancellation=cancellation, pass_fds=descriptors,
-                         stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, on_loss=on_loss,
-                         on_reaped=image_job.record_reaped if image_job else None,
-                         after_reap=finish_capture) as process:
-            writers.close()
-            if image_job:
-                image_job.capture(process, seconds)
-            else:
-                reader = threading.Thread(target=console)
-                reader.start()
-                wait(process, time.monotonic() + seconds, cancellation)
+        reader = None if image_job else threading.Thread(target=console)
+        if image_job:
+            try:
+                image_job.prepare_capture()
+            except (MemoryError, OSError) as error:
+                raise ChildSetupError("cannot prepare guest capture") from error
+        setup_complete = False
+        try:
+            with spawn_owned(args, cancellation=cancellation, pass_fds=descriptors,
+                             stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, on_loss=on_loss,
+                             on_reaped=image_job.record_reaped if image_job else None,
+                             after_reap=finish_capture) as process:
+                writers.close()
+                if reader is not None:
+                    reader.start()
+                setup_complete = True
+                if image_job:
+                    image_job.capture(process, seconds)
+                else:
+                    wait(process, time.monotonic() + seconds, cancellation)
+        except (MemoryError, OSError) as error:
+            if setup_complete:
+                raise
+            raise ChildSetupError("cannot set up guest") from error
         cancellation.check()
         if image_job:
             if process.returncode:

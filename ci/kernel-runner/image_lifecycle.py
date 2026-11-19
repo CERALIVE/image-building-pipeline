@@ -18,7 +18,7 @@ import tempfile
 from typing import BinaryIO, Callable, TextIO
 import uuid
 
-from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
+from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
 from image_stream import CONTROL_LOG_LIMIT, Identity, StreamError
 from vm_process import (
@@ -328,6 +328,7 @@ class ImageJob:
         self.probe = probe
         self.outputs = ExitStack()
         self.inputs = ExitStack()
+        self.capture_scope = ExitStack()
         self.active = directory.parents[1] / "active.json"
         self.state = {"schema": 1, "identity": asdict(identity), "caps": asdict(CAPS),
                       "launcher": process_identity(os.getpid()), "acquired_at": time.time(),
@@ -362,7 +363,10 @@ class ImageJob:
     def __exit__(self, _type, error, _traceback) -> None:
         # Attempt every descriptor close even if an earlier close or sync fails.
         with self.outputs:
-            self.inputs.close()
+            try:
+                self.capture_scope.close()
+            finally:
+                self.inputs.close()
             self.state["input_descriptor_closed"] = True
         self.state["ended_at"] = time.time()
         if error:
@@ -459,6 +463,20 @@ class ImageJob:
                            ("console", self.console_read)):
             events.register(pipe, selectors.EVENT_READ, name)
 
+    def prepare_capture(self) -> None:
+        """Own selectors and output files before the guest can start."""
+        if not self.probe:
+            events = selectors.DefaultSelector()
+            register_close(self.capture_scope, "measurement-selector", events.close)
+            self.probe_events = events
+        on_loss = self.lose_diagnostics if self.probe else None
+        self.capture_files = {}
+        for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
+            output = self._open_log(self.directory / (name + ".partial"))
+            register_close(self.outputs, name + "-capture", output.close, on_loss,
+                           before_close=partial(sync_output, output))
+            self.capture_files[name] = output
+
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
         """Capture bounded guest streams without echoing them to a terminal."""
         self.state.update(qemu=process_identity(process.pid), started_at=time.time(),
@@ -474,19 +492,12 @@ class ImageJob:
         next_priority_check = 0.0
         console_retry_at = None
         counts = {"stream": 0, "console": 0, "diagnostic": 0}
-        with ExitStack() as local:
+        with self.capture_scope:
             events = self.probe_events
-            if not self.probe:
-                events = selectors.DefaultSelector()
-                register_close(local, "measurement-selector", events.close)
-                self.register_measure_transport(events, process)
             assert events is not None
-            files = {}
-            for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
-                output = self._open_log(self.directory / (name + ".partial"))
-                register_close(self.outputs, name + "-capture", output.close, on_loss,
-                               before_close=partial(sync_output, output))
-                files[name] = output
+            if not self.probe:
+                self.register_measure_transport(events, process)
+            files = self.capture_files
             stream_open = True
             try:
                 while (stream_open if self.probe else events.get_map()) or poll_owned(process, self.record_reaped) is None:
@@ -504,7 +515,7 @@ class ImageJob:
                     if now >= next_priority_check and poll_owned(process, self.record_reaped) is None:
                         try:
                             self.state["qemu_priority"] = process_priority(process.pid, self.cancellation)
-                        except (FileNotFoundError, ProcessLookupError, subprocess.CalledProcessError):
+                        except (FileNotFoundError, ProcessLookupError, IOPriorityError):
                             if poll_owned(process, self.record_reaped) is None:
                                 raise
                         next_priority_check = now + 5

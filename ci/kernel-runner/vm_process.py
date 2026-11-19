@@ -11,14 +11,12 @@ import os
 from pathlib import Path
 import selectors
 import signal
-import socket
 import subprocess
 import time
 from typing import Callable
 
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
-SPAWN_REPORT_SECONDS = 5
 CATCHABLE_SIGNALS = signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 CHILD_CWD = "/"
@@ -59,10 +57,6 @@ def register_close(stack: ExitStack, role: str, release: Callable[[], None],
         if close_on_error:
             close_transport(release, on_loss)
         raise
-
-
-def open_pidfd(process: subprocess.Popen) -> FileIO:
-    return FileIO("/dev/null", "rb", opener=lambda _path, _flags: os.pidfd_open(process.pid))
 
 
 def ignore_cleanup_failure() -> None:
@@ -123,49 +117,14 @@ def child_environment(*, registration: bool = False) -> dict[str, str]:
     return environment
 
 
-def register_child_pipes(stack: ExitStack, process: subprocess.Popen) -> None:
-    for role, pipe in (("child-stdin", process.stdin), ("child-stdout", process.stdout),
-                       ("child-stderr", process.stderr)):
-        if pipe is not None:
-            register_close(stack, role, pipe.close)
-
-
-def die_with_parent(parent: int, *, report_pid: socket.socket | None = None) -> None:
-    """Bind the child to its creator and identify it before exec."""
+def die_with_parent(parent: int) -> None:
+    """Keep the existing launcher and guest parent-death containment."""
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, signal.SIGKILL, 0, 0, 0):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
     if os.getppid() != parent:
         os.kill(os.getpid(), signal.SIGKILL)
-    if report_pid is not None:
-        report_pid.sendall(str(os.getpid()).encode("ascii"))
-
-
-def reap_failed_spawn(receiver: socket.socket, on_reaped: Callable[[int], None] | None) -> None:
-    """Recover a child even when the parent never received its Popen object."""
-    try:
-        identity = receiver.recv(32)
-    except TimeoutError:
-        # A stopped child may not have reached preexec. Parent death still
-        # triggers SIGKILL or the child's parent check when it resumes.
-        return
-    if not identity:
-        return
-    pid = int(identity)
-    try:
-        waited, status = os.waitpid(pid, os.WNOHANG)
-        if not waited:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            _, status = os.waitpid(pid, 0)
-    except ChildProcessError:
-        # Popen may already have collected the child on exec failure.
-        return
-    if on_reaped is not None:
-        on_reaped(os.waitstatus_to_exitcode(status))
 
 
 @contextmanager
@@ -173,58 +132,54 @@ def spawn_owned(args: list[str], *, cancellation: Cancellation, registration: bo
                 on_reaped: Callable[[int], None] | None = None,
                 on_loss: Callable[[], None] | None = None,
                 after_reap: Callable[[], None] | None = None, **options):
-    """Own every host spawn before registering its pipes or optional pidfd."""
-    children: list[subprocess.Popen] = []
-    process = handle = None
+    """Prepare cleanup before spawn and keep it active from Popen return."""
+    process = handle = owners = None
     handle_registered = False
-    check_spawn_signals(cancellation)
-    with ExitStack() as pipes, ExitStack() as handles:
+
+    def release_pipe(name: str) -> None:
+        if process is not None and (pipe := getattr(process, name)) is not None:
+            close_transport(pipe.close, ignore_cleanup_failure)
+
+    def pidfd_opener(_path: str, _flags: int) -> int:
+        assert process is not None
+        return os.pidfd_open(process.pid)
+
+    try:
         try:
-            try:
-                receiver, sender = socket.socketpair(type=socket.SOCK_SEQPACKET)
-                with receiver, sender:
-                    receiver.settimeout(SPAWN_REPORT_SECONDS)
-                    setup = partial(die_with_parent, os.getpid(), report_pid=sender)
-                    try:
-                        process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD, preexec_fn=setup,
-                                                   env=child_environment(registration=registration), **options)
-                    except (MemoryError, OSError, subprocess.SubprocessError) as error:
-                        close_transport(sender.close)
-                        reap_failed_spawn(receiver, on_reaped)
-                        # A failed constructor may keep partial stdio owners in its traceback.
-                        raise ChildSetupError(f"cannot start child {args[0]}") from error.with_traceback(None)
-                children.append(process)
-                register_child_pipes(pipes, process)
-            except (MemoryError, OSError, subprocess.SubprocessError) as error:
-                raise ChildSetupError(f"cannot register child {args[0]}") from error
+            owners = ExitStack()
+            for name in ("stdin", "stdout", "stderr"):
+                register_close(owners, f"child-{name}", partial(release_pipe, name))
             if on_loss is not None:
                 try:
-                    handle = open_pidfd(process)
-                    register_close(handles, "qemu-pidfd", handle.close, on_loss, close_on_error=False)
+                    handle = FileIO.__new__(FileIO)
+                    register_close(owners, "qemu-pidfd", handle.close, on_loss)
                     handle_registered = True
                 except (OSError, MemoryError):
                     on_loss()
-            yield process
-        finally:
+            setup = partial(die_with_parent, os.getpid())
+            environment = child_environment(registration=registration)
+            check_spawn_signals(cancellation)
+            process = subprocess.Popen(args, restore_signals=True, cwd=CHILD_CWD,
+                                       preexec_fn=setup, env=environment, **options)
+            if handle_registered:
+                try:
+                    handle.__init__("/dev/null", "rb", opener=pidfd_opener)
+                except (OSError, MemoryError):
+                    on_loss()
+        except (MemoryError, OSError, subprocess.SubprocessError) as error:
+            raise ChildSetupError(f"cannot start child {args[0]}") from error.with_traceback(None)
+        yield process
+    finally:
+        try:
             if process is not None:
                 try:
-                    # The local still owns the child if appending it failed.
-                    try:
-                        terminate(children.pop() if children else process, handle, on_reaped)
-                    finally:
-                        if after_reap is not None:
-                            after_reap()
+                    terminate(process, handle, on_reaped)
                 finally:
-                    try:
-                        if handle is not None and not handle_registered:
-                            close_transport(handle.close, on_loss)
-                    finally:
-                        try:
-                            pipes.close()
-                        finally:
-                            for pipe in (process.stdin, process.stdout, process.stderr):
-                                if pipe is not None and not pipe.closed:
-                                    close_transport(pipe.close, ignore_cleanup_failure)
+                    if after_reap is not None:
+                        after_reap()
+        finally:
+            if owners is not None:
+                owners.close()
 
 
 def poll_owned(process: subprocess.Popen, on_reaped: Callable[[int], None] | None = None) -> int | None:
@@ -297,20 +252,12 @@ def terminate(process: subprocess.Popen, handle: FileIO | None = None,
     """Stop only the owned child, without allowing another signal to abort reaping."""
     if poll_owned(process, on_reaped) is not None:
         return
-    with ExitStack() as handles:
-        if handle is None:
-            try:
-                candidate = open_pidfd(process)
-                register_close(handles, "termination-pidfd", candidate.close, ignore_cleanup_failure)
-                handle = candidate
-            except (OSError, MemoryError):
-                pass  # Signal the still-owned, unreaped child below.
-        signal_owned(process, handle, signal.SIGTERM)
-        try:
-            wait(process, time.monotonic() + TERM_GRACE_SECONDS, on_reaped=on_reaped)
-        except subprocess.TimeoutExpired:
-            signal_owned(process, handle, signal.SIGKILL)
-            wait(process, None, on_reaped=on_reaped)
+    signal_owned(process, handle, signal.SIGTERM)
+    try:
+        wait(process, time.monotonic() + TERM_GRACE_SECONDS, on_reaped=on_reaped)
+    except subprocess.TimeoutExpired:
+        signal_owned(process, handle, signal.SIGKILL)
+        wait(process, None, on_reaped=on_reaped)
 
 
 def signal_owned(process: subprocess.Popen, handle: FileIO | None, signum: signal.Signals) -> None:
@@ -335,25 +282,21 @@ def signal_owned(process: subprocess.Popen, handle: FileIO | None, signum: signa
 def run(args: list[str], *, timeout: int, cancellation: Cancellation,
         capture_output: bool = False, registration: bool = False, **options) -> subprocess.CompletedProcess:
     """Like run(check=True), with cancellation checks during helper subprocesses."""
-    if capture_output:
-        options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    deadline = time.monotonic() + timeout
     owners = None
+    setup_complete = False
     try:
-        try:
-            owners = ExitStack()
-            output = [bytearray(), bytearray()]
-            events = selectors.PollSelector()
-            register_close(owners, "helper-selector", events.close)
-        except (MemoryError, OSError) as error:
-            raise ChildSetupError(f"cannot prepare helper output {args[0]}") from error
+        if capture_output:
+            options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + timeout
+        owners = ExitStack()
+        output = [bytearray(), bytearray()]
+        events = selectors.PollSelector()
+        register_close(owners, "helper-selector", events.close)
         with spawn_owned(args, cancellation=cancellation, registration=registration, **options) as process:
-            try:
-                if capture_output:
-                    events.register(process.stdout, selectors.EVENT_READ, 0)
-                    events.register(process.stderr, selectors.EVENT_READ, 1)
-            except (MemoryError, OSError) as error:
-                raise ChildSetupError(f"cannot register helper output {args[0]}") from error
+            if capture_output:
+                events.register(process.stdout, selectors.EVENT_READ, 0)
+                events.register(process.stderr, selectors.EVENT_READ, 1)
+            setup_complete = True
             while events.get_map():
                 cancellation.check()
                 remaining = deadline - time.monotonic()
@@ -370,6 +313,10 @@ def run(args: list[str], *, timeout: int, cancellation: Cancellation,
                 except InterruptedError:
                     continue
             wait(process, deadline, cancellation)
+    except (MemoryError, OSError) as error:
+        if setup_complete:
+            raise
+        raise ChildSetupError(f"cannot set up helper {args[0]}") from error
     finally:
         if owners is not None:
             owners.close()

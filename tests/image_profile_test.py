@@ -95,7 +95,7 @@ PRESTART_MODES = tuple(
     f"prestart:{step}:{error}"
     for step in ("pipe", "stream", "console", "console-after-register", "artifact-selector")
     for error in DIAGNOSTIC_ERRORS)
-ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:gap", "isolated:dropped",
+ISOLATION_MODES = ("isolated:baseline", "isolated:complete", "isolated:exclusive", "isolated:gap", "isolated:dropped",
                    *(f"isolated:{step}:{error}" for step in
                      ("read", "close", "StageTail", "observe", "drain", "summary", "text")
                      for error in DIAGNOSTIC_ERRORS),
@@ -623,7 +623,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
             validate_return(job, verifier)
             if mode == "isolated:validated-helper":
-                image_resources.process_priority(os.getpid(), job.cancellation)
+                step = (root / "child-fault").read_text().partition(":")[0]
+                run(["qemu-img", step, str(root / "base")],
+                    cancellation=job.cancellation, timeout=2, capture_output=step == "info")
             if mode == "isolated:fallback:MemoryError":
                 class NoLateDefaults(dict):
                     def __or__(self, other):
@@ -640,7 +642,26 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def priority_timeout(_pid, _cancellation):
         wait_for_guest()
-        raise subprocess.TimeoutExpired("ionice fixture", 1)
+        raise image_resources.IOPriorityError("ioprio_get fixture")
+
+    def priority_sample(pid, cancellation):
+        if mode == "isolated:exclusive":
+            wait_for_guest()
+            children = (pathlib.Path(f"/proc/self/task/{launcher_pid}/children").read_text().split())
+            assert children == [str(pid)], children
+            (root / "exclusive-sample").touch()
+            return image_resources.process_priority(pid, cancellation)
+        return FIXTURE_PRIORITY
+
+    if mode == "isolated:exclusive":
+        def no_capture_spawns(event, args):
+            if event in {"subprocess.Popen", "os.fork", "os.posix_spawn"}:
+                assert not (directory / "started.json").exists(), f"extra child during capture: {event}"
+                assert event == "subprocess.Popen", event
+                with (root / "exclusive-spawns").open("a") as output:
+                    print(" ".join(args[1][:2] if args[0] == "qemu-img" else args[1][:1]), file=output)
+
+        sys.addaudithook(no_capture_spawns)
 
     capsule = root / "capsule"
     base = root / "base"
@@ -798,21 +819,29 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                             args = caller.f_locals.get("args", ())
                             if caller.f_code is vm_process.run.__code__ and (
                                 args[1] if args[0] == "qemu-img" else args[0]
-                            ) == target:
+                            ) == target and (mode != "isolated:validated-helper"
+                                             or (directory / "transport-validation.json").exists()):
                                 (root / "child-injected").touch()
                                 raise DIAGNOSTIC_ERRORS[kind]("fixture selector stack allocation")
                             return stack()
 
                         patches.enter_context(patch.object(vm_process, "ExitStack", fail_selector_stack))
-                    if operation.startswith("prepare/"):
-                        point = int(operation.split("/")[1])
+                    if operation.startswith(("prepare/", "pre-spawn/")):
+                        location, _, expected_name = operation.split("/")[1].partition("@")
+                        point = int(location)
+                        watched_prepare = (vm_process.run if operation.startswith("prepare/")
+                                           else vm_process.spawn_owned.__wrapped__).__code__
 
                         def prepare_trace(frame, event, _arg):
-                            if frame.f_code is not vm_process.run.__code__:
+                            if frame.f_code is not watched_prepare:
                                 return None
                             args = frame.f_locals["args"]
                             if (args[1] if args[0] == "qemu-img" else args[0]) != target:
                                 return None
+                            if mode == "isolated:validated-helper" and not (directory / "transport-validation.json").exists():
+                                return None
+                            if expected_name and frame.f_locals.get("name") != expected_name:
+                                return prepare_trace
                             if event == "line" and frame.f_lineno == point:
                                 (root / "child-injected").touch()
                                 sys.settrace(None)
@@ -823,7 +852,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
                     def inject_child(args, *positional, **kwargs):
                         command = args[1] if args[0] == "qemu-img" else args[0]
-                        if command != target:
+                        if command != target or (mode == "isolated:validated-helper"
+                                                 and not (directory / "transport-validation.json").exists()):
                             process = popen(args, *positional, **kwargs)
                             if command == "qemu-system-x86_64":
                                 (root / "spawned-qemu").write_text(str(process.pid))
@@ -837,29 +867,26 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                             # Every helper uses this owner, including helpers with
                             # inherited output. Exercise all stdio registrations.
                             kwargs.update(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        process = popen(["ionice"] if command in PREPARATION_HELPERS else args, *positional, **kwargs)
+                        process = popen(["fixture-helper"] if command in PREPARATION_HELPERS else args,
+                                        *positional, **kwargs)
                         (root / "fault-pid").write_text(str(process.pid))
                         if command == "qemu-system-x86_64":
                             (root / "spawned-qemu").write_text(str(process.pid))
                             wait_for_guest()
-                        if operation == "before-return":
-                            (root / "child-injected").touch()
-                            raise DIAGNOSTIC_ERRORS[kind]("fixture lost Popen result")
                         if operation == "selector-stack":
                             return process
                         function, point = operation.split("/")
                         point, _, role = point.partition("@")
                         watched = {
                             "spawn": vm_process.spawn_owned.__wrapped__.__code__,
-                            "pipes": vm_process.register_child_pipes.__code__,
                             "helper": vm_process.run.__code__,
-                            "callback": register_owner.__code__,
+                            "boot": vm.boot.__code__,
                         }[function]
 
                         def trace(frame, event, _arg):
                             if frame.f_code is not watched:
                                 return None
-                            if role and frame.f_locals.get("role") != role:
+                            if role and frame.f_locals.get("name") != role:
                                 return trace
                             if ((event == "line" and str(frame.f_lineno) == point)
                                     or event == point == "return"):
@@ -878,11 +905,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
                     patches.enter_context(patch.object(subprocess, "Popen", inject_child))
                     if target in PREPARATION_HELPERS:
-                        def use_preparation_helper(_args, *, cancellation, **_options):
-                            return run(PREPARATION_HELPERS[target], cancellation=cancellation, timeout=1,
-                                       capture_output=target == "gh")
+                        def use_preparation_helper(job, verifier):
+                            fixture_return(job, verifier)
+                            run(PREPARATION_HELPERS[target], cancellation=job.cancellation,
+                                timeout=1, capture_output=target == "gh")
 
-                        patches.enter_context(patch.object(image_resources, "run", use_preparation_helper))
+                        patches.enter_context(patch.object(image_vm, "validate_return", use_preparation_helper))
 
             def inspect_registration(stack, role, release, on_loss=None, attempt=None, before_close=None, **options):
                 point = None
@@ -1143,7 +1171,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(tempfile, "TemporaryFile", overlay),
             patch.object(pathlib.Path, "read_text", read_result),
             patch.object(pathlib.Path, "read_bytes", fixture_read_bytes),
-            patch.object(image_vm, "validate_return", fixture_return),
+            *(() if child_fault and child_fault.partition(":")[0] in PREPARATION_HELPERS
+              else (patch.object(image_vm, "validate_return", fixture_return),)),
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
@@ -1151,8 +1180,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(image_lifecycle, "process_priority",
                          side_effect=(priority_timeout
                                       if mode == "stages:priority-timeout"
-                                      else image_resources.process_priority
-                                      if inherited or child_fault and mode != "isolated:validated-helper" else None),
+                                      else priority_sample),
                          return_value=FIXTURE_PRIORITY),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
             patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
@@ -1178,7 +1206,7 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         root = pathlib.Path(tmp)
         child_target = child_fault.partition(":")[0]
         qemu_fault = child_target == "qemu-system-x86_64"
-        if waits_for_guest_ready(mode) or mode == "stages:priority-timeout" or qemu_fault:
+        if waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault:
             os.mkfifo(root / "guest-ready")
         if mode.startswith("isolated:unregister"):
             os.mkfifo(root / "unregister-ready")
@@ -1292,7 +1320,7 @@ with (root / "children").open("a") as logged:
 (root / "ready").touch()
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
-if {waits_for_guest_ready(mode) or mode == "stages:priority-timeout" or qemu_fault!r}:
+if {waits_for_guest_ready(mode) or mode in {"stages:priority-timeout", "isolated:exclusive"} or qemu_fault!r}:
     with (root / "guest-ready").open("wb", buffering=0) as ready:
         ready.write(b"1")
 if mode in ("startup:success", "startup:failure", "startup:signal"):
@@ -1350,8 +1378,6 @@ if mode in (*{ISOLATION_MODES!r}, "isolated:validated-helper") and mode != "isol
         sent = 0
         while sent < len(frame):
             sent += os.write(1, frame[sent:])
-        if {child_target in ("ionice", *PREPARATION_HELPERS) and mode != "isolated:validated-helper"!r}:
-            signal.pause()
         sys.exit(0)
 if mode in {STAGE_MODES!r} or mode in ("isolated:dropped", "isolated:summary-timeout:MemoryError"):
     console = int(sys.argv[sys.argv.index("-serial") + 1].rsplit("/", 1)[1])
@@ -1419,18 +1445,10 @@ while True:
     signal.pause()
 """)
         qemu.chmod(0o700)
-        if blocked or ignored or child_fault:
-            ionice = root / "ionice"
-            ionice.write_text(f"""#!{sys.executable}
-import pathlib
-import signal
-pathlib.Path({str(root / "status-ionice")!r}).write_text(pathlib.Path("/proc/self/status").read_text())
-if {bool(child_fault)!r}:
-    signal.alarm(2)
-    signal.pause()
-print("best-effort: prio 7")
-""")
-            ionice.chmod(0o700)
+        if child_target in PREPARATION_HELPERS:
+            helper = root / "fixture-helper"
+            helper.write_text(f"#!{sys.executable}\nimport signal\nsignal.pause()\n")
+            helper.chmod(0o700)
 
         # A private flock gives the real CLI its required direct parent without
         # participating in workstation admission or touching the real host lock.
@@ -1477,7 +1495,21 @@ os.execvp(sys.argv[1], sys.argv[1:])
                     marker = root / "returns/fixture/build/exit.json"
                     assert marker.exists(), "timeout occurred before receipt publication"
                     raise AssertionError("launcher blocked on full stderr after committing exit.json") from error
-                assert (root / "sent").exists(), "fixture never delivered cancellation"
+                if not (root / "sent").exists():
+                    proc = pathlib.Path("/proc")
+                    observed = {}
+                    for entry in proc.iterdir():
+                        if not entry.name.isdecimal():
+                            continue
+                        try:
+                            status = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                            if int(status[2]) == launcher.pid:
+                                observed[entry.name] = (status[:3], (entry / "wchan").read_text())
+                        except (FileNotFoundError, ProcessLookupError):
+                            continue
+                    raise AssertionError(("fixture timed out before cancellation", mode, child_fault,
+                                          sorted(p.name for p in root.iterdir()), observed,
+                                          error.stderr)) from error
                 pid = (root / "pid").read_text()
                 assert pathlib.Path(f"/proc/{pid}").exists()
                 assert not (root / "returns/fixture/build/exit.json").exists()
@@ -1509,11 +1541,14 @@ os.execvp(sys.argv[1], sys.argv[1:])
             wait_log = root / "launcher-waits"
             waits = wait_log.read_text().splitlines() if wait_log.exists() else []
             if child_fault:
-                if (root / "fault-pid").exists():
+                setup_operation = child_fault.split(":")[1]
+                after_spawn = setup_operation.startswith(("spawn/", "boot/", "helper/"))
+                assert (root / "fault-pid").exists() == after_spawn, (child_fault, stderr)
+                if after_spawn:
                     fault_pid = (root / "fault-pid").read_text()
                     assert len([entry for entry in waits if entry.split()[0] == fault_pid]) == 1, waits
                     assert not pathlib.Path(f"/proc/{fault_pid}").exists()
-            if not child_fault.startswith("info:"):
+            if not child_fault.startswith("info:") or mode == "isolated:validated-helper":
                 exit_row, teardown = [json.loads((directory / name).read_text())
                                       for name in ("exit.json", "teardown.json")]
                 assert exit_row["launcher_exit"] == launcher.returncode == 1
@@ -1554,13 +1589,18 @@ os.execvp(sys.argv[1], sys.argv[1:])
             initial, final = json.loads((root / "descriptor-check").read_text())
             assert initial == final, (mode, ownership_case, pidfd_case, child_fault, initial, final, stderr)
         if child_fault:
-            if child_fault.startswith("info:"):
+            if child_fault.startswith("info:") and mode != "isolated:validated-helper":
                 assert launcher.returncode == 1 and not (root / "returns").exists(), stderr
                 return
             assert exit_row["stop_reason"] == "ChildSetupError", (exit_row, stderr)
             assert teardown["input_descriptor_closed"] and teardown["overlay_descriptor_closed"]
             assert json.loads((root / "leaks").read_text()) == []
-            if mode == "isolated:validated-helper":
+            if mode == "isolated:validated-helper" or child_fault.startswith("qemu-system-x86_64:boot/"):
+                if mode != "isolated:validated-helper":
+                    assert (root / "probe.frame").stat().st_size == 836
+                    fields = ("launcher_exit", "stop_reason", "qemu_reaped", "qemu_exit",
+                              "input_descriptor_closed", "overlay_descriptor_closed")
+                    return {key: exit_row[key] for key in fields}
                 assert (directory / "artifacts/verification.json").read_bytes() == probe_body
                 assert (directory / "transport-validation.json").is_file()
                 fields = ("launcher_exit", "stop_reason", "qemu_reaped", "qemu_exit", "stream_bytes",
@@ -1568,7 +1608,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 return {key: exit_row[key] for key in fields}
             return
         if signal_fault and mode == "stages:priority-timeout":
-            assert exit_row["stop_reason"] == "TimeoutExpired", (exit_row, stderr)
+            assert exit_row["stop_reason"] == "IOPriorityError", (exit_row, stderr)
             assert exit_row["qemu_exit"] == 0
             assert not (root / "sent").exists()
         if full_stderr:
@@ -1732,7 +1772,12 @@ os.execvp(sys.argv[1], sys.argv[1:])
             close_injected = (ownership_case is not None and ownership_case[0] >= 0
                               or pidfd_case not in (None, "baseline") or pipe_fault or registration_fault)
             complete = not close_injected and (
-                operation == "complete" or (mode in STDERR_FLOOD_MODES and not mode.endswith("-fault")))
+                operation in {"complete", "exclusive"} or (mode in STDERR_FLOOD_MODES and not mode.endswith("-fault")))
+            if operation == "exclusive":
+                assert (root / "exclusive-sample").exists()
+                assert (root / "exclusive-spawns").read_text().splitlines() == [
+                    "qemu-img info", "qemu-img create", "qemu-system-x86_64",
+                ]
             assert record["capture_lost"] is (not complete), (mode, record, stderr.decode())
             assert record["sequence_complete"] is complete
             for row in (record, teardown):
@@ -1793,7 +1838,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             teardown = json.loads((directory / "teardown.json").read_text())
             if mode == "stages:priority-timeout":
                 assert launcher.returncode == exit_row["launcher_exit"] == 1
-                assert b"ionice fixture" in stderr and b"image guest (last stage" not in stderr
+                assert b"ioprio_get fixture" in stderr and b"image guest (last stage" not in stderr
                 return
             if mode in {"stages:at-cap", "stages:over-cap"}:
                 assert launcher.returncode == exit_row["launcher_exit"] == 0, stderr.decode()
@@ -1888,7 +1933,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             if ignored:
                 assert entry_ignored & (1 << (signal.SIGTERM - 1))
                 assert b"replaced inherited ignored stop signals: SIGTERM" in stderr
-            for child in ("info", "create", "qemu", "ionice"):
+            for child in ("info", "create", "qemu"):
                 mask, ignored_bits, caught = signal_status(root / f"status-{child}")
                 assert mask == 0, (child, blocked, mask)
                 assert ignored_bits & stop_bits == 0, (child, ignored, ignored_bits)
@@ -1982,23 +2027,27 @@ def check_post_spawn_faults(targets: tuple[str, ...], *, mode: str = "isolated:c
         return [str(start + i) for i in range(first, last + 1)]
 
     spawn = vm_process.spawn_owned.__wrapped__
-    spawn_lines = lines(spawn, "children.append(", "register_child_pipes(")
-    pipe_lines = tuple(dict.fromkeys(statement_lines(vm_process.register_child_pipes.__code__)))
-    callback_line = lines(vm_process.register_close, "stack.callback(", "stack.callback(")[0]
-    helper_lines = lines(vm_process.run, "if capture_output:", "events.register(process.stderr,")[-3:]
-    prepare_lines = lines(vm_process.run, "owners = ExitStack()", 'register_close(owners, "helper-selector"')
+    spawn_line = lines(spawn, "if handle_registered:", "if handle_registered:")[0]
+    owner_line = lines(spawn, "owners = ExitStack()", "owners = ExitStack()")[0]
+    pipe_line = lines(spawn, 'register_close(owners, f"child-', 'register_close(owners, f"child-')[0]
+    helper_lines = lines(vm_process.run, "if capture_output:", "setup_complete = True")[-4:]
+    prepare_lines = [*lines(vm_process.run, "owners = ExitStack()", 'register_close(owners, "helper-selector"'),
+                     *lines(vm_process.run, "deadline = time.monotonic()", "deadline = time.monotonic()")]
     for target in targets:
-        roles = ("child-stdin", "child-stderr") if target == "qemu-system-x86_64" else (
-            "child-stdin", "child-stdout", "child-stderr")
-        points = [*(f"spawn/{line}" for line in spawn_lines),
-                  *(f"pipes/{line}" for line in pipe_lines),
-                  "pipes/return",
-                  *(f"callback/{callback_line}@{role}" for role in roles),
-                  "before-return"]
-        if target != "qemu-system-x86_64":
+        points = [f"spawn/{spawn_line}", f"pre-spawn/{owner_line}",
+                  *(f"pre-spawn/{pipe_line}@{name}" for name in ("stdin", "stdout", "stderr"))]
+        if target == "qemu-system-x86_64":
+            points.extend(f"boot/{line}" for line in lines(vm.boot, "writers.close()", "setup_complete = True")
+                          if "reader.start()" not in inspect.getsource(vm.boot).splitlines()[
+                              int(line) - vm.boot.__code__.co_firstlineno])
+        else:
             points.extend(f"prepare/{line}" for line in prepare_lines)
-        if target in ("info", "ionice", "gh"):
+            points.append("selector-stack")
+        if target in ("info", "gh"):
+            points.append("prepare/" + lines(vm_process.run, "options.update(stdout=", "options.update(stdout=")[0])
             points.extend(f"helper/{line}" for line in helper_lines)
+        elif target != "qemu-system-x86_64":
+            points.extend(f"helper/{line}" for line in (helper_lines[0], helper_lines[-1]))
         for point in points:
             for error in ("MemoryError", "OSError"):
                 case = f"{target}:{point}:{error}"
@@ -2012,7 +2061,18 @@ def check_post_spawn_faults(targets: tuple[str, ...], *, mode: str = "isolated:c
 
 
 def test_post_spawn_faults_reap_each_child_and_close_its_pipes() -> None:
-    check_post_spawn_faults(("qemu-system-x86_64", "info", "create", "ionice"))
+    check_post_spawn_faults(("qemu-system-x86_64", "info", "create"))
+    source, first = inspect.getsourcelines(vm.boot)
+    points = [first + i for i, line in enumerate(source)
+              if line.strip() in {"writers.close()", "if reader is not None:", "setup_complete = True"}
+              and not line.lstrip().startswith("if reader is not None and")]
+    baseline = cancelled_fixture("isolated:complete",
+                                 child_fault=f"qemu-system-x86_64:boot/{points[0]}:OSError")
+    assert baseline is not None and baseline["launcher_exit"] == 1
+    for point in points:
+        for error in ("MemoryError", "OSError"):
+            assert cancelled_fixture("isolated:complete",
+                                     child_fault=f"qemu-system-x86_64:boot/{point}:{error}") == baseline
 
 
 def test_post_spawn_faults_cover_preparation_and_registration_helpers() -> None:
@@ -2021,12 +2081,35 @@ def test_post_spawn_faults_cover_preparation_and_registration_helpers() -> None:
 
 def test_helper_failures_preserve_the_validated_probe_receipt() -> None:
     mode = "isolated:validated-helper"
-    baseline = cancelled_fixture(mode, child_fault="ionice:baseline:MemoryError")
-    assert baseline is not None and baseline["stream_bytes"] == 836
-    for operation in ("selector-stack", "before-return"):
-        for error in ("MemoryError", "OSError"):
-            assert cancelled_fixture(mode, child_fault=f"ionice:{operation}:{error}") == baseline
-    check_post_spawn_faults(("ionice",), mode=mode, baseline=baseline)
+    for step in ("info", "create"):
+        baseline = cancelled_fixture(mode, child_fault=f"{step}:baseline:MemoryError")
+        assert baseline is not None and baseline["stream_bytes"] == 836
+        check_post_spawn_faults((step,), mode=mode, baseline=baseline)
+
+
+def test_only_qemu_is_alive_during_probe_capture() -> None:
+    assert cancelled_fixture("isolated:exclusive") == cancelled_fixture("isolated:complete")
+
+
+def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
+    with patch.object(image_resources, "require_process_priority", return_value=9), \
+            patch.object(image_resources, "cgroup_limits", return_value=10), \
+            patch.object(subprocess, "Popen") as spawn:
+        for value, error in ((0, None), ((2 << 13) | 7, None), (1 << 13, None),
+                             (4 << 13, None), (-1, errno.ENOSYS), (-1, errno.EPERM)):
+            with patch.object(image_resources._LIBC, "syscall", return_value=value), \
+                    patch.object(image_resources.ctypes, "get_errno", return_value=error):
+                if value in (0, (2 << 13) | 7):
+                    row = image_resources.process_priority(os.getpid(), Cancellation())
+                    assert row["ionice"] == ("none: prio 0" if value == 0 else "best-effort: prio 7")
+                else:
+                    try:
+                        image_resources.process_priority(os.getpid(), Cancellation())
+                    except image_resources.AdmissionError:
+                        pass
+                    else:
+                        raise AssertionError((value, error))
+        spawn.assert_not_called()
 
 
 def statement_lines(code) -> tuple[str, ...]:
@@ -2236,7 +2319,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         return bad
 
     capture = node_for(ImageJob, "capture")
-    capture_calls = {"ExitStack", "Path", "StreamError", "counts.values",
+    capture_calls = {"Path", "StreamError", "counts.values",
                      "events.get_map", "len", "max", "min", "poll_owned",
                      "self.cancellation.check", "self.state.update", "subprocess.TimeoutExpired",
                      "sum", "time.monotonic", "time.time", "wait"}
@@ -2247,12 +2330,8 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         "self.drain(events)", "close_transport(self.console_writer.close, on_loss)",
         "os.read(event.fd, 1024 * 1024)",
         "events.select(timeout=min(POLL_SECONDS, end - now))",
-        "register_close(local, 'measurement-selector', events.close)", "selectors.DefaultSelector()",
         "self.register_measure_transport(events, process)",
-        "partial(sync_output, output)", "overlay.stat()",
-        "self._open_log(self.directory / (name + '.partial'))",
-        "register_close(self.outputs, name + '-capture', output.close, on_loss, "
-        "before_close=partial(sync_output, output))",
+        "overlay.stat()",
         "process_identity(process.pid)", "process_priority(process.pid, self.cancellation)",
         "receipt(self.directory / 'started.json', self.state)",
         "receipt(self.active, {'attempt': self.identity.attempt, 'launcher': self.state['launcher'], "
@@ -2312,12 +2391,12 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
 def test_live_and_teardown_closes_go_through_transport_guard() -> None:
     def unguarded(tree, acquisitions):
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-        stack_closes = {"self.inputs.close()", "job.outputs.close()", "writers.close()",
-                        "pipes.close()", "owners.close()"}
+        stack_closes = {"self.inputs.close()", "self.capture_scope.close()", "job.outputs.close()",
+                        "writers.close()", "owners.close()"}
         constructors = {
             "selectors.DefaultSelector", "selectors.PollSelector", "selectors.EpollSelector",
             "selectors.SelectSelector", "open", "os.open", "os.fdopen", "FileIO", "os.memfd_create",
-            "os.pipe", "os.pipe2", "_PIPE2", "os.pidfd_open", "open_pidfd", "PipeEnd", "pipe_files",
+            "os.pipe", "os.pipe2", "_PIPE2", "os.pidfd_open", "FileIO.__new__", "PipeEnd", "pipe_files",
             "subprocess.Popen", "tempfile.TemporaryFile", "self._open_log",
         }
         remaining = Counter(acquisitions)
@@ -2345,7 +2424,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             if isinstance(node, ast.With):
                 for item in node.items:
                     if ast.unparse(item.context_expr) not in {
-                        "ExitStack()", "self.outputs", "receiver", "sender",
+                        "ExitStack()", "self.outputs", "self.capture_scope", "startup", "writers",
                         "job_disk(base, job, cancellation)",
                         "ImageJob(directory, identity, request['capsule'], cancellation, "
                         "probe=request['payload']['operation'] == 'probe')",
@@ -2388,7 +2467,8 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         (ImageJob.__init__, ("FileIO", "os.open", "pipe_files")),
         (ImageJob.__exit__, ()),
         (ImageJob.prepare_probe_transport, ("selectors.DefaultSelector", "selectors.DefaultSelector", "pipe_files")),
-        (ImageJob.capture, ("selectors.DefaultSelector", "self._open_log")),
+        (ImageJob.prepare_capture, ("selectors.DefaultSelector", "self._open_log")),
+        (ImageJob.capture, ()),
         (ImageJob.close_console_reader, ()),
         (image_lifecycle.pipe_files, ("_PIPE2", "PipeEnd", "PipeEnd")),
         (image_lifecycle.job_disk, ("tempfile.TemporaryFile",)),
@@ -2397,12 +2477,10 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         (image_lifecycle.Receipt.file_close, ()),
         (image_lifecycle.Receipt.dir_close, ()),
         (vm.boot, ("FileIO", "os.memfd_create")),
-        (vm_process.spawn_owned.__wrapped__, ("open_pidfd", "subprocess.Popen")),
-        (vm_process.register_child_pipes, ()),
+        (vm_process.spawn_owned.__wrapped__, ("FileIO.__new__", "os.pidfd_open", "subprocess.Popen")),
         (vm_process.run, ("selectors.PollSelector",)),
         (vm_process.read_check_script, ("open", "os.open", "selectors.PollSelector")),
-        (vm_process.terminate, ("open_pidfd",)),
-        (vm_process.open_pidfd, ("FileIO", "os.pidfd_open")),
+        (vm_process.terminate, ()),
         (image_vm.execute, ()),
     )
     mutations = (
@@ -3143,6 +3221,8 @@ class ProcessCases:
         test_pidfd_signal_faults_preserve_launcher_reaping_and_receipts,
         test_post_spawn_faults_reap_each_child_and_close_its_pipes,
         test_helper_failures_preserve_the_validated_probe_receipt,
+        test_only_qemu_is_alive_during_probe_capture,
+        test_io_priority_is_sampled_in_process_and_fails_closed,
     )
 
 
