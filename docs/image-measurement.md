@@ -100,24 +100,18 @@ Stream markers identify member order and separate preparation, header writes,
 body writes, flush and close. Write completion counts are bytes reported by
 the guest writer.
 
-The launcher registers the console, artifact stream, and stderr pipes before
-starting the probe guest. Transport setup failure aborts before guest launch
-and leaves no `exit.json`. Once running, the launcher drains the console into
-a fixed 4 KiB memory ring. The ring discards ordinary console text and evicts
-the oldest complete stage lines when full.
-A control read error marks capture lost and leaves the pipe registered.
-After three consecutive errors, the launcher drains that pipe into a
-preallocated buffer and discards its contents. After six consecutive errors
-or 100 ms of unsuccessful retries, it starts closing the failed reader so a
-blocked diagnostic writer can return. If a close is interrupted, the reader
-stays owned and registered. The launcher makes at most three close attempts
-within 100 ms and removes the registration only after the reader is closed. The
-artifact stream uses a separate pipe.
+The launcher registers the nonblocking serial console and the separate
+artifact stream before starting the probe guest. Transport setup failure
+aborts before guest launch and leaves no `exit.json`. QEMU stderr goes to
+`/dev/null` for probes. The launcher reads serial markers into a fixed 4 KiB
+memory ring, discards ordinary console text and evicts the oldest complete
+stage lines when full. A console read error ends marker capture and marks it
+lost. The launcher closes the serial reader during normal teardown.
 
 The probe's `exit.json` contains `last_observed_stage`, `sequence_complete`,
 `capture_lost`, the sanitized `console_tail` (at most 4 KiB), and
-`console_tail_truncated`. `control_bytes_received` counts console and stderr
-bytes drained by the host. Missing markers, ring eviction, control traffic
+`console_tail_truncated`. `control_bytes_received` counts serial console
+bytes read by the host. Missing markers, ring eviction, console traffic
 over 8 MiB, and capture errors set `capture_lost`. A stalled probe can still
 report the last stage and its tail when capture is incomplete. `stream_bytes`
 remains the artifact byte count in both `exit.json` and `teardown.json`.

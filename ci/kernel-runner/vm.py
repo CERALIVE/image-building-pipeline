@@ -34,7 +34,7 @@ RUNNER_VERSION = "2.338.2"
 RUNNER_SHA = "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
 
 
-def die_with_parent(parent: int, *, ignore_sigpipe: bool = False) -> None:
+def die_with_parent(parent: int) -> None:
     """Kernel-enforced cleanup still works when the launcher receives SIGKILL."""
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, signal.SIGKILL, 0, 0, 0):
@@ -42,9 +42,6 @@ def die_with_parent(parent: int, *, ignore_sigpipe: bool = False) -> None:
         raise OSError(error, os.strerror(error))
     if os.getppid() != parent:
         os.kill(os.getpid(), signal.SIGKILL)
-    if ignore_sigpipe:
-        # A retired diagnostic pipe may fail before QEMU sets its own handlers.
-        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
 
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
@@ -96,11 +93,11 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         stdout, stderr = subprocess.PIPE, subprocess.PIPE if image_job else subprocess.STDOUT
         writers = startup.enter_context(ExitStack())
         if image_job and image_job.probe:
-            stdout, stderr = image_job.prepare_probe_transport(writers)
+            stdout = image_job.prepare_probe_transport(writers)
+            stderr = subprocess.DEVNULL
         check_spawn_signals(cancellation)
         process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
-                                   preexec_fn=partial(die_with_parent, os.getpid(),
-                                                      ignore_sigpipe=bool(image_job and image_job.probe)),
+                                   preexec_fn=partial(die_with_parent, os.getpid()),
                                    stdin=subprocess.DEVNULL,
                                    stdout=stdout,
                                    stderr=stderr,

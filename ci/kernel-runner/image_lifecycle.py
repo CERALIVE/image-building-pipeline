@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
 from functools import partial
-from io import FileIO
 import json
 import os
 from pathlib import Path
@@ -30,10 +29,6 @@ UNAVAILABLE_DIAGNOSTICS = {
     "console_tail_truncated": False,
     "control_bytes_received": 0,
 }
-CONTROL_READ_FAILURE_LIMIT = 3
-CONTROL_RETIRE_LIMIT = 2 * CONTROL_READ_FAILURE_LIMIT
-CONTROL_RETRY_SECONDS = 0.1
-CONTROL_CLOSE_LIMIT = 3
 
 
 def encode_diagnostic_fields(fields: dict) -> bytes:
@@ -261,8 +256,6 @@ class ImageJob:
         self.cancellation = cancellation or Cancellation()
         self.probe = probe
         self.console_read = self.console_write = -1
-        self.stderr_read = -1
-        self.control_readers: dict[str, FileIO | None] = {"console": None, "diagnostic": None}
         self.outputs = ExitStack()
         self.inputs = ExitStack()
         self.active = directory.parents[1] / "active.json"
@@ -277,24 +270,14 @@ class ImageJob:
         self.control_bytes = 0
         self.capture_lost = False
         self.observe_stages = True
-        self.control_failures = {"diagnostic": 0, "console": 0}
-        self.control_failure_since = {"diagnostic": 0.0, "console": 0.0}
-        self.discarding_control = {"diagnostic": False, "console": False}
-        self.closing_control = {"diagnostic": False, "console": False}
-        self.control_close_attempts = {"diagnostic": 0, "console": 0}
-        self.control_close_until = {"diagnostic": 0.0, "console": 0.0}
+        self.console_open = True
         self.probe_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             self.capsule_fd = os.open(capsule, os.O_RDONLY | os.O_NOFOLLOW)
             inputs.callback(os.close, self.capsule_fd)
             self.console_read, self.console_write = os.pipe2(os.O_NONBLOCK) if probe else os.pipe()
-            if probe:
-                inputs.callback(optional, self.lose_diagnostics, self.close_console_reader)
-            else:
-                inputs.callback(self.close_console_reader)
+            inputs.callback(self.close_console_reader)
             inputs.callback(self.close_console_writer)
-            if probe:
-                self.control_readers["console"] = FileIO(self.console_read, "rb")
             self.inputs = inputs.pop_all()
 
     def __enter__(self) -> ImageJob:
@@ -327,21 +310,10 @@ class ImageJob:
             os.close(fd)
 
     def close_console_reader(self) -> None:
-        reader = self.control_readers["console"]
-        if reader is None:
-            self._close_console("console_read")
-        else:
-            reader.close()
+        self._close_console("console_read")
 
     def close_console_writer(self) -> None:
         self._close_console("console_write")
-
-    def close_stderr_reader(self) -> None:
-        reader = self.control_readers["diagnostic"]
-        if reader is None:
-            self._close_console("stderr_read")
-        else:
-            reader.close()
 
     def overlay_created(self, disk_fd: int) -> None:
         """Journal ownership before any qemu-img or QEMU child can inherit it."""
@@ -374,95 +346,42 @@ class ImageJob:
             "control_bytes_received": self.control_bytes,
         }
 
-    def prepare_probe_transport(self, writers: ExitStack) -> tuple[int, int]:
-        """Register all probe channels before Popen can start a guest."""
+    def prepare_probe_transport(self, writers: ExitStack) -> int:
+        """Register the artifact and serial streams before guest startup."""
         try:
             events = self.inputs.enter_context(selectors.DefaultSelector())
             stream_read, stream_write = os.pipe2(os.O_CLOEXEC)
             self.inputs.callback(os.close, stream_read)
             writers.callback(os.close, stream_write)
-            self.stderr_read, stderr_write = os.pipe2(os.O_CLOEXEC)
-            self.inputs.callback(optional, self.lose_diagnostics, self.close_stderr_reader)
-            writers.callback(optional, self.lose_diagnostics, os.close, stderr_write)
-            os.set_blocking(self.stderr_read, False)
-            self.control_readers["diagnostic"] = FileIO(self.stderr_read, "rb")
-            for name, fd in (("stream", stream_read), ("diagnostic", self.stderr_read),
-                             ("console", self.console_read)):
+            for name, fd in (("stream", stream_read), ("console", self.console_read)):
                 events.register(fd, selectors.EVENT_READ, name)
             self.probe_events = events
-            self.discard_buffer = (bytearray(64 * 1024),)
             self.stage_tail = optional(self.lose_diagnostics, StageTail)
         except Exception as error:
             # The pre-commit OSError path cannot publish an outcome for this setup failure.
             raise OSError("probe transport setup failed: " + str(error)) from error
-        return stream_write, stderr_write
+        return stream_write
 
-    def record_control(self, name: str, chunk: bytes) -> None:
+    def read_console(self, fd: int) -> bool:
+        """Consume one nonblocking serial read and report EOF."""
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            return True
         self.control_bytes += len(chunk)
         tail = self.stage_tail
-        if name == "console" and self.observe_stages and tail is not None:
+        if self.observe_stages and tail is not None:
             self.observe_stages = bool(optional(self.lose_diagnostics, tail.observe, chunk))
-
-    def read_control(self, name: str, fd: int) -> bool:
-        """Allow unregister only after the owned reader is closed."""
-        if self.closing_control[name]:
-            return self.retire_control(name)
-        failures = self.control_failures[name]
-        try:
-            if self.discarding_control[name]:
-                size = os.readv(fd, self.discard_buffer)
-                self.control_bytes += size
-                self.control_failures[name] = 0
-                return size == 0 and self.retire_control(name)
-            chunk = os.read(fd, 1024 * 1024)
-        except Exception:
-            self.capture_lost = True
-            now = time.monotonic()
-            if failures == 0:
-                self.control_failure_since[name] = now
-            if failures + 1 == CONTROL_RETIRE_LIMIT or now - self.control_failure_since[name] >= CONTROL_RETRY_SECONDS:
-                self.closing_control[name] = True
-                return self.retire_control(name)
-            self.control_failures[name] = failures + 1
-            if failures + 1 == CONTROL_READ_FAILURE_LIMIT:
-                self.discarding_control[name] = True
-            return False
-        self.control_failures[name] = 0
-        if chunk:
-            self.record_control(name, chunk)
-        return chunk == b"" and self.retire_control(name)
-
-    def retire_control(self, name: str) -> bool:
-        self.closing_control[name] = True
-        reader = self.control_readers[name]
-        assert reader is not None
-        # FileIO owns the descriptor and never closes a recycled FD on retry.
-        if reader.closed:
-            return True
-        attempts = self.control_close_attempts[name]
-        now = time.monotonic()
-        if attempts == 0:
-            self.control_close_until[name] = now + CONTROL_RETRY_SECONDS
-        elif attempts == CONTROL_CLOSE_LIMIT or now >= self.control_close_until[name]:
-            time.sleep(0.01)  # Keep ownership without spinning on the ready pipe.
-            return False
-        self.control_close_attempts[name] = attempts + 1
-        try:
-            if name == "console":
-                self.close_console_reader()
-            else:
-                self.close_stderr_reader()
-        except Exception:
-            self.capture_lost = True
-        return reader.closed
+        return False
 
     def drain(self, events: selectors.BaseSelector) -> None:
+        if not self.console_open:
+            return
         for key in events.get_map().values():
             if key.data == "stream":
                 continue
-            # Only already-open nonblocking control pipes can remain here.
+            # The serial pipe is nonblocking and QEMU has been reaped.
             for _ in range(8):
-                if self.read_control(key.data, key.fd):
+                if self.read_console(key.fd):
                     break
             else:
                 self.lose_diagnostics()
@@ -473,7 +392,7 @@ class ImageJob:
             events.register(pipe, selectors.EVENT_READ, name)
 
     def capture(self, process: subprocess.Popen, seconds: int) -> None:
-        """Drain three bounded pipes without echoing guest bytes to a terminal."""
+        """Capture bounded guest streams without echoing them to a terminal."""
         self.state.update(qemu=process_identity(process.pid), started_at=time.time(),
                           stop_reason="running")
         receipt(self.directory / "started.json", self.state)
@@ -529,12 +448,18 @@ class ImageJob:
                     for event, _mask in ready:
                         self.cancellation.check()
                         name = event.data
-                        if self.probe and name != "stream":
-                            try:
-                                if self.read_control(name, event.fd):
-                                    events.unregister(event.fileobj)
-                            except Exception:
-                                self.capture_lost = True
+                        if self.probe and name == "console":
+                            if self.console_open:
+                                try:
+                                    self.console_open = not self.read_console(event.fd)
+                                except Exception:
+                                    self.console_open = False
+                                    self.capture_lost = True
+                                if not self.console_open:
+                                    try:
+                                        events.unregister(event.fileobj)
+                                    except Exception:
+                                        self.capture_lost = True
                             continue
                         try:
                             chunk = os.read(event.fd, 1024 * 1024)
