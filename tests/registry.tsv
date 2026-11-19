@@ -130,6 +130,7 @@ tests/ssh-enablement-contract.test.sh	shell	unit	default-shell	production ssh st
 tests/data-persistence-public-symlink.test.sh	shell	unit	default-shell	the /data seeding loop preserves the frontend public symlink
 tests/resolv-conf-symlink.test.sh	shell	unit	default-shell	/etc/resolv.conf ends up the systemd-resolved stub symlink
 tests/resolv-conf-bind-mount.test.sh	shell	unit	default-shell	the resolv.conf bind-mount variant of the same contract
+tests/ceraui-build-stamps.test.sh	shell	unit	default-shell	CeraUI revision/version stamps on /data follow the booted slot after an OTA, package upgrades keep their own
 tests/interface-naming-path-match.test.sh	shell	unit	default-shell	.link Path= matches on both the retired-vendor and mainline ID_PATH spellings
 tests/board-quirk-udev-rules.test.sh	shell	unit	default-shell	the board-manifest-gated M.2 SIM quirk rows reach the LIVE ./build writer via the QUIRKS_* -> CERALIVE_BOARD_QUIRKS -> PassEnvironment plumbing, and reach ONLY boards that declare the quirk
 mkosi/customize/test-quirks.sh	shell	unit	default-shell	hermetic dispatch_quirks unit test: usb_power_optimization + m2_modem_sim_workaround handlers invoked, hdmi_input_emi_shield logged-deferred with no handler, unknown quirk warns-and-continues (exit 0)

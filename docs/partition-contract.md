@@ -160,7 +160,8 @@ provisioning wires these via bind-mounts / symlinks (implementation, not contrac
 | `/data/ceralive/dns_cache.json` | DNS cache | `/opt/ceralive/dns_cache.json` |
 | `/data/ceralive/gsm_operator_cache.json` | Modem operator cache | `/opt/ceralive/gsm_operator_cache.json` |
 | `/data/ceralive/relays_cache.json` | Relay cache | `/opt/ceralive/relays_cache.json` |
-| `/data/ceralive/revision` | Installed UI revision marker | `/opt/ceralive/revision` |
+| `/data/ceralive/revision` | Installed UI revision marker (linked each boot to the booted slot's copy) | `/opt/ceralive/revision` |
+| `/data/ceralive/version` | Installed UI version marker (linked each boot to the booted slot's copy) | `/opt/ceralive/version` |
 | `/data/ceralive/host_index` | Persistent deterministic-hostname index | `/etc/ceralive/host_index` |
 | `/data/ceralive/machine-id` | Stable machine identity for host keys, TLS, and setup identifiers | `/etc/machine-id` (persist copy) |
 | `/data/nm/system-connections/` | **WiFi credentials / NM profiles** | `/etc/NetworkManager/system-connections/` |

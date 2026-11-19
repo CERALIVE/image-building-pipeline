@@ -352,6 +352,66 @@ prune_package_docs() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# keep_ceraui_build_stamps [root] — keep this slot's CeraUI build stamps outside
+# the /data bind, with the package version they belong to.
+#
+# CeraUI reads `revision` (its commit) and `version` (its CalVer) relative to its
+# WorkingDirectory, /opt/ceralive, to build the CeraUI row in Settings -> Versions.
+# On the device /data/ceralive is bind-mounted over /opt/ceralive
+# (customize/postinst.d/persistence.sh), so the .deb's copies are hidden and
+# whatever /data holds is what CeraUI reads. ceralive-migrate-data links the two
+# names to the copies kept here on every boot while the slot's installed
+# ceralive-device is still the version recorded in package-version, so after an
+# OTA the row names the new slot's CeraUI instead of the first image's.
+# ---------------------------------------------------------------------------
+CERAUI_BUILD_STAMPS=(revision version)
+CERAUI_BUILD_STAMPS_DIR="/usr/libexec/ceralive/ceraui-stamps"
+# NON-FATAL, like the boot side: a failure costs the Versions label, not the
+# image. package-version is what lets the boot side link the copies, so the old
+# one goes first, then every old copy, and the new one is written last
+# (atomically) after this run's copies succeeded. Whatever a failure leaves has
+# no package-version, so at boot that slot only removes stale links. If an old
+# package-version cannot be removed, capture is skipped and it stays.
+drop_ceraui_build_stamps() { # $1=dir $2=reason
+  log "WARN: $2; the Versions row will show the dpkg version"
+  rm -rf -- "$1" 2>/dev/null || log "WARN: could not remove $1; it has no package-version, so it is never linked"
+}
+keep_ceraui_build_stamps() {
+  local root="${1:-}" name kept=0 package_version=""
+  local dir="${root}${CERAUI_BUILD_STAMPS_DIR}"
+  if ! rm -f -- "${dir}/package-version" 2>/dev/null; then
+    log "WARN: could not clear an old ${CERAUI_BUILD_STAMPS_DIR}/package-version; not keeping CeraUI build stamps"
+    return 0
+  fi
+  if ! rm -rf -- "${dir}" 2>/dev/null; then
+    log "WARN: could not clear old copies in ${CERAUI_BUILD_STAMPS_DIR}; not keeping CeraUI build stamps"
+    return 0
+  fi
+  for name in "${CERAUI_BUILD_STAMPS[@]}"; do
+    [[ -f "${root}/opt/ceralive/${name}" && ! -L "${root}/opt/ceralive/${name}" ]] || continue
+    if ! install -D -m 0644 "${root}/opt/ceralive/${name}" "${dir}/${name}"; then
+      drop_ceraui_build_stamps "${dir}" "could not keep CeraUI's ${name} stamp"
+      return 0
+    fi
+    kept=1
+  done
+  if (( ! kept )); then
+    log "ceralive-device ships no build stamps in /opt/ceralive; nothing to keep outside the /data bind"
+    return 0
+  fi
+  # shellcheck disable=SC2016 # dpkg-query's own field syntax
+  package_version="$(dpkg-query --admindir="${root}/var/lib/dpkg" -W -f='${Version}' ceralive-device 2>/dev/null)" || package_version=""
+  if [[ -z "${package_version}" ]] \
+    || ! printf '%s\n' "${package_version}" >"${dir}/package-version.tmp" \
+    || ! chmod 0644 "${dir}/package-version.tmp" \
+    || ! mv -f -- "${dir}/package-version.tmp" "${dir}/package-version"; then
+    drop_ceraui_build_stamps "${dir}" "could not record which ceralive-device the CeraUI build stamps belong to"
+    return 0
+  fi
+  log "kept CeraUI build stamps for ceralive-device ${package_version} at ${CERAUI_BUILD_STAMPS_DIR}"
+}
+
 main() {
   log "APPLICATION layer (Stage 3) — installing first-party CeraLive apps"
   install_chroot_service_policy
@@ -359,6 +419,7 @@ main() {
 
   if compgen -G "${FIRST_PARTY_DIR}/*.deb" >/dev/null 2>&1; then
     install_first_party_apps
+    keep_ceraui_build_stamps
   else
     log "no first-party .debs staged at ${FIRST_PARTY_DIR} (offline/dev build) — installing nothing"
   fi
