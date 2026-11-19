@@ -370,6 +370,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def sync(fd):
         nonlocal fail_sync, terminal_synced
+        if startup:
+            # Keep receipt publication real without timing host disk flushes in the startup matrix.
+            os.fstat(fd)
+            return
         path = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
         if fail_sync and path == directory:
             fail_sync = False
