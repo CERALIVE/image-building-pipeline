@@ -23,7 +23,8 @@ import uuid
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
 from image_stream import (
-    CONTROL_LOG_LIMIT, IO_ATTEMPTS, ExclusiveFile, Identity, StreamError, create_file, retry_io, write_all,
+    CONTROL_LOG_LIMIT, IO_ATTEMPTS, ExclusiveFile, Identity, StreamError, create_file, report_error, retry_io,
+    sync_file, write_all,
 )
 from vm_process import (
     POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
@@ -78,7 +79,7 @@ def sync_directory(path: Path) -> None:
     fd = None
     try:
         fd = retry_io(os.open, path, os.O_DIRECTORY, recover=True)
-        retry_io(os.fsync, fd, recover=True)
+        sync_file(fd)
     finally:
         if fd is not None:
             try:
@@ -153,7 +154,7 @@ class Receipt:
 
     def file_sync(self) -> None:
         assert self.file_fd is not None and self.file_fd >= 0
-        retry_io(os.fsync, self.file_fd, recover=True)
+        sync_file(self.file_fd)
 
     def file_close(self) -> None:
         fd = self.file_fd
@@ -194,7 +195,7 @@ class Receipt:
 
     def dir_sync(self) -> None:
         if self.directory_fd is not None:
-            retry_io(os.fsync, self.directory_fd, recover=self.outcome is None)
+            sync_file(self.directory_fd, recover=self.outcome is None)
 
     def dir_close(self) -> None:
         if self.directory_fd is not None:
@@ -249,21 +250,6 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
         if isinstance(failure, Cancelled):
             raise failure
         raise ReceiptError(str(failure)) from failure
-
-
-def report_error(error: BaseException | str) -> None:
-    """Keep stderr backpressure out of receipt publication and launcher exit."""
-    try:
-        message = f"kernel runner: {error}\n".encode(errors="backslashreplace")
-        # Reopen so setting nonblocking doesn't change the caller's descriptor.
-        sink = FileIO("/proc/self/fd/2", "ab",
-                      opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK | os.O_NOCTTY))
-        try:
-            sink.write(message[:4096])
-        finally:
-            close_transport(sink.close)
-    except BaseException:
-        return
 
 
 def reconcile(store: Path) -> None:
@@ -673,4 +659,4 @@ def sync_output(output) -> None:
     if output.fileno() < 0:
         return
     retry_io(output.flush, recover=True)
-    retry_io(os.fsync, output.fileno(), recover=True)
+    sync_file(output.fileno())

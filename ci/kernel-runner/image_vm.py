@@ -26,7 +26,7 @@ from image_lifecycle import (
 )
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
-from image_stream import Identity, StreamError, decode, retry_io, verify_sidecar
+from image_stream import Identity, StreamError, decode, positioned_open, retry_io, verify_sidecar
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, MemoryError, AdmissionError,
@@ -114,14 +114,8 @@ def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str,
 def validate_return(job: ImageJob, verifier: bool) -> None:
     target = job.artifacts
     envelope = job.directory / "stream.partial"
-    members = None
-    try:
-        with retry_io(envelope.open, "rb", recover=True) as source:
-            members = decode(source, target, job.identity, job.cancellation.check)
-    except OSError as error:
-        if members is None:
-            raise
-        report_error(error)  # The input is read-only and Linux released its FD.
+    with positioned_open(envelope) as source:
+        members = decode(source, target, job.identity, job.cancellation.check)
     expected = {"verification.json"} if verifier else {
         "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
         "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",

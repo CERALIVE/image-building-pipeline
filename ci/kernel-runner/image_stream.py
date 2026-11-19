@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import errno
 import hashlib
+from io import BufferedReader, RawIOBase
 import json
 import os
 from pathlib import Path
@@ -20,7 +22,9 @@ CONTROL_LOG_LIMIT: Final = 8 * 1024**2
 BUILD_LOG_LIMIT: Final = 1024**3 - 16 * 1024**2
 MAGIC: Final = b"CERALIVE_IMAGE_STREAM_V1\n"
 IO_ATTEMPTS: Final = 3
-RETRYABLE_IO: Final = frozenset((errno.EACCES, errno.EPERM, errno.EBUSY, errno.EIO, errno.ENOSPC, errno.EBADF))
+RETRYABLE_IO: Final = frozenset((errno.EACCES, errno.EPERM, errno.EBUSY, errno.EIO, errno.ENOSPC,
+                               errno.EBADF, errno.ENOSYS, errno.EAGAIN, errno.EDQUOT))
+UNSUPPORTED_SYNC: Final = frozenset((errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EROFS))
 ARTIFACTS: Final = frozenset((
     "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
     "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -36,16 +40,95 @@ class StreamError(Exception):
     """Untrusted stream violates the fixed artifact contract."""
 
 
-def retry_io(operation, *args, recover: bool = False, **kwargs):
+def retry_io(operation, *args, recover: bool = False, no_retry: frozenset[int] = frozenset(), **kwargs):
     """Retry safe operations at most three times including the first call."""
     for attempt in range(IO_ATTEMPTS):
         try:
             return operation(*args, **kwargs)
         except OSError as error:
-            if (attempt + 1 == IO_ATTEMPTS or not (
+            if (error.errno in no_retry or attempt + 1 == IO_ATTEMPTS or not (
                     isinstance(error, InterruptedError) or error.errno == errno.EINTR
                     or recover and error.errno in RETRYABLE_IO)):
                 raise
+
+
+def report_error(error: BaseException | str) -> None:
+    """Keep stderr backpressure out of receipt publication and launcher exit."""
+    fd = None
+    try:
+        message = f"kernel runner: {error}\n".encode(errors="backslashreplace")
+        # Reopen so setting nonblocking doesn't change the caller's descriptor.
+        fd = os.open("/proc/self/fd/2", os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+        os.write(fd, message[:4096])
+    except BaseException:
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def sync_file(fd: int, *, recover: bool = True) -> None:
+    """Attempt durability, or report that the filesystem cannot provide it."""
+    try:
+        retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
+    except OSError as error:
+        if error.errno not in UNSUPPORTED_SYNC:
+            raise
+        report_error(f"durability=unsupported ({error})")
+
+
+class PositionedReader(RawIOBase):
+    """Keep the raw offset private. Retry only a read that made no progress."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+        self.offset = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if whence == os.SEEK_CUR:
+            offset += self.offset
+        elif whence == os.SEEK_END:
+            offset += retry_io(os.fstat, self.fd, recover=True).st_size
+        elif whence != os.SEEK_SET:
+            raise ValueError("invalid seek origin")
+        if offset < 0:
+            raise OSError(errno.EINVAL, "negative input offset")
+        self.offset = offset
+        return offset
+
+    def tell(self) -> int:
+        return self.offset
+
+    def readinto(self, buffer) -> int:
+        data = retry_io(os.pread, self.fd, len(buffer), self.offset, recover=True)
+        buffer[:len(data)] = data
+        self.offset += len(data)
+        return len(data)
+
+
+@contextmanager
+def positioned_open(path: Path):
+    """Own a regular input while exposing buffered reads over retry-safe pread."""
+    fd = None
+    try:
+        fd = retry_io(os.open, path, os.O_RDONLY | os.O_CLOEXEC, recover=True)
+        with BufferedReader(PositionedReader(fd)) as stream:
+            yield stream
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError as error:
+                report_error(error)  # A read-only close cannot invalidate consumed bytes.
 
 
 def write_all(destination: BinaryIO | int, data: bytes) -> None:
@@ -157,7 +240,7 @@ def unique_object(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
 
 
 def read_header(source: BinaryIO) -> Member:
-    line = retry_io(source.readline, HEADER_LIMIT + 1, recover=True)
+    line = source.readline(HEADER_LIMIT + 1)
     if len(line) > HEADER_LIMIT or not line.endswith(b"\n"):
         raise StreamError("missing or oversized record header")
     try:
@@ -183,7 +266,7 @@ def transfer(source: BinaryIO, destination: BinaryIO | int, member: Member,
         if checkpoint is not None:
             checkpoint()
         size = min(1024 * 1024, remaining)
-        chunk = retry_io(source.read, size, recover=True) if decoding else source.read(size)
+        chunk = source.read(size)
         if not chunk:
             raise StreamError("truncated artifact")
         if decoding:
@@ -201,7 +284,7 @@ def transfer(source: BinaryIO, destination: BinaryIO | int, member: Member,
 def decode(source: BinaryIO, directory: Path, expected: Identity,
            checkpoint: Callable[[], None] | None = None) -> tuple[Member, ...]:
     """Decode only fixed IDs into exclusive private files; never extract an archive."""
-    if retry_io(source.read, len(MAGIC), recover=True) != MAGIC:
+    if source.read(len(MAGIC)) != MAGIC:
         raise StreamError("invalid stream version")
     members: list[Member] = []
     seen = set()
@@ -224,7 +307,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
             if manifest != {"schema": 1, "identity": asdict(expected),
                             "members": [asdict(item) for item in members]}:
                 raise StreamError("terminal manifest identity or inventory mismatch")
-            if not members or retry_io(source.read, 1, recover=True):
+            if not members or source.read(1):
                 raise StreamError("empty stream or trailing bytes")
             return tuple(members)
         if member.id not in ARTIFACTS or member.id in seen:
@@ -244,7 +327,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
             output.open()
             fd = output.fileno()
             transfer(source, fd, member, checkpoint, decoding=True)
-            retry_io(os.fsync, fd, recover=True)
+            sync_file(fd)
         members.append(member)
 
 

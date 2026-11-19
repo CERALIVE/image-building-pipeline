@@ -2,6 +2,7 @@
 """Unprivileged image transport regressions; never start QEMU or read credentials."""
 
 from contextlib import ExitStack
+import errno
 import fcntl
 import hashlib
 import io
@@ -19,7 +20,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 import image_guest
 from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
-from image_capsule import unpack
+from image_capsule import unpack, verification_capsule
+from image_transport import copy_local
 from image_verify import compare_slot
 from image_urls import InputURLError, canonical_url
 
@@ -249,6 +251,76 @@ def test_capsule_accepts_only_declared_digest_named_regular_objects() -> None:
                 assert result.source_commit == IDENTITY.commit
                 assert (root / "imported" / source_sha).read_bytes() == source
             assert not (root.parent / "escaped").exists()
+
+
+def test_copy_reads_and_writes_survive_transient_errors() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        artifacts = root / "artifacts"
+        artifacts.mkdir()
+        artifact = artifacts / "verification.json"
+        payload = bytes(range(256)) * 4097
+        artifact.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        capsule = root / "original.tar"
+        trusted = b"public fixture input"
+        trusted_digest = hashlib.sha256(trusted).hexdigest()
+        inventory = json.dumps({"objects": [{"kind": "source-bundle", "sha256": trusted_digest,
+                                             "length": len(trusted)}]}).encode()
+        with tarfile.open(capsule, "w:") as source:
+            for name, data in (("inventory.json", inventory), ("objects/" + trusted_digest, trusted)):
+                header = tarfile.TarInfo(name)
+                header.size = len(data)
+                source.addfile(header, io.BytesIO(data))
+        target = root / "target"
+        pread, write = os.pread, os.write
+        for action in (lambda: copy_local(artifact, target, len(payload)),
+                       lambda: verification_capsule(capsule, artifacts, target)):
+            def run_fault(fault=None, persistent=False):
+                calls = []
+                injected = 0
+
+                def dispatch(name, fd, position, operation, *args):
+                    nonlocal injected
+                    site = (name, len(calls))
+                    if fault and (not injected and site == fault[:2] or persistent and injected):
+                        injected += 1
+                        raise OSError(fault[2], "fixture transfer failure")
+                    calls.append((name, os.readlink(f"/proc/self/fd/{fd}"), position))
+                    return operation(fd, *args)
+
+                with patch.object(os, "pread", lambda fd, n, at: dispatch("read", fd, at, pread, n, at)), \
+                        patch.object(os, "write", lambda fd, data: dispatch("write", fd, len(data), write, data)):
+                    if persistent:
+                        try:
+                            action()
+                        except OSError as error:
+                            assert error.errno == errno.EIO
+                        else:
+                            raise AssertionError("persistent transfer failure was accepted")
+                    else:
+                        action()
+                assert injected == (3 if persistent else int(fault is not None)), (fault, injected)
+                if persistent:
+                    assert not target.exists()
+                    return None, calls
+                result = target.read_bytes()
+                target.unlink()
+                return result, calls
+
+            baseline, calls = run_fault()
+            if baseline != payload:
+                with tarfile.open(fileobj=io.BytesIO(baseline), mode="r:") as result:
+                    assert result.extractfile("objects/" + digest).read() == payload
+                    assert result.extractfile("objects/" + trusted_digest).read() == trusted
+            assert any(name == "read" for name, _, _ in calls)
+            assert any(name == "write" for name, _, _ in calls)
+            for index, (name, _, _) in enumerate(calls):
+                for error in (errno.EIO, errno.EINTR):
+                    actual, reached = run_fault((name, index, error))
+                    assert (actual, reached) == (baseline, calls), (name, index, error)
+            writes = [(name, index) for index, (name, _, _) in enumerate(calls) if name == "write"]
+            run_fault((*writes[-1], errno.EIO), persistent=True)
 
 
 def test_slot_comparison_rejects_changed_bytes_extra_files_and_root_metadata() -> None:

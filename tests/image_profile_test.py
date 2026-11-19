@@ -43,7 +43,7 @@ import image_vm
 import vm_process
 import vm_startup
 from image_lifecycle import ImageJob, reconcile
-from image_stream import Identity, StreamError, decode, encode
+from image_stream import MAGIC, UNSUPPORTED_SYNC, Identity, StreamError, decode, encode
 import vm
 from image_vm import retained_outputs, validate_base
 from vm_process import CATCHABLE_SIGNALS, Cancellation, run
@@ -282,6 +282,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     tail_case = (mode.split("tail-io:", 1)[1].split("/")
                  if mode.startswith(("tail-io:", "pair:tail-io:")) else [])
     tail_count = 0
+    frame_offsets = set()
 
     def tail_fault(point):
         nonlocal tail_count
@@ -947,6 +948,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 if child_fault or signal_fault or teardown_fault or commit_fault or tail_case:
                     children = pathlib.Path(f"/proc/self/task/{launcher_pid}/children").read_text().split()
                     (root / "launcher-children").write_text(json.dumps(children))
+                if tail_case and tail_case[0].startswith("frame-read-"):
+                    (root / "frame-offsets").write_text(json.dumps(sorted(frame_offsets)))
                 real_exit(status)
 
         if check_descriptors:
@@ -1453,9 +1456,29 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     return boundary(on_loss, action, *args, **kwargs)
                 patches.enter_context(patch.object(image_lifecycle, "optional", fault_boundary))
         if tail_case:
-            native_write = os.write
+            native_write, native_pread = os.write, os.pread
             native_signal = signal.signal
+            native_pending = signal.sigpending
             native_mkdir = pathlib.Path.mkdir
+            frame_cuts = ()
+            if tail_case[0].startswith("frame-read-"):
+                frame = (root / "probe.frame").read_bytes()
+                header_end = frame.index(b"\n", len(MAGIC)) + 1
+                trailer = frame.index(b'{"id":"manifest"', header_end)
+                frame_cuts = (len(MAGIC), header_end, 128 * 1024, trailer,
+                              frame.index(b"\n", trailer) + 1, len(frame))
+
+            def tail_pread(fd, size, offset):
+                if frame_cuts and os.readlink(f"/proc/self/fd/{fd}") == str(directory / "stream.partial"):
+                    frame_offsets.add(offset)
+                    tail_fault(f"frame-read-{offset}")
+                    size = min(size, next((cut - offset for cut in frame_cuts if cut > offset), size))
+                return native_pread(fd, size, offset)
+
+            def tail_pending():
+                if receipt_phase(sys._getframe(1)) == "exit":
+                    tail_signal_at("checkpoint")
+                return native_pending()
 
             def tail_signal(sig, handler):
                 if sig == signal.SIGUSR1 and handler == signal.SIG_IGN:
@@ -1523,7 +1546,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(os, "open", tail_open))
             patches.enter_context(patch.object(os, "close", tail_close))
             patches.enter_context(patch.object(os, "write", tail_write))
+            patches.enter_context(patch.object(os, "pread", tail_pread))
             patches.enter_context(patch.object(signal, "signal", tail_signal))
+            patches.enter_context(patch.object(signal, "sigpending", tail_pending))
             patches.enter_context(patch.object(pathlib.Path, "mkdir", tail_mkdir))
         if teardown_fault:
             wall_time = time.time
@@ -1649,7 +1674,7 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         }).encode()
         frame = io.BytesIO()
         encode(frame, [("verification.json", probe_body)], identity)
-        if mode.startswith("isolated:sink-large-"):
+        if mode.startswith(("isolated:sink-large-", "tail-io:frame-read-")):
             padding = 787274 - frame.tell()
             for _ in range(2):
                 frame = io.BytesIO()
@@ -1984,13 +2009,15 @@ os.execvp(sys.argv[1], sys.argv[1:])
             required_exhaustion = point in {"verification-read", "exit-file-fsync"} and int(count) == 3
             required_memory_fault = error == "MemoryError" and (
                 point == "verification-read" or point.startswith(("teardown-", "validation-")))
+            checkpoint_cancelled = mode == "tail-io:exit-mask/EINTR/0/checkpoint"
             failed = (required_exhaustion or required_memory_fault or point.endswith("-temp-unlink")
+                      or checkpoint_cancelled
                       or point.startswith("rejected-fd-line-") or point == "exit-ignore" and int(count) == 3)
             assert launcher.returncode == int(failed), (mode, launcher.returncode, stderr)
             row = json.loads(marker.read_text()) if marker.exists() else None
             if row is not None:
                 assert row["launcher_exit"] == launcher.returncode
-                assert row["qemu_reaped"] and row["qemu_exit"] == 0 and row["stream_bytes"] == 836
+                assert row["qemu_reaped"] and row["qemu_exit"] == 0 and row["stream_bytes"] == frame.tell()
                 assert row["qemu_priority"] == FIXTURE_PRIORITY
             else:
                 assert failed
@@ -2003,9 +2030,11 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 fallback = int(count) == 3 or error == "ENOSYS"
                 assert (b"catchable signals ignored" in stderr) == fallback
                 assert (root / "tail-signal-sent").exists()
+                if mode.endswith("/checkpoint"):
+                    assert (row["stop_reason"] == "cancelled") == checkpoint_cancelled
             if point == "exit-ignore":
                 assert (root / "tail-signal-sent").exists() is (not failed)
-            if point.endswith("-allocation") or point == "baseline" or point.endswith("-fd-line-baseline"):
+            if point.endswith("-allocation") or int(count) == 0:
                 assert not (root / "tail-fault-count").exists(), (mode, stderr)
             else:
                 assert int((root / "tail-fault-count").read_text()) == int(count), (mode, stderr)
@@ -2017,10 +2046,15 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert not active.exists()
             if point.endswith("-fd-line-baseline"):
                 return json.loads((root / "live-receipt-lines").read_text())
+            if (point.endswith(("-sync", "-fsync")) and error != "MemoryError"
+                    and getattr(errno, error) in UNSUPPORTED_SYNC):
+                assert b"durability=unsupported" in stderr, (mode, stderr)
             if row is not None:
                 for key in ("acquired_at", "started_at", "ended_at", "base", "launcher", "qemu",
                             "overlay_directory", "overlay_inode", "overlay_fd"):
                     row.pop(key, None)
+            if point == "frame-read-baseline":
+                return {"offsets": json.loads((root / "frame-offsets").read_text()), "row": row}
             return row
         if sweep:
             initial, final = json.loads((root / "descriptor-check").read_text())
@@ -3024,6 +3058,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             "sync_directory": ("os.close(fd)",),
             "dir_close": ("os.close(self.directory_fd)",),
             "file_close": ("os.close(fd)",),
+            "report_error": ("os.close(fd)",),
         }.get(tree.body[0].name, ()))
         registration_methods = {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}
         bad = set()
@@ -3100,7 +3135,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         (ImageJob.close_console_reader, ()),
         (image_lifecycle.pipe_files, ("_PIPE2", "PipeEnd", "PipeEnd")),
         (image_lifecycle.job_disk, ("tempfile.TemporaryFile",)),
-        (image_lifecycle.report_error, ("FileIO", "os.open")),
+        (image_lifecycle.report_error, ("os.open",)),
         (image_lifecycle.sync_directory, ("os.open",)),
         (image_lifecycle.Receipt.file_close, ()),
         (image_lifecycle.Receipt.dir_close, ()),
@@ -3329,6 +3364,33 @@ def test_finalization_disposition_fallback_preserves_receipt_and_exit() -> None:
             for fault in ("EPERM/3", "ENOSYS/1"):
                 assert cancelled_fixture(f"tail-io:exit-mask/{fault}/{point}", signum) == baseline
     assert cancelled_fixture("tail-io:exit-ignore/EPERM/3") is None
+    assert cancelled_fixture("tail-io:exit-mask/ENOSYS/1/checkpoint") == baseline
+    stopped = cancelled_fixture("tail-io:exit-mask/EINTR/0/checkpoint")
+    assert stopped["launcher_exit"] == 1 and stopped["stop_reason"] == "cancelled"
+
+
+def test_large_frame_retries_each_read_at_the_same_offset() -> None:
+    control = cancelled_fixture("tail-io:frame-read-baseline/EIO/0")
+    offsets, baseline = control["offsets"], control["row"]
+    assert offsets[0] == 0 and offsets[-1] == baseline["stream_bytes"] == 787274
+    assert len(MAGIC) in offsets and 128 * 1024 in offsets and len(offsets) >= 7
+    for offset in offsets:
+        for error, count in (("EIO", 1), ("EIO", 2), ("EINTR", 1), ("EINTR", 2), ("EAGAIN", 2)):
+            row = cancelled_fixture(f"tail-io:frame-read-{offset}/{error}/{count}")
+            assert row == baseline, (offset, error, count, baseline, row)
+
+
+def test_unsupported_durability_preserves_published_outcome() -> None:
+    baseline = cancelled_fixture("tail-io:baseline/EINTR/0")
+    paths = ("parent-sync", "capture-sync", "artifact-sync", "artifact-dir-sync", "journal-dir-fsync",
+             *(f"{phase}-{where}-fsync" for phase in ("active", "started", "validation", "teardown", "exit")
+               for where in ("file", "dir")))
+    for path in paths:
+        for error in ("ENOSYS", "EINVAL", "ENOTSUP", "EROFS"):
+            row = cancelled_fixture(f"tail-io:{path}/{error}/1")
+            assert row == baseline, (path, error, baseline, row)
+    for error in ("EIO", "ENOSPC", "EDQUOT"):
+        assert cancelled_fixture(f"tail-io:exit-file-fsync/{error}/3") is None
 
 
 def test_attempt_preparation_and_journal_survive_transient_io() -> None:
@@ -4072,6 +4134,8 @@ if __name__ == "__main__":
                             test_receipt_allocation_faults_close_live_temporary_descriptors,
                             test_exclusive_file_creation_has_one_owner),
         "--terminal-fallback": (test_finalization_disposition_fallback_preserves_receipt_and_exit,),
+        "--read-and-sync": (test_large_frame_retries_each_read_at_the_same_offset,
+                            test_unsupported_durability_preserves_published_outcome),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,

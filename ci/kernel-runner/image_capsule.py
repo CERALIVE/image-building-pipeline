@@ -9,10 +9,11 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tarfile
 from typing import BinaryIO, Callable, Final
 
-from image_stream import ExclusiveFile, Identity, StreamError, retry_io, unique_object
+from image_stream import ExclusiveFile, Identity, StreamError, positioned_open, retry_io, unique_object
 from image_urls import InputURLError, canonical_url
 
 INPUT_LIMIT: Final = 32 * 1024**3
@@ -41,7 +42,7 @@ class Capsule:
 
 
 def digest_file(path: Path, checkpoint: Callable[[], None] | None = None) -> str:
-    with path.open("rb") as source:
+    with positioned_open(path) as source:
         if checkpoint is None:
             return hashlib.file_digest(source, "sha256").hexdigest()
         digest = hashlib.sha256()
@@ -144,7 +145,7 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
                          checkpoint: Callable[[], None] | None = None) -> dict[str, str]:
     """Host packs only selected regular data; no pathname or extraction from the guest."""
     selected = {}
-    with tarfile.open(original, "r:") as source:
+    with positioned_open(original) as capsule, tarfile.open(fileobj=capsule, mode="r:") as source:
         header = source.getmember("inventory.json")
         if not header.isfile() or header.size > 1024 * 1024:
             raise StreamError("oversized verification input inventory")
@@ -156,13 +157,14 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
         objects = {item["sha256"]: item for item in row["objects"]
                    if item["kind"] in ("source-bundle", "public-trust", "apt-metadata", "kernel-metadata")}
         files = {}
-        for file in artifacts.iterdir():
-            if not file.is_file() or file.is_symlink():
+        for file in retry_io(lambda: list(artifacts.iterdir()), recover=True):
+            info = retry_io(file.lstat, recover=True)
+            if not stat.S_ISREG(info.st_mode):
                 raise StreamError("returned artifact is not a controller-owned regular file")
             digest = digest_file(file, checkpoint)
             selected[file.name] = digest
             files[digest] = file
-            objects.setdefault(digest, {"sha256": digest, "length": file.stat().st_size,
+            objects.setdefault(digest, {"sha256": digest, "length": info.st_size,
                                         "kind": "artifact", "urls": []})
         row["objects"] = list(objects.values())
         if sum(item["length"] for item in objects.values()) + 16 * 1024**2 > INPUT_LIMIT:
@@ -179,7 +181,7 @@ def verification_capsule(original: Path, artifacts: Path, destination: Path,
                     header = tarfile.TarInfo("objects/" + digest)
                     header.size = item["length"]
                     if digest in files:
-                        with files[digest].open("rb") as member:
+                        with positioned_open(files[digest]) as member:
                             target.addfile(header, CheckedReader(member, checkpoint))
                     else:
                         member = source.extractfile("objects/" + digest)

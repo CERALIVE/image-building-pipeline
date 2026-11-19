@@ -109,7 +109,8 @@ class Cancellation:
         """Protect the terminal section from all catchable signals until os._exit."""
         if not self.finalizing:
             try:
-                retry_io(signal.pthread_sigmask, signal.SIG_BLOCK, CATCHABLE_SIGNALS, recover=True)
+                retry_io(signal.pthread_sigmask, signal.SIG_BLOCK, CATCHABLE_SIGNALS, recover=True,
+                         no_retry=frozenset((errno.ENOSYS,)))
             except OSError:
                 try:
                     for signum in sorted(CATCHABLE_SIGNALS):

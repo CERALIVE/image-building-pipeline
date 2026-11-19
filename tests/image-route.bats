@@ -128,6 +128,12 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image validation retries positioned reads and tolerates unsupported durability" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --read-and-sync
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image profile pair publication and admission preserve lifecycle guarantees" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --pair-and-admission
   printf '%s\n' "$output"

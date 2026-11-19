@@ -165,6 +165,15 @@ decoder keeps the raw descriptor and never invokes a second file constructor.
 A receipt temporary name collision tries a fresh name without touching the
 existing file. Writes resume at the first unwritten byte. A failed
 transaction closes and removes only the file it acquired.
+A captured frame, local snapshot, or verifier capsule input retries raw
+reads at the same byte offset. The reader advances it only for bytes returned.
+If a required read keeps failing, the launcher rejects the result and removes
+an incomplete output it owns.
+An `fsync` result of `ENOSYS`, `EINVAL`, `ENOTSUP` (`EOPNOTSUPP`), or `EROFS`
+means durability is unavailable. The launcher reports `durability=unsupported`
+on stderr and can still publish a valid result. If `EIO`, `ENOSPC`, or `EDQUOT`
+persists through the bounded retries of a required pre-commit sync, publication
+fails closed.
 A required operation that exhausts its attempts before commit still fails the
 attempt. A final directory sync error after rename is reported without changing
 the committed outcome.
@@ -778,6 +787,13 @@ protects the final cancellation checkpoint and rename against every catchable
 signal. It checks for pending stop signals before the rename. Signal protection
 continues through the rename, directory sync, journal retirement, receipt
 readback and direct process exit.
+The final cancellation checkpoint immediately precedes the rename commit.
+The handler records stop requests before terminal protection. With the signal
+mask installed, a stop already pending at the checkpoint also cancels the run.
+With the disposition fallback installed, the kernel discards a newly arriving
+stop during the protected window, including immediately before the checkpoint.
+In that case the validated attempt can commit success. In both modes the
+committed receipt and the launcher exit report the same verdict.
 The receipt step table independently attempts directory open, sync and close,
 temporary-file cleanup when applicable, and diagnostics. A step failure
 cannot skip the remaining cleanup or change the published result. A final
