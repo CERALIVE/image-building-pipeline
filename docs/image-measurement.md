@@ -33,14 +33,14 @@ An image unit requires all these effective limits before admission:
 | Resource | Limit or floor |
 |---|---|
 | Guest | 4 vCPUs, 20 GiB RAM, 128 GiB system disk |
-| Host cgroup | MemoryMax 24 GiB, MemorySwapMax 0, CPUQuota at most 400%, IOWeight at most 10 |
-| Host scheduling | Affinity to four selected logical CPUs, nice at least 10 |
+| Host cgroup | MemoryMax 24 GiB, MemorySwapMax 0, CPUQuota at most 400%, CPUWeight at most 10 on the workload cgroup, IOWeight at most 10 |
+| Host scheduling | Affinity to four selected logical CPUs, non-realtime CPU scheduling, nice 9–19 (launch at 10) |
 | Host memory | At least 32 GiB actual MemAvailable |
 | QEMU file size | 144 GiB, including qcow2 overhead; core dumps disabled |
 | Input capsule | At most 32 GiB |
 | Raw return | At most 16 GiB per board; at most 32 GiB retained for the pair |
 | Console, diagnostics and receipts | At most 1 GiB per active attempt |
-| Deadline | 21,600 s build, 1,800 s verifier; owned TERM/KILL teardown bounded by the launcher |
+| Deadline | 21,600 s build, 1,800 s verifier, with up to 20 s from owned QEMU TERM to KILL |
 | Disk reserve | At least 30 GiB beyond remaining bounded allocations on each affected filesystem |
 
 Before fresh preparation the conservative complete budget is 287 GiB:
@@ -52,6 +52,16 @@ filesystem and watches remaining headroom while QEMU runs. It stops its own
 attempt if headroom disappears. It never deletes shared caches or foreign
 artifacts and never automatically retries.
 
+CPUWeight keeps the whole cgroup low priority when it competes for CPU.
+The CPU and memory caps still apply independently. A host rule such as
+ananicy-cpp's `Heavy_CPU` can change QEMU from nice 10 to 9 without changing
+the cgroup. The launcher tolerates that adjustment, checks the running QEMU
+process and its cgroup about every five seconds, and stops the attempt if the
+priority floor or required limits are lost at a check. The exit receipt
+includes the last QEMU observation of `nice`, `ionice` (via util-linux), and
+`cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
+is refused for the measurement guest.
+
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,
 plan lock second; keep the innermost direct parent as literal
@@ -59,11 +69,13 @@ plan lock second; keep the innermost direct parent as literal
 locks. Confirm that any preceding heavy unit has finished teardown or adopted
 the same host lock before queueing a measurement.
 
-For an independently prepared and approved base, capsule and public policy:
+For an independently prepared and approved base, capsule and public policy,
+the example assumes a shell at nice 0. `nice -n 10` is a relative adjustment.
+If the shell inherits another value, adjust the increment to start at nice 10.
 
 ```sh
 systemd-run --user --scope \
-  -p CPUQuota=400% -p MemoryMax=24G -p MemorySwapMax=0 -p IOWeight=10 \
+  -p CPUQuota=400% -p CPUWeight=10 -p MemoryMax=24G -p MemorySwapMax=0 -p IOWeight=10 \
   nice -n 10 taskset -c "${IMAGE_CPUS:?select exactly four logical CPUs}" \
   flock --exclusive --close /tmp/host-heavy.lock \
   python3 ci/kernel-runner/vm.py image \
@@ -553,7 +565,8 @@ firmware closure/inventory, package identities, kernel metadata and actual
 clean ext4 reserves. Read-only guest mounts compare slot contents with the
 emitted tar plus independently recompiled boot payload; ext4's empty
 `lost+found` is filesystem housekeeping. Only a matching verifier result
-produces the host `acceptance.json`. Transport and exit receipts are separate.
+produces the host's candidate `acceptance.json`. The final marker makes it
+eligible for use.
 The mounts retain `noexec,nodev,nosuid`. Shared parity checks require regular
 executable files with stored execute mode bits, rather than asking whether
 the verifier's mount policy permits their execution.
@@ -563,8 +576,84 @@ deny X_OK while preserving the fixture's file metadata. It creates no mount,
 executes no image binary and needs no sudo. Hosted CI and prepared test bases
 declare strace as a test tool.
 
-Receipts record source/base/input identities, launcher/QEMU process start
-identities, times, caps, exit/stop reason, reaping and descriptor closure.
+### Teardown and publication
+
+The launcher sanitizes its process state before admission. It blocks signals
+while disarming real, virtual and profiling timers and consuming pending
+timer signals. It installs TERM, INT and HUP handlers, restores default
+dispositions for child reaping and the other tracked signals, then clears
+the inherited mask. A stop already pending is handled as cancellation.
+It reserves standard descriptors, filling any missing stream with
+`/dev/null`, closes all other inherited descriptors, and sets umask `077`.
+If verification of this baseline fails, it reports a startup error and
+exits 78 before starting a helper or guest.
+
+Relative arguments are resolved from the caller's directory. QEMU and its
+helpers use `/` as their working directory, an absolute tool search path,
+and `LANG=C.UTF-8`. The separate host-only registration command retains its
+GitHub configuration and uses the same fixed locale. At exec, QEMU and its
+helpers have default dispositions for the tracked signals. The launcher
+reaps only the owned PID with `waitpid` and rejects an unavailable exit
+status. Child creation is forbidden after terminal finalization begins.
+
+Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
+idle I/O loop checks for cancellation at least once per second. The launcher
+stops draining pipes and sends TERM to the owned QEMU process, then sends KILL
+if it has not exited after 20 seconds. Additional signals do not reset that
+grace period. Allow up to 600 seconds for teardown and receipt I/O on a
+responsive host.
+
+The launcher holds the flock through all of these steps:
+
+1. Create private directories and sync their parent entries. Journal the
+   overlay in `active.json` before it can be inherited. Publish `started.json`
+   and update `active.json` with the QEMU process identity when it starts.
+2. Reap QEMU and close its pipes, the payload and the anonymous overlay.
+   Closing the last overlay descriptor removes the overlay. Flush and sync
+   the captured output before decoding. Validate and sync the decoded files
+   and artifact directory before publishing their `transport-validation.json`.
+   Discard the captured stream after transport validation.
+3. Close the input capsule, console and any remaining output descriptors.
+   Write each guest's `teardown.json` after cleanup. It records source, base
+   and input identities, process start identities, timing, caps, reaping and
+   descriptor closure. Retire and sync the ownership journal only after
+   teardown has been recorded and closure is confirmed. On the measurement
+   path, repeat these steps for the independent verifier, validate its result,
+   remove its temporary capsule and write the candidate `acceptance.json`.
+4. Commit exactly one final `exit.json` last. For a probe it is in `build/`.
+   For a build and verifier pair it is in the attempt directory alongside
+   `acceptance.json`. Only a marker with `launcher_exit` equal to 0 and
+   `pair_complete` equal to true, with the matching identity and SHA-256 of
+   `acceptance.json`, completes a pair. The host retention check and other
+   consumers must reject an acceptance candidate without this marker, even
+   when guest transport and teardown receipts already exist.
+
+Every receipt is written to a mode-0600 temporary file in its own directory,
+flushed and file-synced, atomically renamed into place, and followed by a
+directory sync. The final marker's **rename is the commit point**. A
+publication failure before that rename leaves the marker absent and exits
+nonzero. Consumers treat a missing marker as failure. Cancellation before
+the final rename transaction produces a marker with `stop_reason` set to
+`cancelled` and `launcher_exit` set to 1 when storage permits. The launcher
+blocks every catchable signal once, before the final cancellation checkpoint.
+It checks for pending stop signals before the rename. The same mask remains
+in force through the rename, directory sync, receipt read-back and direct
+process exit. Pending signals after the checkpoint are discarded at exit.
+The receipt step table independently attempts directory open, sync and close,
+temporary-file cleanup when applicable, and diagnostics. A step failure
+cannot skip the remaining cleanup or change the published result. A final
+directory-sync failure leaves the file visible at runtime, but a crash may
+lose the rename.
+
+After teardown and publication, the CLI reads `launcher_exit` from the
+published marker. A missing or unreadable marker, or an invalid status,
+returns a nonzero exit. The CLI uses a direct process exit so Python
+shutdown hooks cannot replace the result. The external flock releases its
+lock when the launcher exits. The launcher has already reaped QEMU and
+closed the guest descriptors and anonymous overlay before committing success.
+SIGKILL, power loss and external termination of the flock are outside the
+orderly exit contract.
+
 After forced death, the next admission reconciles the exact owned overlay
 inode and process identities. A remaining holder blocks admission; no foreign
 process is killed. Forced destruction never claims that guest cleanup ran.
