@@ -148,7 +148,7 @@ def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Cap
                    row["source_bundle"], row["device_root"], directory, row["fetched_at"])
 
 
-def verification_capsule(original: BinaryIO, artifacts: Path, destination: Path,
+def verification_capsule(original: BinaryIO, artifacts: Path, output: BinaryIO,
                          checkpoint: Callable[[], None] | None = None) -> dict[str, str]:
     """Host packs only selected regular data; no pathname or extraction from the guest."""
     selected = {}
@@ -176,9 +176,7 @@ def verification_capsule(original: BinaryIO, artifacts: Path, destination: Path,
         row["objects"] = list(objects.values())
         if sum(item["length"] for item in objects.values()) + 16 * 1024**2 > INPUT_LIMIT:
             raise StreamError("verification capsule exceeds the unchanged 32 GiB budget")
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as output, tarfile.open(
-                fileobj=output, mode="w:", copybufsize=1024 * 1024) as target:
+        with tarfile.open(fileobj=output, mode="w:", copybufsize=1024 * 1024) as target:
             import io
             data = json.dumps(row, separators=(",", ":")).encode()
             header = tarfile.TarInfo("inventory.json")
@@ -196,6 +194,7 @@ def verification_capsule(original: BinaryIO, artifacts: Path, destination: Path,
                         raise StreamError("missing verifier public input")
                     with member:
                         target.addfile(header, CheckedReader(member, checkpoint))
+        output.flush()
     return selected
 
 

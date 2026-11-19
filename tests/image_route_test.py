@@ -337,6 +337,10 @@ if mode == 'partial':
     print('CERALIVE_', end='', flush=True)
     signal.pause()
 print('CERALIVE_SEALED_MIRROR_READY', flush=True)
+if mode == 'closed-control':
+    import os
+    os.close(0)
+    signal.pause()
 if mode in ('clean', 'bad'):
     if os.read(sys.stdin.fileno(), 1) != b'S':
         sys.exit(8)
@@ -347,7 +351,7 @@ if mode in ('clean', 'bad'):
 while True:
     signal.pause()
 """
-    for mode in ("clean", "legacy", "early", "partial", "full-control", "bad", "foreign-term", "kill"):
+    for mode in ("clean", "legacy", "early", "partial", "full-control", "closed-control", "bad", "foreign-term", "kill"):
         with subprocess.Popen([sys.executable, "-c", child, mode], stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE) as mirror:
             entered = False
@@ -363,7 +367,8 @@ while True:
                         capacity = fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
                         assert os.write(fd, b"x" * capacity) == capacity
             except StreamError:
-                assert mode in ("legacy", "early", "partial", "full-control", "bad", "foreign-term", "kill"), mode
+                assert mode in ("legacy", "early", "partial", "full-control", "closed-control", "bad", "foreign-term",
+                                "kill"), mode
             else:
                 assert mode == "clean", mode
             finally:
@@ -371,7 +376,7 @@ while True:
                     mirror.kill()
                     mirror.wait(timeout=2)
             assert entered == (mode not in ("early", "partial")), mode
-            if mode in ("partial", "full-control"):
+            if mode in ("partial", "full-control", "closed-control"):
                 assert mirror.returncode == -signal.SIGTERM, mode
             if mode in ("clean", "legacy"):
                 assert mirror.returncode == (0 if mode == "clean" else -signal.SIGTERM)

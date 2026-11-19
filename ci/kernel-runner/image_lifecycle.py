@@ -43,6 +43,7 @@ def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = Non
         backing = base
         if image_job:
             retry_check(fcntl.flock, disk_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            require_lock_contention(disk_fd)
             sync_directory(image_job.directory)
             image_job.overlay_created(disk_fd)
             if image_job.base_fd is not None:
@@ -259,9 +260,22 @@ def released_overlay(path: Path, inode: list[int]):
                         errors=frozenset((errno.EINTR, errno.EIO)))
         except BlockingIOError as error:
             raise AdmissionError(f"previous image overlay is still held: {path}") from error
+        require_lock_contention(overlay.fileno())
         if not os.path.samestat(info, retry_check(path.lstat)):
             raise AdmissionError("active image overlay changed during lease acquisition")
         yield info
+
+
+def require_lock_contention(fd: int) -> None:
+    """Refuse a filesystem whose flock succeeds without excluding a second open file description."""
+    probe = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return
+    finally:
+        os.close(probe)
+    raise AdmissionError("filesystem does not enforce overlay flock contention; use a local output store")
 
 
 def unlink_observed(path: Path, info: os.stat_result) -> None:

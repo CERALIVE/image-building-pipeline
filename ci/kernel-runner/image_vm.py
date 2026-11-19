@@ -1,4 +1,9 @@
-"""Local image profile admission and independent artifact acceptance."""
+"""Local image profile admission and independent artifact acceptance.
+
+The output store, job directories, capsule and journal are private to the invoking user and
+written only by the launcher and its children. A same-user process that replaces files between
+a check and their use is outside this model, so later paths resolve through admitted descriptors.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ import tarfile
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
-from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
+from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory, unlink_observed
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import (
@@ -385,12 +390,14 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     except FileNotFoundError:
         if listed_entry(Path(store.anchor), str(store.relative_to(store.anchor))) is not None:
             raise AdmissionError("cannot establish private output store ownership")
+        load_policy(args.trust_policy)  # Refuse an unusable policy before running the backing tool.
         base_fd = validate_base(base, args.base_sha256, cancellation)
         if base_fd is not None:
             inputs.callback(os.close, base_fd)
         create_directory(store, parents=True)
         store_fd = checked_open(store, directory=True, private=True)
-    inputs.callback(os.close, store_fd)
+    # Every later path resolves through the admitted inode, so it stays open until the direct exit.
+    store = Path(f"/proc/self/fd/{store_fd}")
     cancellation.check()
     reconcile(store)
     try:
@@ -401,8 +408,9 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
         base_fd = validate_base(base, args.base_sha256, cancellation)
         if base_fd is not None:
             inputs.callback(os.close, base_fd)
-    if not os.path.samestat(retry_check(os.fstat, store_fd), retry_check(store.lstat)):
-        raise AdmissionError("private output store changed during admission")
+    info = retry_check(os.fstat, store_fd)
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise AdmissionError("image return store must be owned by the launcher and mode 0700")
     directory = store / identity.attempt
     create_directory(directory)
     CAPS.qemu_limit()
@@ -419,12 +427,14 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
             raise StreamError("offline probe receipt mismatch")
         return None
     capsule = directory / "verifier-input.tar"
-    with os.fdopen(os.dup(capsule_fd), "rb") as original:
-        inventory = verification_capsule(original, artifacts, capsule, cancellation.check)
-    verifier_fd = checked_open(capsule, private=True)
+    verifier_fd = os.open(capsule, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     inputs.callback(os.close, verifier_fd)
-    with os.fdopen(os.dup(verifier_fd), "rb") as proof:
-        verification_digest = hashlib.file_digest(proof, "sha256").hexdigest()
+    # The verifier receives this written inode; the name is used only for its removal.
+    with os.fdopen(os.dup(capsule_fd), "rb") as original, os.fdopen(os.dup(verifier_fd), "r+b") as output:
+        inventory = verification_capsule(original, artifacts, output, cancellation.check)
+        output.seek(0)
+        verification_digest = hashlib.file_digest(output, "sha256").hexdigest()
+    verifier_info = os.fstat(verifier_fd)
     verification = Identity(identity.attempt, identity.board, identity.commit, identity.epoch,
                             verification_digest)
     request = {"capsule": capsule, "capsule_fd": verifier_fd, "base_fd": base_fd, "base_sha256": args.base_sha256,
@@ -436,7 +446,7 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
     validate_verification(returned_json(verified / "verification.json"), identity, inventory)
-    capsule.unlink()
+    unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),
         "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,

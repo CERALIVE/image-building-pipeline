@@ -98,6 +98,25 @@ restart to establish that the anonymous overlay is gone, then archive
 `active.json` outside the attempt store and use a fresh reviewed store.
 Do not retire the journal on the basis of a process listing.
 
+The launcher assumes a single-user workstation or runner. The output store,
+job directories, capsule and journal are private to the invoking user (mode
+0700) and written only by the launcher and its children. A concurrent process
+with the same privileges that replaces files between a check and their use is
+outside this model. Within it, the lease is the only proof of overlay
+ownership: only the launcher and QEMU share the locked open file description,
+so a separately opened description is also outside the model. Every lease
+acquisition first proves that a second open file description cannot take the
+same lock. A filesystem that acknowledges locks without enforcing them, such
+as some NFS or FUSE mounts, refuses admission. After admission the launcher
+resolves every store path through the admitted directory descriptor and hands
+the verifier the capsule descriptor it wrote. Recovery removes the overlay and
+journal by name immediately after checking their identity, so a same-user
+replacement in that interval can still be removed.
+
+On a new store, the public policy is validated before `qemu-img` inspects the
+base. Retries do not nest: each admission observation runs at most three times
+in total.
+
 For an independently prepared and approved base, capsule and public policy,
 the example assumes a shell at nice 0. `nice -n 10` is a relative adjustment.
 If the shell inherits another value, adjust the increment to start at nice 10.

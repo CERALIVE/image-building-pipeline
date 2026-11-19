@@ -101,6 +101,11 @@ def fixture_signal_mask():
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
+def named(path) -> pathlib.Path:
+    """Resolve a launcher path that passes through a held /proc/self/fd directory."""
+    return pathlib.Path(os.path.realpath(path))
+
+
 def signal_status(path: pathlib.Path) -> tuple[int, int, int]:
     fields = dict(line.split(":", 1) for line in path.read_text().splitlines() if ":" in line)
     return tuple(int(fields[key], 16) for key in ("SigBlk", "SigIgn", "SigCgt"))
@@ -221,9 +226,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return status
 
     def fixture_read_bytes(path):
-        if mode == "unreadable-exit" and path == directory / "exit.json":
+        if mode == "unreadable-exit" and named(path) == directory / "exit.json":
             raise OSError(errno.EIO, "fixture final receipt readback")
-        if path == directory.parent / "exit.json" and trace_terminal:
+        if named(path) == directory.parent / "exit.json" and trace_terminal:
             inject_terminal("readback:before")
             result = read_bytes(path)
             inject_terminal("readback:after")
@@ -242,7 +247,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def inject_step(action, transaction):
         nonlocal during
-        final = transaction.path == directory / "exit.json"
+        final = named(transaction.path) == directory / "exit.json"
         if final:
             with (root / "steps").open("a") as log:
                 print(action.__name__, file=log)
@@ -330,6 +335,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def publish(source, destination) -> None:
         nonlocal during, fail_sync
+        destination = named(destination)
         if pair:
             with (root / "sequence").open("a") as log:
                 print(destination.relative_to(root / "returns"), file=log)
@@ -415,6 +421,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             (root / "final-sync").touch()
 
     def remove(path, *args, **kwargs):
+        path = named(path)
         if path == directory / "stream.partial":
             fault_at("stream-unlink")
         if path == root / "returns/active.json":
@@ -436,7 +443,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return Overlay()
 
     def read_result(path, *args, **kwargs):
-        if mode == "validation" and path == directory / "artifacts/verification.json":
+        if mode == "validation" and named(path) == directory / "artifacts/verification.json":
             cancel()
         return returned_json(path, *args, **kwargs)
 
@@ -1375,8 +1382,8 @@ def test_probe_cleanup_and_artifact_publication_failures_never_publish_success()
 
 def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
     real_open, real_read, real_unlink = os.open, pathlib.Path.read_text, pathlib.Path.unlink
-    for step in ("capsule-create", "capsule-copy", "verifier-result", "capsule-unlink", "success"):
-        for action in (("success",) if step == "success" else ("fail", "term")):
+    for step in ("capsule-create", "capsule-copy", "verifier-result", "capsule-unlink", "success", "replace"):
+        for action in ((step,) if step in ("success", "replace") else ("fail", "term")):
             with tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
                 base, input_file, store = root / "base", root / "input.tar", root / "returns"
@@ -1409,7 +1416,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     os.kill(os.getpid(), signal.SIGTERM)
 
                 def open_file(path, *options, **kwargs):
-                    if path == capsule:
+                    if named(path) == capsule:
                         inject("capsule-create")
                     return real_open(path, *options, **kwargs)
 
@@ -1419,14 +1426,25 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     return real_addfile(archive, header, file)
 
                 read_record = image_vm.returned_json
+                pack = image_vm.verification_capsule
+                written = []
+
+                def pack_capsule(*args):
+                    inventory = pack(*args)
+                    if action == "replace":
+                        written.append((capsule.stat().st_ino, hashlib.sha256(capsule.read_bytes()).hexdigest()))
+                        capsule.rename(capsule.with_suffix(".original"))
+                        capsule.write_bytes(b"independent fixture")
+                        capsule.chmod(0o600)
+                    return inventory
 
                 def read_result(path, **kwargs):
-                    if path == verification:
+                    if named(path) == verification:
                         inject("verifier-result")
                     return read_record(path, **kwargs)
 
                 def unlink(path, *options, **kwargs):
-                    if path == capsule:
+                    if named(path) == capsule:
                         inject("capsule-unlink")
                     return real_unlink(path, *options, **kwargs)
 
@@ -1440,7 +1458,9 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     if payload["operation"] == "measure":
                         (artifacts / "fixture").write_bytes(b"public artifact")
                     else:
-                        assert request["capsule"] == capsule and capsule.is_file()
+                        assert os.path.samefile(request["capsule"], capsule)
+                        if action == "replace":
+                            assert [(os.fstat(request["capsule_fd"]).st_ino, payload["identity"]["input_sha256"])] == written
                         verification.write_text(json.dumps({
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
@@ -1459,6 +1479,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                             patch.object(image_resources.ImageCaps, "qemu_limit"), \
                             patch.object(os, "open", open_file), patch.object(tarfile.TarFile, "addfile", addfile), \
                             patch.object(image_vm, "returned_json", read_result), \
+                            patch.object(image_vm, "verification_capsule", pack_capsule), \
                             patch.object(pathlib.Path, "unlink", unlink):
                         with fixture_signal_mask():
                             status = image_vm.run_image(args, None, cancellation)
@@ -1466,7 +1487,9 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     signal.signal(signal.SIGTERM, previous)
                 marker = attempt / "exit.json"
                 successful = action == "success"
-                assert injected != successful, (step, action)
+                assert injected == (action in ("fail", "term")), (step, action)
+                if action == "replace":
+                    assert written and capsule.read_bytes() == b"independent fixture"
                 assert status == int(not successful), (step, action)
                 assert marker.exists() == (action != "fail"), (step, action)
                 if marker.exists():
@@ -2073,7 +2096,7 @@ for request in sys.stdin:
                             raise OSError(error, "fixture incomplete process observation", path)
 
                     def scan(path, **kwargs):
-                        if path == store:
+                        if named(path) == store:
                             attempts.append(path)
                         observe(path)
                         return inventory(path, **kwargs)
@@ -2287,9 +2310,11 @@ def test_overlay_or_journal_replacement_during_lease_keeps_journal() -> None:
             native_lock = fcntl.flock
 
             def replace_then_lock(fd, flags):
-                selected.rename(holder)
-                selected.write_bytes(payload)
-                selected.chmod(0o600)
+                # One replacement; the contention probe also calls flock.
+                if not holder.exists():
+                    selected.rename(holder)
+                    selected.write_bytes(payload)
+                    selected.chmod(0o600)
                 return native_lock(fd, flags)
 
             with patch.object(fcntl, "flock", replace_then_lock):
@@ -2375,10 +2400,10 @@ def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> Non
 
                 def scan(path):
                     nonlocal scans, injected
-                    if path == store:
+                    if named(path) == store:
                         scans += 1
                         return ["unfinished", "previous"]
-                    if path == store / "unfinished" and injected < failures:
+                    if named(path) == store / "unfinished" and injected < failures:
                         injected += 1
                         raise OSError(error, "fixture scan failure")
                     return listdir(path)
@@ -2398,6 +2423,103 @@ def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> Non
                 assert len(diagnostics) == 1
                 assert ("already contains this board" if recovered else "cannot complete") in str(diagnostics[0])
                 assert not (store / IDENTITY.attempt).exists()
+
+
+def probe_fixture_args(root):
+    base = root / "base"
+    capsule = root / "capsule"
+    base.write_bytes(b"fixture base")
+    base.chmod(0o444)
+    capsule.write_bytes(b"fixture capsule")
+    return SimpleNamespace(base=base, input_capsule=capsule,
+                           input_sha256=hashlib.sha256(capsule.read_bytes()).hexdigest(),
+                           base_sha256=hashlib.sha256(base.read_bytes()).hexdigest(),
+                           trust_policy=root / "policy", output_dir=root / "store",
+                           attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                           source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None,
+                           group_id=None, image_mode="probe")
+
+
+def test_fresh_store_requires_policy_before_backing_tool_with_one_retry_budget() -> None:
+    for code, attempts in ((errno.EIO, 3), (errno.EINTR, 3), (errno.EAGAIN, 3), (errno.EPERM, 1)):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = probe_fixture_args(pathlib.Path(temporary))
+            calls = []
+            native_lstat = pathlib.Path.lstat
+
+            def lstat(path):
+                if path == args.trust_policy:
+                    calls.append("policy lstat")
+                    raise OSError(code, "fixture policy observation")
+                return native_lstat(path)
+
+            def backing(args, **kwargs):
+                calls.append("qemu-img")
+                return subprocess.CompletedProcess(args, 0, b'{"format":"qcow2","virtual-size":137438953472}')
+
+            with patch.object(pathlib.Path, "lstat", lstat), patch.multiple(
+                    image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                    run=backing, disk_admission=lambda *_: None), \
+                    patch.object(image_vm, "execute") as execute, patch.object(image_vm, "report_error"):
+                assert image_vm.run_image(args, None, Cancellation()) == 1
+            execute.assert_not_called()
+            assert calls == ["policy lstat"] * attempts, calls
+            assert not args.output_dir.exists()
+
+
+def test_attempt_stays_in_admitted_directory_after_its_name_changes() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        args = probe_fixture_args(root)
+        args.output_dir.mkdir(mode=0o700)
+        admitted = root / "admitted"
+        used = []
+        real_mkdir = os.mkdir
+
+        def mkdir(path, mode=0o777, *, dir_fd=None):
+            if pathlib.Path(path).name == IDENTITY.attempt:
+                args.output_dir.rename(admitted)
+                real_mkdir(args.output_dir, 0o755)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+
+        def execute(_base, directory, request, _cancel, jobs):
+            used.append(directory.parents[1].stat().st_ino)
+            artifacts = directory / "artifacts"
+            artifacts.mkdir(parents=True)
+            identity = request["payload"]["identity"]
+            (artifacts / "verification.json").write_text(json.dumps({
+                "schema": 1, "identity": identity, "network_denied": True}))
+            jobs.append(SimpleNamespace(directory=directory, state={"identity": identity,
+                                         "stop_reason": "guest exited; transport validated"}))
+            return artifacts
+
+        with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                            load_policy=lambda *_: FixturePolicy(), validate_base=lambda *_: None,
+                            disk_admission=lambda *_: None, execute=execute), \
+                patch.object(image_resources.ImageCaps, "qemu_limit"), patch.object(os, "mkdir", mkdir):
+            with fixture_signal_mask():
+                assert image_vm.run_image(args, None, Cancellation()) == 0
+        assert used == [admitted.stat().st_ino]
+        assert (admitted / IDENTITY.attempt / "build/exit.json").is_file()
+        assert list(args.output_dir.iterdir()) == []
+
+
+def test_reconcile_refuses_a_filesystem_that_ignores_lease_contention() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        with leased_fixture(store):
+            pass
+        # A successful return from flock is insufficient on this backend.
+        with patch.object(fcntl, "flock", return_value=None):
+            try:
+                reconcile(store)
+            except image_resources.AdmissionError as error:
+                assert "does not enforce overlay flock contention" in str(error)
+            else:
+                raise AssertionError("recovery relied on a no-op flock")
+        assert (store / "active.json").is_file()
+        assert (store / "interrupted/build/overlay.qcow2").is_file()
+        assert not (store / "interrupted.reconciled.json").exists()
 
 
 def test_late_disk_error_restarts_store_admission_before_execution() -> None:
@@ -2423,7 +2545,7 @@ def test_late_disk_error_restarts_store_admission_before_execution() -> None:
                 return FixturePolicy()
 
             def scan(path):
-                if path == store:
+                if named(path) == store:
                     steps.append("store")
                 return inventory(path)
 

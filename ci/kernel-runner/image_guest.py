@@ -110,7 +110,11 @@ def ready_mirror(mirror: subprocess.Popen):
             os.set_blocking(control, False)
             with selectors.DefaultSelector() as request:
                 request.register(control, selectors.EVENT_WRITE)
-                if mirror_io(request, deadline, os.write, control, b"S") != 1:
+                try:
+                    written = mirror_io(request, deadline, os.write, control, b"S")
+                except BrokenPipeError as error:
+                    raise StreamError("sealed guest mirror closed its control pipe before shutdown") from error
+                if written != 1:
                     raise StreamError("sealed mirror shutdown request was not written")
             mirror_marker(response, output, b"CERALIVE_SEALED_MIRROR_STOPPED\n", deadline)
             retry_io(wait, mirror, deadline, recover=True)

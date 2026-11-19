@@ -113,7 +113,10 @@ def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
     # glibc readdir treats an ENOENT from getdents as end of directory.
     # A safety check must distinguish a dead directory from normal EOF.
     buffer = ctypes.create_string_buffer(32 * 1024)
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    # A held directory's /proc/self/fd name is a magic link: list that descriptor's directory.
+    fd = (os.open(".", flags, dir_fd=int(path.name)) if path.parent == Path("/proc/self/fd")
+          else os.open(path, flags))
     try:
         names = []
         while (length := _GETDENTS(fd, buffer, len(buffer))) > 0:
@@ -135,14 +138,27 @@ def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
         os.close(fd)
 
 
+_RETRYING = False
+
+
 def retry_check(operation, *args, errors: frozenset[int] = CHECK_RETRY):
-    """Restart a read-only observation, discarding any incomplete result."""
-    for attempt in range(IO_ATTEMPTS):
-        try:
-            return operation(*args)
-        except OSError as error:
-            if error.errno not in errors or attempt + 1 == IO_ATTEMPTS:
-                raise
+    """Restart a read-only observation, discarding any incomplete result.
+
+    A nested check runs once, so the outermost observation owns the three-attempt budget.
+    """
+    global _RETRYING
+    if _RETRYING:
+        return operation(*args)
+    _RETRYING = True
+    try:
+        for attempt in range(IO_ATTEMPTS):
+            try:
+                return operation(*args)
+            except OSError as error:
+                if error.errno not in errors or attempt + 1 == IO_ATTEMPTS:
+                    raise
+    finally:
+        _RETRYING = False
 
 
 def checked_open(path: Path, *, directory: bool = False, private: bool = False,
