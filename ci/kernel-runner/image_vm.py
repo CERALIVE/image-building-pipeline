@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import errno
 import hashlib
 import json
 import os
@@ -28,7 +27,8 @@ from image_lifecycle import (
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import (
-    IO_ATTEMPTS, FileSyncError, Identity, StreamError, decode, list_directory, positioned_open, retry_io, verify_sidecar,
+    FileSyncError, Identity, StreamError, decode, list_directory, listed_entry, positioned_open,
+    read_check, retry_check, retry_io, verify_sidecar,
 )
 from vm_process import Cancelled, Cancellation, run
 
@@ -65,7 +65,7 @@ def validate_base(base: Path, expected_sha256: str,
     cancellation = cancellation or Cancellation()
     mode = base.lstat().st_mode
     if (not stat.S_ISREG(mode) or mode & 0o222
-            or digest_file(base, cancellation.check) != expected_sha256):
+            or digest_file(base, cancellation.check, checked=True) != expected_sha256):
         raise AdmissionError("image base must be independently verified and read-only")
     info = run(["qemu-img", "info", "--output=json", str(base.absolute())],
                cancellation=cancellation, capture_output=True, timeout=30)
@@ -84,7 +84,7 @@ def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict
     if entries is not None and not stat.S_ISREG(marker_path.lstat().st_mode):
         raise AdmissionError("private pair marker is not a regular file")
     try:
-        marker = json.loads(marker_path.read_text() if entries is not None else
+        marker = json.loads(read_check(marker_path) if entries is not None else
                             retry_io(marker_path.read_text, recover=True))
     except FileNotFoundError:
         if entries is not None:
@@ -95,7 +95,7 @@ def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict
         return None
     if entries is not None and not stat.S_ISREG(path.lstat().st_mode):
         raise AdmissionError("private pair acceptance is not a regular file")
-    raw = path.read_bytes() if entries is not None else retry_io(path.read_bytes, recover=True)
+    raw = read_check(path) if entries is not None else retry_io(path.read_bytes, recover=True)
     row = json.loads(raw)
     if (marker["acceptance_sha256"] != hashlib.sha256(raw).hexdigest()
             or marker["identity"] != row["identity"] or row["schema"] != 1
@@ -106,12 +106,10 @@ def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict
 
 def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
     """Only a verified other board reduces the remaining pair allocation."""
-    for attempt in range(IO_ATTEMPTS):
-        try:
-            return scan_retained_outputs(store, identity, trust_identity)
-        except OSError as error:
-            if error.errno not in (errno.EINTR, errno.EAGAIN) or attempt + 1 == IO_ATTEMPTS:
-                raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
+    try:
+        return retry_check(scan_retained_outputs, store, identity, trust_identity)
+    except OSError as error:
+        raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
 
 
 def scan_retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
@@ -304,6 +302,23 @@ def prepare_exit_receipt(directory: Path, probe: bool, cancellation: Cancellatio
     cancellation.exit_temporary = receipt_temporary(cancellation.exit_receipt)
 
 
+def check_capsule(path: Path, sha256: str, cancellation: Cancellation) -> None:
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_size > INPUT_LIMIT
+            or digest_file(path, cancellation.check, checked=True) != sha256):
+        raise AdmissionError("input capsule transport identity mismatch")
+
+
+def store_stat(store: Path) -> os.stat_result | None:
+    try:
+        return store.stat()
+    except FileNotFoundError:
+        # An existing name with unreadable metadata is not an absent store.
+        if listed_entry(Path(store.anchor), str(store.relative_to(store.anchor))) is not None:
+            return store.stat()
+        return None
+
+
 def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
                   cancellation: Cancellation, jobs: list[ImageJob]) -> tuple[Path, dict] | None:
     if not all((args.input_capsule, args.input_sha256, args.base_sha256,
@@ -314,43 +329,31 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error("image profile accepts no runner, script or public-source-only override")
     acquired_at = time.time()
     build_deadline = time.monotonic() + CAPS.build_seconds
-    require_host_lock()
-    cgroup_admission()
+    retry_check(require_host_lock)
+    retry_check(cgroup_admission)
     identity = Identity(args.attempt, args.board, args.source_commit, args.source_epoch,
                         args.input_sha256)
-    base = args.base.resolve(strict=True)
-    input_info = args.input_capsule.lstat()
-    if (not stat.S_ISREG(input_info.st_mode)
-            or input_info.st_size > INPUT_LIMIT
-            or digest_file(args.input_capsule, cancellation.check) != identity.input_sha256):
-        raise AdmissionError("input capsule transport identity mismatch")
+    base = retry_check(lambda: args.base.resolve(strict=True))
+    retry_check(check_capsule, args.input_capsule, identity.input_sha256, cancellation)
     store = args.output_dir.absolute()
-    try:
-        store_info = store.stat()
-    except FileNotFoundError:
-        # Confirm absence before taking the no-store path, which can spawn
-        # qemu-img without checking for a recorded duplicate.
-        try:
-            store_info = store.stat()
-        except FileNotFoundError:
-            store_info = None
+    store_info = retry_check(store_stat, store)
     if store_info is None:
-        validate_base(args.base, args.base_sha256, cancellation)
+        retry_check(validate_base, args.base, args.base_sha256, cancellation)
         create_directory(store, parents=True)
-        store_info = store.stat()
+        store_info = retry_check(store.stat)
         base_checked = True
     else:
         base_checked = False
     cancellation.check()
     if not stat.S_ISDIR(store_info.st_mode) or store_info.st_uid != os.getuid() or store_info.st_mode & 0o077:
         raise AdmissionError("image return store must be owned by the launcher and mode 0700")
-    store = store.resolve(strict=True)
+    store = retry_check(lambda: store.resolve(strict=True))
     reconcile(store)
-    trust = asdict(load_policy(args.trust_policy))
+    trust = asdict(retry_check(load_policy, args.trust_policy))
     retained = retained_outputs(store, identity, (args.base_sha256, trust["root_der_sha256"]))
-    disk_admission(base.parent, store, retained)
+    retry_check(disk_admission, base.parent, store, retained)
     if not base_checked:
-        validate_base(args.base, args.base_sha256, cancellation)
+        retry_check(validate_base, args.base, args.base_sha256, cancellation)
     directory = store / identity.attempt
     create_directory(directory)
     probe = args.image_mode == "probe"
@@ -361,7 +364,7 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         create_directory(job_directory / "artifacts")
     probe_result = directory / "build/artifacts/verification.json" if probe else None
     expected_probe = {"schema": 1, "identity": asdict(identity), "network_denied": True} if probe else None
-    CAPS.qemu_limit()
+    retry_check(CAPS.qemu_limit)
     request = {"capsule": args.input_capsule, "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {
                    "schema": 1, "identity": asdict(identity), "operation": args.image_mode, "trust": trust}}

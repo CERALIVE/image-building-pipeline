@@ -24,9 +24,9 @@ import uuid
 from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_headroom, process_priority
 from image_stages import StageTail, optional
 from image_stream import (
-    CONTROL_LOG_LIMIT, IO_ATTEMPTS, WRITEBACK_ERRORS, ExclusiveFile, FileSyncError, Identity, Member,
-    StreamError, can_rewrite, create_file, list_directory, positioned_open, report_error, retry_io, rewrite_file, sync_file,
-    transfer, write_all,
+    CONTROL_LOG_LIMIT, IO_ATTEMPTS, ExclusiveFile, FileSyncError, Identity, Member, PositionedReader,
+    StreamError, can_rewrite, list_directory, positioned_open, read_check_text, read_once, report_error,
+    retry_check, retry_io, rewrite_file, sync_file, transfer, unlink_owned, write_all,
 )
 from vm_process import (
     POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, ChildContainmentError, close_transport, poll_owned,
@@ -116,24 +116,33 @@ class Receipt:
         self.path = path
         self.row = row
         self.outcome = outcome
-        self.temporary = temporary or receipt_temporary(path)
+        self.primary = ExclusiveFile(temporary or receipt_temporary(path), readable=True)
+        self.output = self.primary
+        self.replacement: ExclusiveFile | None = None
         self.status = row["launcher_exit"] if outcome is not None else None
-        self.file_fd: int | None = None  # -1 means the temporary is ours and closed.
         self.payload: tuple[bytes, ...] = ()
         self.probe = probe
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
 
+    @property
+    def file_fd(self) -> int | None:
+        return self.output.fd
+
+    @property
+    def temporary(self) -> Path:
+        return self.output.path
+
     def temp_open(self) -> None:
         for attempt in range(IO_ATTEMPTS):
             try:
-                self.file_fd = create_file(self.temporary)
+                self.output.open()
                 return
             except FileExistsError:
                 if attempt + 1 == IO_ATTEMPTS:
                     raise
-                self.temporary = receipt_temporary(self.path)
+                self.output.path = receipt_temporary(self.path)
 
     def temp_write(self) -> None:
         fd = self.file_fd
@@ -158,44 +167,42 @@ class Receipt:
         for fragment in self.payload:
             write_all(fd, fragment)
 
+    def _verify_payload(self, fd: int) -> None:
+        with PositionedReader(fd, checked=True) as source:
+            if any(source.read(len(fragment)) != fragment for fragment in self.payload) or source.read(1):
+                raise ReceiptError("receipt content differs before publication")
+
     def file_sync(self) -> None:
-        attempts = IO_ATTEMPTS
-        for attempt in range(IO_ATTEMPTS):
+        for attempt in range(2):
             assert self.file_fd is not None and self.file_fd >= 0
             try:
                 sync_file(self.file_fd)
-                return
             except FileSyncError as error:
-                if error.errno in WRITEBACK_ERRORS:
-                    attempts = min(attempts, 2)
-                if not can_rewrite(error) or attempt + 1 >= attempts:
+                if not can_rewrite(error) or attempt:
                     raise
                 # Keep the failed inode linked until the fresh inode exists.
-                # This also prevents inode-number reuse across the two writes.
-                fresh = receipt_temporary(self.path)
-                with ExclusiveFile(fresh) as output:
-                    output.open()
-                    fd = output.fileno()
-                    self._write_payload(fd)
-                    self.file_close()
-                    self.temp_cleanup()
-                    self.temporary, self.file_fd = fresh, fd
-                    output.fd = None  # Receipt now owns the uncommitted file.
+                self.replacement = ExclusiveFile(receipt_temporary(self.path), readable=True)
+                self.replacement.open()
+                self._write_payload(self.replacement.fileno())
+                self.primary.discard()
+                self.output = self.replacement
+            else:
+                retry_check(self._verify_payload, self.file_fd)
+                return
 
     def file_close(self) -> None:
-        fd = self.file_fd
-        if fd is not None and fd >= 0:
-            try:
-                os.close(fd)
-            except OSError as error:
-                self.file_fd = -1
-                report_error(error)  # Linux has already released the descriptor.
-            else:
-                self.file_fd = -1
+        try:
+            self.output.close()
+        except OSError as error:
+            report_error(error)  # Linux has already released the descriptor.
 
     def temp_cleanup(self) -> None:
-        if self.file_fd is not None and not self.renamed:
-            retry_io(self.temporary.unlink, missing_ok=True, recover=True)
+        if not self.renamed:
+            try:
+                self.primary.discard()
+            finally:
+                if self.replacement is not None:
+                    self.replacement.discard()
 
     def mask_block(self) -> None:
         if self.outcome is not None:
@@ -273,79 +280,59 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             if transaction.directory_fd is not None:
                 transaction.dir_close()
     if failure is not None and (outcome is None or not transaction.renamed):
+        if not transaction.renamed and (transaction.primary.fd is not None or (
+                transaction.replacement is not None and transaction.replacement.fd is not None)):
+            raise ReceiptError("receipt temporary cleanup could not be verified") from None
         if isinstance(failure, Cancelled):
             raise failure
         raise ReceiptError(str(failure)) from failure
 
 
 def reconcile(store: Path) -> None:
-    active = store / "active.json"
-    if active.name not in list_directory(store):
+    try:
+        row = retry_check(_reconcile_inventory, store, disappearing=True)
+    except OSError as error:
+        raise AdmissionError(f"cannot complete previous image ownership scan: {error}") from error
+    if row is None:
         return
-    if not stat.S_ISREG(active.lstat().st_mode):
-        raise AdmissionError("active journal is not a regular file")
-    row = json.loads(active.read_text())
-    for key in ("launcher", "qemu"):
-        if key not in row:
-            continue
-        pid = int(row[key].split(":")[0])
-        process = Path("/proc") / str(pid)
-        status = proc_if_present(process, (process / "stat").read_text)
-        if status is None:
-            continue
-        current = f"{pid}:{status[status.rindex(')') + 2:].split()[19]}"
-        if current == row[key] and status[status.rindex(")") + 2:].split()[0] != "Z":
-            raise AdmissionError(f"previous owned {key} still running: {row[key]}")
-    owned = tuple(row["overlay_inode"])
-    for pid in list_directory(Path("/proc")):
-        if not pid.isdecimal():
-            continue
-        process = Path("/proc") / pid
-        descriptors = proc_if_present(process, lambda: list_directory(process / "fd"), process=process)
-        if descriptors is None:
-            continue
-        for number in descriptors:
-            descriptor = process / "fd" / number
-            info = proc_if_present(descriptor, descriptor.stat, process=process)
-            if info is None:
-                continue
-            if (info.st_dev, info.st_ino) == owned:
-                raise AdmissionError(f"previous owned overlay still held by {descriptor}")
     receipt(store / (row["attempt"] + ".reconciled.json"), {
         **row, "stop_reason": "previous launcher interrupted; guest cleanup unknown",
         "overlay_descriptors_closed": True, "reconciled_at": time.time(),
     })
-    retry_io(active.unlink, missing_ok=True, recover=True)
+    unlink_owned(store / "active.json")
     sync_directory(store)
 
 
-def proc_if_present(path: Path, operation, *, process: Path | None = None):
-    """Distinguish a disappearing proc entry from an incomplete owned scan."""
-    try:
-        return operation()
-    except FileNotFoundError:
-        try:
-            path.lstat()
-        except FileNotFoundError:
-            return None
-        try:
-            return operation()
-        except FileNotFoundError:
-            if path.parent.name == "fd":
-                # A procfs FD symlink can outlive its referent.
-                return None
-            raise
-    except PermissionError as error:
-        if process is None or error.errno != errno.EACCES:
-            raise
-        try:
-            return operation()
-        except PermissionError as denied:
-            if denied.errno != errno.EACCES:
-                raise
-            # procfs denies unrelated processes under ptrace policy. The
-            # journal's specific launcher and QEMU PIDs were checked above.
-            return None
+PROC_ROOT = Path("/proc")
+
+
+def _reconcile_inventory(store: Path) -> dict | None:
+    active = store / "active.json"
+    if active.name not in list_directory(store):
+        return None
+    if not stat.S_ISREG(active.lstat().st_mode):
+        raise AdmissionError("active journal is not a regular file")
+    row = json.loads(read_check_text(active))
+    pids = {name for name in list_directory(PROC_ROOT) if name.isdecimal()}
+    for key in ("launcher", "qemu"):
+        if key not in row:
+            continue
+        pid = str(int(row[key].split(":")[0]))
+        if pid not in pids:
+            continue
+        status = read_check_text(PROC_ROOT / pid / "stat")
+        current = f"{pid}:{status[status.rindex(')') + 2:].split()[19]}"
+        if current == row[key] and status[status.rindex(")") + 2:].split()[0] != "Z":
+            raise AdmissionError(f"previous owned {key} still running: {row[key]}")
+    owned = tuple(row["overlay_inode"])
+    for pid in sorted(pids):
+        directory = PROC_ROOT / pid / "fd"
+        for number in list_directory(directory, omit_open_fd=pid == str(os.getpid())):
+            descriptor = directory / number
+            info = descriptor.stat()
+            if (info.st_dev, info.st_ino) == owned:
+                raise AdmissionError(f"previous owned overlay still held by {descriptor}")
+    return row
 
 
 def retire_journal(cancellation: Cancellation) -> None:
@@ -375,6 +362,8 @@ _PIPE_SLOTS = ctypes.c_int * 2
 _PIPE2 = ctypes.CDLL(None, use_errno=True).pipe2
 _PIPE2.argtypes = (_PIPE_SLOTS, ctypes.c_int)
 _PIPE2.restype = ctypes.c_int
+PIPE_READ_RETRY = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM,
+                            errno.ENOSYS, errno.ENOSPC, errno.EBADF))
 
 
 class PipeEnd:
@@ -610,6 +599,8 @@ class ImageJob:
             self.probe_events = events
         on_loss = self.lose_diagnostics if self.probe else None
         self.capture_counts = {"stream": 0, "console": 0, "diagnostic": 0}
+        self.capture_read_errors = dict.fromkeys(self.capture_counts, 0)
+        self.capture_buffer = ctypes.create_string_buffer(1024 * 1024)
         self.capture_hashes = {}
         self.capture_files = {}
         for name in (("stream",) if self.probe else ("stream", "diagnostic", "console")):
@@ -695,9 +686,14 @@ class ImageJob:
                                         console_retry_at = time.monotonic() + POLL_SECONDS
                             continue
                         try:
-                            chunk = os.read(event.fd, 1024 * 1024)
-                        except InterruptedError:
+                            chunk = read_once(event.fd, self.capture_buffer)
+                        except OSError as error:
+                            self.capture_read_errors[name] += 1
+                            if error.errno not in PIPE_READ_RETRY or self.capture_read_errors[name] >= IO_ATTEMPTS:
+                                raise StreamError(f"required {name} pipe read failed") from error
+                            # Try again only on a new readiness observation.
                             continue
+                        self.capture_read_errors[name] = 0
                         if not chunk:
                             if name == "stream":
                                 stream_open = False
@@ -739,7 +735,7 @@ def sync_output(output: ExclusiveFile, digest, checkpoint: Callable[[], None]) -
         member = Member(output.path.name, info.st_size, digest.hexdigest())
         with positioned_open(output.path) as source:
             def replay(fd: int) -> None:
-                transfer(source, fd, member, checkpoint, decoding=True)
+                transfer(source, fd, member, checkpoint)
                 if source.read(1):
                     raise StreamError("capture length changed during sync recovery")
 

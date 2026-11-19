@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,7 @@ import time
 
 import yaml
 from image_lifecycle import job_disk, report_error, retire_journal
-from image_stream import retry_io
+from image_stream import listed_entry, read_check, read_check_text, retry_check, retry_io
 from vm_process import (
     STOP_SIGNALS, Cancellation, ChildContainmentError, ChildSetupError, close_transport, die_with_parent,
     read_check_script, register_close, run,
@@ -150,6 +151,12 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         print(expected.decode())
 
 
+def check_flock_parent(parent_proc: Path) -> None:
+    if (read_check_text(parent_proc / "comm").strip() != "flock"
+            or not {b"--exclusive", b"--close"}.issubset(read_check(parent_proc / "cmdline").split(b"\0"))):
+        raise RuntimeError("run vm.py directly under flock --exclusive --close")
+
+
 def main(cancellation: Cancellation) -> int:
     try:
         changes = sanitize_startup(cancellation)
@@ -179,12 +186,7 @@ def main(cancellation: Cancellation) -> int:
         raise
     parent = os.getppid()
     parent_proc = Path("/proc") / str(parent)
-    if (
-        (parent_proc / "comm").read_text().strip() != "flock"
-        or not {b"--exclusive", b"--close"}.issubset(
-            (parent_proc / "cmdline").read_bytes().split(b"\0"))
-    ):
-        raise RuntimeError("run vm.py directly under flock --exclusive --close")
+    retry_check(check_flock_parent, parent_proc)
     die_with_parent(parent)
     cancellation.check()
     base = args.base.resolve()
@@ -194,14 +196,14 @@ def main(cancellation: Cancellation) -> int:
         from image_vm import run_image
         return run_image(args, parser, cancellation)
     if args.operation == "build-base":
-        if base.exists():
+        if retry_check(listed_entry, Path(base.anchor), str(base.relative_to(base.anchor))) is not None:
             parser.error("base already exists; select a new base path")
         retry_io(base.parent.mkdir, parents=True, exist_ok=True, recover=True)
         if args.profile == "image":
             from image_resources import cgroup_admission, disk_headroom, require_host_lock
-            require_host_lock()
-            cgroup_admission()
-            disk_headroom(((base.parent, 257 * 1024**3),))
+            retry_check(require_host_lock)
+            retry_check(cgroup_admission)
+            retry_check(disk_headroom, ((base.parent, 257 * 1024**3),))
             from image_resources import CAPS
             CAPS.qemu_limit()
         with tempfile.TemporaryDirectory(prefix="base-", dir=base.parent) as directory:
@@ -267,14 +269,15 @@ def main(cancellation: Cancellation) -> int:
             cancellation.check()
             os.link(disk, base)
         return 0
-    if not base.is_file():
+    if not stat.S_ISREG(retry_check(base.stat).st_mode):
         parser.error("build and verify the pristine base first")
     if args.operation == "check" and args.check_script is None:
         parser.error("check requires --check-script; no GitHub registration is performed")
     if args.source_bundle and args.operation != "check":
         parser.error("--source-bundle is only for offline checks")
     if args.source_bundle and (
-        not args.source_bundle.is_file() or "," in str(args.source_bundle.resolve())
+        not stat.S_ISREG(retry_check(args.source_bundle.stat).st_mode)
+        or "," in str(retry_check(lambda: args.source_bundle.resolve(strict=True)))
     ):
         parser.error("--source-bundle requires a regular capsule file without commas")
     if args.operation == "run" and (not args.group_id or args.group_id in (1, 5)):

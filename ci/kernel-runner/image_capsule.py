@@ -41,8 +41,8 @@ class Capsule:
     fetched_at: str
 
 
-def digest_file(path: Path, checkpoint: Callable[[], None] | None = None) -> str:
-    with positioned_open(path) as source:
+def digest_file(path: Path, checkpoint: Callable[[], None] | None = None, *, checked: bool = False) -> str:
+    with positioned_open(path, checked=checked) as source:
         if checkpoint is None:
             return hashlib.file_digest(source, "sha256").hexdigest()
         digest = hashlib.sha256()

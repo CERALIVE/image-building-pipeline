@@ -10,7 +10,7 @@ from pathlib import Path
 import resource
 from typing import Final, TypedDict
 
-from image_stream import list_directory
+from image_stream import list_directory, read_check, read_check_text, retry_check
 from vm_process import Cancellation
 
 GIB: Final = 1024**3
@@ -56,13 +56,13 @@ def require_host_lock() -> None:
     pid = os.getppid()
     for _depth in range(32):
         process = Path("/proc") / str(pid)
-        args = (process / "cmdline").read_bytes().split(b"\0")
-        if ((process / "comm").read_text().strip() == "flock" and len(args) > 3
+        args = read_check(process / "cmdline").split(b"\0")
+        if (read_check_text(process / "comm").strip() == "flock" and len(args) > 3
                 and args[1:3] == [b"--exclusive", b"--close"]):
             lock = Path(os.fsdecode(args[3])).stat()
             if (lock.st_dev, lock.st_ino) == (expected.st_dev, expected.st_ino):
                 return
-        status = (process / "stat").read_text()
+        status = read_check_text(process / "stat")
         parent = int(status[status.rindex(")") + 2:].split()[1])
         if parent <= 1 or parent == pid:
             break
@@ -72,7 +72,7 @@ def require_host_lock() -> None:
 
 def cgroup_limits(pid: int | str) -> int:
     """Require low CPU weight on the process's cgroup and effective hard caps."""
-    membership = Path(f"/proc/{pid}/cgroup").read_text().strip()
+    membership = read_check_text(Path(f"/proc/{pid}/cgroup")).strip()
     if not membership.startswith("0::/"):
         raise AdmissionError("image profile requires unified cgroup v2")
     group = Path("/sys/fs/cgroup") / membership[4:].lstrip("/")
@@ -86,15 +86,15 @@ def cgroup_limits(pid: int | str) -> int:
         fields = set(list_directory(path))
         for field, values in (("memory.max", memory), ("memory.swap.max", swaps)):
             if field in fields:
-                value = (path / field).read_text().strip()
+                value = read_check_text(path / field).strip()
                 if value != "max":
                     values.append(int(value))
         if "cpu.max" in fields:
-            quota, period = (path / "cpu.max").read_text().split()
+            quota, period = read_check_text(path / "cpu.max").split()
             if quota != "max":
                 quotas.append(int(quota) / int(period))
         if "io.weight" in fields:
-            for line in (path / "io.weight").read_text().splitlines():
+            for line in read_check_text(path / "io.weight").splitlines():
                 if line.startswith("default "):
                     weights.append(int(line.split()[1]))
     if not memory or min(memory) != CAPS.memory_max:
@@ -107,7 +107,7 @@ def cgroup_limits(pid: int | str) -> int:
         raise AdmissionError("image profile needs effective IOWeight <= 10")
     cpu_weight = group / "cpu.weight"
     try:
-        weight = int(cpu_weight.read_text())
+        weight = int(read_check_text(cpu_weight))
     except FileNotFoundError as error:
         raise AdmissionError("image profile could not verify its CPU weight") from error
     if not 1 <= weight <= MAX_CPU_WEIGHT:
@@ -132,6 +132,10 @@ class PriorityObservation(TypedDict):
 
 def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
     """Observe the owned QEMU process, including containment after exec."""
+    return retry_check(_process_priority, pid, cancellation)
+
+
+def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
     cancellation.check()
     if cancellation.finalizing:
         raise RuntimeError("cannot sample a child during terminal finalization")
@@ -159,7 +163,7 @@ def cgroup_admission() -> None:
     if len(os.sched_getaffinity(0)) != CAPS.cpus:
         raise AdmissionError("image profile needs four selected CPUs")
     available = next(int(line.split()[1]) * 1024
-                     for line in Path("/proc/meminfo").read_text().splitlines()
+                     for line in read_check_text(Path("/proc/meminfo")).splitlines()
                      if line.startswith("MemAvailable:"))
     if available < 32 * GIB:
         raise AdmissionError("image profile needs >= 32 GiB actual MemAvailable")

@@ -17,6 +17,8 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
+import stat
 import sys
 import subprocess
 import tempfile
@@ -63,7 +65,7 @@ def object_path(directory: Path, digest: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise SealedError("invalid sealed object identity")
     path = directory / digest
-    if not path.is_file() or path.is_symlink():
+    if not stat.S_ISREG(path.lstat().st_mode):
         raise SealedError("missing sealed object")
     with path.open("rb") as source:
         if hashlib.file_digest(source, "sha256").hexdigest() != digest:
@@ -296,10 +298,17 @@ def serve(directory: Path) -> None:
             # The complete request inventory is already recorded privately.
             return
 
-    with HTTPServer(("127.0.0.1", 3142), Handler) as server:
-        print("CERALIVE_SEALED_MIRROR_READY", flush=True)
-        while not missing:
-            server.handle_request()
+    def stop(_signal, _frame):
+        raise SystemExit(int(missing))
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        with HTTPServer(("127.0.0.1", 3142), Handler) as server:
+            print("CERALIVE_SEALED_MIRROR_READY", flush=True)
+            while not missing:
+                server.handle_request()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     raise SealedError("guest requested an object absent from the sealed inventory")
 
 

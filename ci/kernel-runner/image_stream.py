@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import struct
 from typing import BinaryIO, Callable, Final, Iterable, TypeAlias
 import uuid
@@ -25,16 +26,29 @@ CONTROL_LOG_LIMIT: Final = 8 * 1024**2
 BUILD_LOG_LIMIT: Final = 1024**3 - 16 * 1024**2
 MAGIC: Final = b"CERALIVE_IMAGE_STREAM_V1\n"
 IO_ATTEMPTS: Final = 3
+CHECK_RETRY: Final = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO))
 RETRYABLE_IO: Final = frozenset((errno.EACCES, errno.EPERM, errno.EBUSY, errno.EIO, errno.ENOSPC,
                                errno.EBADF, errno.ENOSYS, errno.EAGAIN, errno.EDQUOT))
 UNSUPPORTED_SYNC: Final = frozenset((errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EROFS))
-WRITEBACK_ERRORS: Final = frozenset((errno.EIO, errno.ENOSPC, errno.EDQUOT))
-_FSYNC = ctypes.CDLL(None, use_errno=True).fsync
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_FSYNC = _LIBC.fsync
 _FSYNC.argtypes = (ctypes.c_int,)
 _FSYNC.restype = ctypes.c_int
-_GETDENTS = ctypes.CDLL(None, use_errno=True).getdents64
+_GETDENTS = _LIBC.getdents64
 _GETDENTS.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
 _GETDENTS.restype = ctypes.c_ssize_t
+_READ = _LIBC.read
+_READ.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t)
+_READ.restype = ctypes.c_ssize_t
+_OPEN = _LIBC.open
+_OPEN.argtypes = (ctypes.c_char_p, ctypes.c_int)
+_OPEN.restype = ctypes.c_int
+_OPENAT = _LIBC.openat
+_OPENAT.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int)
+_OPENAT.restype = ctypes.c_int
+_PREAD = _LIBC.pread
+_PREAD.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int64)
+_PREAD.restype = ctypes.c_ssize_t
 ARTIFACTS: Final = frozenset((
     "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
     "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -80,12 +94,12 @@ def report_error(error: BaseException | str) -> None:
                 pass
 
 
-def list_directory(path: Path) -> list[str]:
+def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
     """Return a complete Linux directory scan, preserving ENOENT from getdents."""
     # glibc readdir treats an ENOENT from getdents as end of directory.
     # A safety check must distinguish a dead directory from normal EOF.
     buffer = ctypes.create_string_buffer(32 * 1024)
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = open_check(path, os.O_DIRECTORY)
     try:
         names = []
         while (length := _GETDENTS(fd, buffer, len(buffer))) > 0:
@@ -96,7 +110,7 @@ def list_directory(path: Path) -> list[str]:
                 if record_size < 20 or offset + record_size > length:
                     raise OSError(errno.EIO, "invalid getdents record", path)
                 name = batch[offset + 19:offset + record_size].split(b"\0", 1)[0]
-                if name not in (b".", b".."):
+                if name not in (b".", b"..") and not (omit_open_fd and name == str(fd).encode()):
                     names.append(os.fsdecode(name))
                 offset += record_size
         if length < 0:
@@ -105,6 +119,72 @@ def list_directory(path: Path) -> list[str]:
         return names
     finally:
         os.close(fd)
+
+
+def retry_check(operation, *args, disappearing: bool = False):
+    """Restart a read-only observation, discarding any incomplete result."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            return operation(*args)
+        except OSError as error:
+            retryable = error.errno in CHECK_RETRY or disappearing and error.errno in (errno.ENOENT, errno.ESRCH)
+            if not retryable or attempt + 1 == IO_ATTEMPTS:
+                raise
+
+
+def open_check(path: Path, flags: int = 0, *, dir_fd: int | None = None) -> int:
+    """Expose interrupted opens to the check that owns the complete observation."""
+    name = os.fsencode(path)
+    if b"\0" in name:
+        raise ValueError("embedded null byte in observation path")
+    flags |= os.O_RDONLY | os.O_CLOEXEC
+    fd = _OPEN(name, flags) if dir_fd is None else _OPENAT(dir_fd, name, flags)
+    if fd < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), path)
+    return fd
+
+
+def read_once(fd: int, buffer) -> bytes:
+    size = _READ(fd, buffer, len(buffer))
+    if size < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return ctypes.string_at(buffer, size)
+
+
+def read_check(path: Path, limit: int = 1024 * 1024) -> bytes:
+    """Read a metadata file once. Its outer check owns retries, including EINTR."""
+    buffer = ctypes.create_string_buffer(64 * 1024)
+    result = bytearray()
+    fd = open_check(path)
+    try:
+        while chunk := read_once(fd, buffer):
+            result.extend(chunk)
+            if len(result) > limit:
+                raise StreamError("observation exceeded metadata limit")
+        return bytes(result)
+    finally:
+        os.close(fd)
+
+
+def read_check_text(path: Path) -> str:
+    return read_check(path).decode("utf-8")
+
+
+def listed_entry(root: Path, relative: str) -> os.stat_result | None:
+    """Prove absence by listing the parent, including each intermediate path."""
+    parts = Path(relative).parts
+    for index, name in enumerate(parts):
+        if name not in list_directory(root):
+            return None
+        root = root / name
+        info = root.lstat()
+        if index == len(parts) - 1:
+            return info
+        if not stat.S_ISDIR(info.st_mode):
+            raise StreamError("inventory ancestor is not a directory")
+    raise ValueError("inventory entry must have a name")
 
 
 class FileSyncError(OSError):
@@ -124,7 +204,14 @@ def sync_file(fd: int, *, directory: bool = False, recover: bool = True) -> None
         if directory:
             retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
         else:
-            sync_once(fd)
+            # EINTR is an interrupted call, distinct from a writeback failure.
+            # Expose exhaustion without consuming a fresh-file attempt.
+            try:
+                sync_once(fd)
+            except OSError as error:
+                if error.errno != errno.EINTR:
+                    raise
+                sync_once(fd)
     except OSError as error:
         if error.errno not in UNSUPPORTED_SYNC:
             if directory:
@@ -134,15 +221,16 @@ def sync_file(fd: int, *, directory: bool = False, recover: bool = True) -> None
 
 
 def can_rewrite(error: FileSyncError) -> bool:
-    return error.errno in RETRYABLE_IO or error.errno == errno.EINTR
+    return error.errno in RETRYABLE_IO
 
 
 class PositionedReader(RawIOBase):
     """Keep the raw offset private. Retry only a read that made no progress."""
 
-    def __init__(self, fd: int) -> None:
+    def __init__(self, fd: int, *, checked: bool = False) -> None:
         self.fd = fd
         self.offset = 0
+        self.checked = checked
 
     def readable(self) -> bool:
         return True
@@ -154,7 +242,8 @@ class PositionedReader(RawIOBase):
         if whence == os.SEEK_CUR:
             offset += self.offset
         elif whence == os.SEEK_END:
-            offset += retry_io(os.fstat, self.fd, recover=True).st_size
+            info = os.fstat(self.fd) if self.checked else retry_io(os.fstat, self.fd, recover=True)
+            offset += info.st_size
         elif whence != os.SEEK_SET:
             raise ValueError("invalid seek origin")
         if offset < 0:
@@ -167,28 +256,38 @@ class PositionedReader(RawIOBase):
 
     def readinto(self, buffer) -> int:
         read = 0
+        raw = (ctypes.c_char * len(buffer)).from_buffer(buffer) if self.checked else None
         while read < len(buffer):
-            data = retry_io(os.pread, self.fd, len(buffer) - read, self.offset + read, recover=True)
-            if not data:
+            if raw is not None:
+                count = _PREAD(self.fd, ctypes.addressof(raw) + read, len(buffer) - read, self.offset + read)
+                if count < 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error))
+            else:
+                data = retry_io(os.pread, self.fd, len(buffer) - read, self.offset + read, recover=True)
+                count = len(data)
+                buffer[read:read + count] = data
+            if not count:
                 break
-            buffer[read:read + len(data)] = data
-            read += len(data)
+            read += count
         self.offset += read
         return read
 
 
 @contextmanager
 def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = None,
-                    nofollow: bool = False):
+                    nofollow: bool = False, checked: bool = False):
     """Own a regular input while exposing buffered reads over retry-safe pread."""
     fd = None
     try:
         flags = os.O_RDONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
-        if dir_fd is None:
+        if checked:
+            fd = open_check(path, flags, dir_fd=dir_fd)
+        elif dir_fd is None:
             fd = retry_io(os.open, path, flags, recover=True)
         else:
             fd = retry_io(os.open, path, flags, dir_fd=dir_fd, recover=True)
-        raw = PositionedReader(fd)
+        raw = PositionedReader(fd, checked=checked)
         with (raw if archive else BufferedReader(raw)) as stream:
             yield stream
     finally:
@@ -196,20 +295,24 @@ def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = N
             try:
                 os.close(fd)
             except OSError as error:
+                if checked:
+                    raise
                 report_error(error)  # A read-only close cannot invalidate consumed bytes.
 
 
-def write_all(destination: BinaryIO | int, data: bytes) -> None:
-    """Only retry the unwritten bytes of an unbuffered regular file."""
-    remaining = memoryview(data)
-    while remaining:
+def write_all(destination: BinaryIO | int, data: bytes) -> int:
+    """Write every byte without replaying any successfully written prefix."""
+    offset = 0
+    while offset < len(data):
+        remaining = data if offset == 0 else memoryview(data)[offset:]
         if isinstance(destination, int):
             written = retry_io(os.write, destination, remaining, recover=True)
         else:
             written = retry_io(destination.write, remaining, recover=True)
-        if not written:
+        if written is None or not 0 < written <= len(remaining):
             raise OSError(errno.EIO, "file write made no progress")
-        remaining = remaining[written:]
+        offset += written
+    return offset
 
 
 def read_input(path: Path) -> bytes:
@@ -218,21 +321,50 @@ def read_input(path: Path) -> bytes:
         return source.read()
 
 
-def create_file(path: Path, mode: int = 0o600) -> int:
-    """Atomically acquire a new descriptor and name, without another constructor syscall."""
-    return retry_io(os.open, path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode, recover=True)
+def create_file(owner: ExclusiveFile) -> None:
+    """Record ownership before returning from the exclusive open."""
+    flags = (os.O_RDWR if owner.readable else os.O_WRONLY) | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            owner.fd = os.open(owner.path, flags, owner.mode)
+        except OSError as error:
+            if attempt + 1 == IO_ATTEMPTS or error.errno not in RETRYABLE_IO | CHECK_RETRY:
+                raise
+        else:
+            return
+
+
+def unlink_owned(path: Path) -> None:
+    """Accept ENOENT only after a completed directory scan proves absence."""
+    for attempt in range(IO_ATTEMPTS):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            try:
+                if path.name not in list_directory(path.parent):
+                    return
+            except OSError:
+                if attempt + 1 == IO_ATTEMPTS:
+                    raise
+            if attempt + 1 == IO_ATTEMPTS:
+                raise
+        except (OSError, MemoryError):
+            if attempt + 1 == IO_ATTEMPTS:
+                raise
 
 
 class ExclusiveFile:
     """Preallocated owner for a raw exclusive output, with failure-only unlink."""
 
-    def __init__(self, path: Path, mode: int = 0o600) -> None:
+    def __init__(self, path: Path, mode: int = 0o600, *, readable: bool = False) -> None:
         self.path = path
         self.mode = mode
+        self.readable = readable
         self.fd: int | None = None
 
     def open(self) -> None:
-        self.fd = create_file(self.path, self.mode)
+        create_file(self)
 
     def __enter__(self) -> ExclusiveFile:
         return self
@@ -244,8 +376,18 @@ class ExclusiveFile:
             # The kernel has already released the unbuffered file descriptor.
             pass
         finally:
-            if exc_type is not None and self.fd is not None:
-                retry_io(self.path.unlink, missing_ok=True, recover=True)
+            if exc_type is not None:
+                self.discard()
+
+    def discard(self) -> None:
+        if self.fd is None:
+            return
+        try:
+            self.close()
+        except OSError as error:
+            report_error(error)
+        unlink_owned(self.path)
+        self.fd = None
 
     def fileno(self) -> int:
         return self.fd if self.fd is not None else -1
@@ -341,7 +483,7 @@ def read_header(source: BinaryIO) -> Member:
 
 
 def transfer(source: BinaryIO, destination: BinaryIO | int, member: Member,
-             checkpoint: Callable[[], None] | None = None, *, decoding: bool = False) -> int:
+             checkpoint: Callable[[], None] | None = None) -> int:
     """Hash while copying exactly the declared length, with bounded memory."""
     digest = hashlib.sha256()
     remaining = member.length
@@ -353,11 +495,7 @@ def transfer(source: BinaryIO, destination: BinaryIO | int, member: Member,
         chunk = source.read(size)
         if not chunk:
             raise StreamError("truncated artifact")
-        if decoding:
-            write_all(destination, chunk)
-            written += len(chunk)
-        else:
-            written += destination.write(chunk) or 0
+        written += write_all(destination, chunk)
         digest.update(chunk)
         remaining -= len(chunk)
     if digest.hexdigest() != member.sha256:
@@ -383,7 +521,7 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
                 raise StreamError("oversized terminal manifest")
             import io
             manifest_bytes = io.BytesIO()
-            transfer(source, manifest_bytes, member, decoding=True)
+            transfer(source, manifest_bytes, member)
             try:
                 manifest = json.loads(manifest_bytes.getvalue(), object_pairs_hook=unique_object)
             except ValueError as exc:
@@ -412,14 +550,14 @@ def decode(source: BinaryIO, directory: Path, expected: Identity,
         with ExclusiveFile(path) as output:
             output.open()
             fd = output.fileno()
-            transfer(source, fd, member, checkpoint, decoding=True)
+            transfer(source, fd, member, checkpoint)
             try:
                 sync_file(fd)
             except FileSyncError as error:
                 if not can_rewrite(error):
                     raise
                 source.seek(start)
-                rewrite_file(path, lambda fresh: transfer(source, fresh, member, checkpoint, decoding=True))
+                rewrite_file(path, lambda fresh: transfer(source, fresh, member, checkpoint))
         members.append(member)
 
 
@@ -433,17 +571,17 @@ def encode(destination: BinaryIO, records: Iterable[tuple[str, bytes | Path]],
     def write_member(member: Member, value: bytes | Path) -> None:
         header = json.dumps(asdict(member), separators=(",", ":")).encode() + b"\n"
         mark("member_header_begin", len(header))
-        mark("member_header_end", destination.write(header) or 0)
+        mark("member_header_end", write_all(destination, header))
         mark("member_body_begin", member.length)
         if isinstance(value, Path):
             with value.open("rb") as source:
                 written = transfer(source, destination, member)
         else:
-            written = destination.write(value) or 0
+            written = write_all(destination, value)
         mark("member_body_written", written)
 
     mark("magic_write_begin", len(MAGIC))
-    mark("magic_written", destination.write(MAGIC) or 0)
+    mark("magic_written", write_all(destination, MAGIC))
     members = []
     for ordinal, (name, value) in enumerate(records, 1):
         mark("member_prepare_begin", ordinal)

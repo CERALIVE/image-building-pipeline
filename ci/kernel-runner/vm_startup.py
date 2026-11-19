@@ -8,7 +8,7 @@ from pathlib import Path
 import signal
 import sys
 
-from image_stream import list_directory
+from image_stream import list_directory, read_check_text, retry_check
 from vm_process import CATCHABLE_SIGNALS, STOP_SIGNALS, Cancellation
 
 STARTUP_ERROR = 78
@@ -28,15 +28,8 @@ class StartupError(Exception):
 
 
 def fd_table() -> set[int]:
-    # The directory enumeration can include the already-closed enumeration FD.
-    descriptors = set()
-    for name in list_directory(Path("/proc/self/fd")):
-        try:
-            os.lstat(f"/proc/self/fd/{name}")
-        except FileNotFoundError:
-            continue
-        descriptors.add(int(name))
-    return descriptors
+    return {int(name) for name in retry_check(
+        lambda: list_directory(Path("/proc/self/fd"), omit_open_fd=True))}
 
 
 def ensure_standard_fds() -> None:
@@ -98,7 +91,7 @@ def sanitize_startup(cancellation: Cancellation) -> list[str]:
     # for interpreting relative CLI paths, but refuse a deleted cwd.
     os.getcwd()
     signal.pthread_sigmask(signal.SIG_SETMASK, set())
-    status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines()
+    status = dict(line.split(":", 1) for line in retry_check(read_check_text, Path("/proc/self/status")).splitlines()
                   if ":" in line)
     tracked = sum(1 << (sig - 1) for sig in handlers)
     expected_ignored = sum(1 << (sig - 1) for sig in PYTHON_IGNORES)

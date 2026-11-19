@@ -15,7 +15,7 @@ import subprocess
 import tarfile
 
 from image_capsule import Capsule, digest_file
-from image_stream import Identity, StreamError, positioned_open, read_input
+from image_stream import Identity, StreamError, list_directory, listed_entry, positioned_open, read_input, retry_check
 
 
 @contextmanager
@@ -37,8 +37,12 @@ def parent_fd(root: Path, name: str):
 
 def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
     """Bind file bytes, ownership, modes, links and special-file identities."""
+    retry_check(_compare_slot, root, archive, boot)
+
+
+def _compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
     expected = set()
-    with positioned_open(archive, archive=True) as source, tarfile.open(fileobj=source, mode="r:") as tar:
+    with positioned_open(archive, archive=True, checked=True) as source, tarfile.open(fileobj=source, mode="r:") as tar:
         for member in tar:
             name = member.name.removeprefix("./").rstrip("/")
             if name in ("", "."):
@@ -61,7 +65,7 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                     content = tar.extractfile(member)
                     if content is None:
                         raise StreamError("unreadable returned tar file")
-                    with content, positioned_open(leaf, dir_fd=fd, nofollow=True) as file:
+                    with content, positioned_open(leaf, dir_fd=fd, nofollow=True, checked=True) as file:
                         if hashlib.file_digest(content, "sha256").digest() != hashlib.file_digest(file, "sha256").digest():
                             raise StreamError("slot file bytes differ from emitted tar")
                 elif member.issym():
@@ -86,26 +90,38 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                 else:
                     raise StreamError("unsupported returned tar member")
     actual_names = set()
-
-    def unreadable(error: OSError) -> None:
-        raise error
-
-    for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
-        for name in (*dirs, *files):
-            actual_names.add(str((Path(directory) / name).relative_to(root)))
+    directories = [root]
+    while directories:
+        directory = directories.pop()
+        for name in list_directory(directory):
+            path = directory / name
+            actual_names.add(str(path.relative_to(root)))
+            if len(actual_names) > 1_000_000 + len(boot) + 2:
+                raise StreamError("excessive slot directory inventory")
+            if stat.S_ISDIR(path.lstat().st_mode):
+                directories.append(path)
     additions = set(boot) | {"usr/lib/ceralive/boot", "lost+found"}
     if actual_names - expected - additions:
         raise StreamError("slot contains unexpected additions to emitted tar")
-    if (root / "lost+found").exists() and list((root / "lost+found").iterdir()):
-        raise StreamError("slot lost+found is not empty")
+    if "lost+found" in actual_names:
+        housekeeping = root / "lost+found"
+        if not stat.S_ISDIR(housekeeping.lstat().st_mode) or list_directory(housekeeping):
+            raise StreamError("slot lost+found is not an empty directory")
     for name, content in boot.items():
         with parent_fd(root, name) as (fd, leaf):
             actual = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
             if not stat.S_ISREG(actual.st_mode) or (stat.S_IMODE(actual.st_mode), actual.st_uid, actual.st_gid) != (0o644, 0, 0):
                 raise StreamError("slot boot payload metadata mismatch")
-            with positioned_open(leaf, dir_fd=fd, nofollow=True) as file:
-                if hashlib.file_digest(file, "sha256").hexdigest() != digest_file(content):
+            with positioned_open(leaf, dir_fd=fd, nofollow=True, checked=True) as file:
+                if hashlib.file_digest(file, "sha256").hexdigest() != digest_file(content, checked=True):
                     raise StreamError("slot boot payload differs from trusted compilation")
+
+
+def check_firmware(firmware: Path, removed: tuple[str, ...], retained: tuple[str, ...]) -> None:
+    unexpected = any(listed_entry(firmware, name) is not None for name in removed)
+    if unexpected or not all((info := listed_entry(firmware, name)) is not None
+                             and stat.S_ISDIR(info.st_mode) for name in retained):
+        raise StreamError("ceralive8 removed/retained firmware inventory mismatch")
 
 
 def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
@@ -215,9 +231,7 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             removed = ("amdgpu", "radeon", "i915", "xe", "mellanox", "netronome", "intel/ipu", "intel/vsc")
             retained = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "mrvl", "mrvl/prestera", "nvidia")
             firmware = mount / "usr/lib/firmware"
-            if any((firmware / name).exists() for name in removed) or not all(
-                    (firmware / name).is_dir() for name in retained):
-                raise StreamError("ceralive8 removed/retained firmware inventory mismatch")
+            retry_check(check_firmware, firmware, removed, retained)
             references = subprocess.run(["bash", "-euo", "pipefail", "-c",
                 'source "$1"; firmware_sweep_module_refs "$2"', "_",
                 str(source / "mkosi/customize/firmware-sweep.sh"), str(mount)],

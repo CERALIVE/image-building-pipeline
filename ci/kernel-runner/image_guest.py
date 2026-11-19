@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import errno
 import json
 import os
 from pathlib import Path
@@ -18,15 +19,49 @@ import time
 from image_capsule import Capsule, unpack
 from image_stages import StageLog, stage_marker
 from image_stream import (
-    BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode, list_directory, positioned_open, read_input,
+    BUILD_LOG_LIMIT, ExclusiveFile, Identity, StreamError, encode, list_directory, listed_entry,
+    positioned_open, read_input, retry_check,
 )
 
 HOME = Path("/opt/ceralive-image-job")
+UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
 
 
 def command(args: list[str], env: dict[str, str]) -> str:
     return subprocess.run(args, check=True, env=env, stdout=subprocess.PIPE,
                           text=True, timeout=180).stdout.strip()
+
+
+def check_route(env: dict[str, str]) -> None:
+    rows = json.loads(command(["ip", "-j", "route", "show", "default"], env))
+    if type(rows) is not list:
+        raise StreamError("offline guest route inventory is invalid")
+    if rows:
+        raise StreamError("offline guest has a default route")
+
+
+def check_tcp(address: str, deadline: float) -> None:
+    timeout = deadline - time.monotonic()
+    if timeout <= 0:
+        raise StreamError("offline guest TCP check exhausted its deadline")
+    with socket.socket() as probe:
+        probe.setblocking(False)
+        try:
+            probe.connect((address, 443))
+        except OSError as error:
+            result = error.errno
+            if result == errno.EINPROGRESS:
+                with selectors.DefaultSelector() as ready:
+                    ready.register(probe, selectors.EVENT_WRITE)
+                    if not ready.select(max(0, deadline - time.monotonic())):
+                        raise StreamError("offline guest TCP check exhausted its deadline")
+                result = probe.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        else:
+            result = 0
+    if result == 0:
+        raise StreamError("offline guest can reach an external endpoint")
+    if result not in UNREACHABLE:
+        raise OSError(result, "offline guest TCP check is inconclusive")
 
 
 def source_checkout(capsule: Capsule, directory: Path, env: dict[str, str]) -> Path:
@@ -160,11 +195,13 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
                                 build.wait()
             finally:
                 mirror.terminate()
-                mirror.wait(timeout=20)
-    if (directory / "missing-object").exists():
+                status = mirror.wait(timeout=20)
+                if status:
+                    raise StreamError("sealed guest mirror did not remain ready through the build")
+    if retry_check(listed_entry, directory, "missing-object") is not None:
         raise StreamError("guest requested an object absent from the sealed inventory")
     out = source / "images" / capsule.board
-    receipts = [out / name for name in list_directory(out) if name.endswith(".measurement.json")]
+    receipts = [out / name for name in retry_check(list_directory, out) if name.endswith(".measurement.json")]
     if len(receipts) != 1:
         raise StreamError("build did not emit exactly one measurement receipt")
     prefix = receipts[0].name.removesuffix(".measurement.json")
@@ -231,20 +268,19 @@ def main() -> int:
                 denied = False
                 stages("route_check_begin")
                 try:
-                    denied = not json.loads(command(["ip", "-j", "route", "show", "default"], env))
+                    retry_check(check_route, env)
+                    denied = True
                 finally:
                     stages("route_check_end", int(denied))
-                if not denied:
-                    raise StreamError("offline guest has a default route")
                 for index, address in enumerate(("10.0.2.2", "169.254.169.254", "192.168.0.1", "1.1.1.1"), 1):
                     denied = False
                     stages(f"tcp_check_{index}_begin")
                     try:
-                        with socket.socket() as probe:
-                            probe.settimeout(1)
-                            denied = probe.connect_ex((address, 443)) != 0
-                            if not denied:
-                                raise StreamError("offline guest can reach an external endpoint")
+                        try:
+                            retry_check(check_tcp, address, time.monotonic() + 1)
+                        except OSError as error:
+                            raise StreamError("offline guest TCP check is inconclusive") from error
+                        denied = True
                     finally:
                         stages(f"tcp_check_{index}_end", int(denied))
                 report = HOME / "verification.json"

@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 import image_guest
+import image_verify
 from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
 from image_capsule import unpack, verification_capsule
 from image_transport import copy_local
@@ -56,12 +57,20 @@ def test_artifacts_return_with_private_fixed_names() -> None:
 
 def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> None:
     baseline = None
-    for logging_available, route_present, fault in (
+    original_cases = (
         (True, False, None), (False, False, None), (False, True, None),
         (True, False, "open"), (True, False, "write"), (True, False, "close"),
         (True, False, "init:RuntimeError"), (True, False, "init:OSError"),
         (True, False, "init:MemoryError"),
-    ):
+    )
+    cases = [(logging, "[{}]" if route else "[]", fault, (errno.ENETUNREACH,), route)
+             for logging, route, fault in original_cases]
+    cases += [(False, reply, None, (errno.ENETUNREACH,), True)
+              for reply in ("null", "false", "{}", '""', "0")]
+    cases += [(False, "[]", None, (error,), True)
+              for error in (0, errno.EIO, errno.EPERM, errno.ENOSYS, errno.EINTR)]
+    cases += [(False, "[]", None, (errno.EINTR, errno.EAGAIN, errno.ENETUNREACH), False)]
+    for logging_available, route_reply, fault, socket_results, failed in cases:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             guest_home, console, stage_log = (root / name for name in ("guest", "console", "stages"))
@@ -72,8 +81,14 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
             request.write_text(json.dumps({"schema": 1, "identity": asdict(IDENTITY),
                                            "operation": "probe", "trust": {}}))
             wire = root / "wire"
-            no_connection = SimpleNamespace(settimeout=lambda _seconds: None,
-                                            connect_ex=lambda _address: 101)
+            replies = iter(socket_results[:-1])
+            def connect(_address):
+                error = next(replies, socket_results[-1])
+                if error:
+                    raise OSError(error, "fixture connect")
+
+            no_connection = SimpleNamespace(setblocking=lambda _state: None,
+                                            connect=connect)
 
             def import_fixture(_capsule, destination, _identity):
                 destination.mkdir()
@@ -86,7 +101,7 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                   }.get(path, pathlib.Path(path))),
                   patch.object(image_guest, "unpack", side_effect=import_fixture),
                   patch.object(image_guest, "source_checkout", return_value=root / "CLIENT_KEY_PATH"),
-                  patch.object(image_guest, "command", return_value="[{}]" if route_present else "[]"),
+                  patch.object(image_guest, "command", return_value=route_reply),
                   patch.object(image_guest.socket, "socket") as socket_factory):
                 socket_factory.return_value.__enter__.return_value = no_connection
                 with patch("image_stages.CONSOLE", console):
@@ -110,7 +125,7 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                                 return operation(target, *args)
 
                             faults.enter_context(patch.object(os, fault, side_effect=fail_once))
-                        assert image_guest.main() == int(route_present)
+                        assert image_guest.main() == int(failed)
                         if fault and fault.startswith("init:"):
                             failed_init.assert_called_once()
                         elif fault:
@@ -119,8 +134,9 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
             artifacts.mkdir()
             with wire.open("rb") as source:
                 decode(source, artifacts, IDENTITY)
-            if route_present:
+            if failed:
                 assert json.loads((artifacts / "failure.json").read_text())["failure"] == "StreamError"
+                assert not (artifacts / "verification.json").exists()
             else:
                 assert json.loads((artifacts / "verification.json").read_text())["network_denied"] is True
                 if baseline is None:
@@ -160,6 +176,30 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                     "tcp_check_4_end", "verdict_computed"))
                 assert b"CLIENT_KEY_PATH" not in console.read_bytes()
             assert not stage_log.exists()
+
+
+def test_guest_encoder_finishes_all_short_writes_or_raises() -> None:
+    class ShortWriter(io.BytesIO):
+        def write(self, chunk):
+            return super().write(chunk[:7])
+
+    with tempfile.TemporaryDirectory() as temporary:
+        member = pathlib.Path(temporary) / "input"
+        body = bytes(range(256)) * 8193
+        member.write_bytes(body)
+        records = [("rootfs.tar", member), ("verification.json", b'{"verified":true}')]
+        healthy = io.BytesIO()
+        encode(healthy, records, IDENTITY)
+        short = ShortWriter()
+        encode(short, records, IDENTITY)
+        assert short.getvalue() == healthy.getvalue()
+        with patch.object(short, "write", return_value=0):
+            try:
+                encode(short, records, IDENTITY)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("stalled guest writer returned successfully")
 
 
 def test_stage_logger_returns_when_the_console_pipe_is_full() -> None:
@@ -417,6 +457,76 @@ def test_slot_comparison_rejects_changed_bytes_extra_files_and_root_metadata() -
                 pass
             else:
                 raise AssertionError(f"slot comparison accepted {case}")
+
+
+def test_slot_inventory_restarts_at_root_and_refuses_unreadable_or_extra_entries() -> None:
+    from image_stream import list_directory
+
+    with tempfile.TemporaryDirectory() as temporary:
+        work = pathlib.Path(temporary)
+        root = work / "slot"
+        child = root / "sub"
+        child.mkdir(parents=True)
+        archive = work / "rootfs.tar"
+        with tarfile.open(archive, "w") as output:
+            output.add(root, arcname=".")
+        for error in (errno.EIO, errno.EINTR, errno.EAGAIN, errno.EPERM, errno.ENOENT):
+            for hidden in (False, True):
+                extra = child / "extra"
+                if hidden:
+                    extra.touch()
+                calls = []
+
+                def scan(path):
+                    calls.append(path)
+                    if path == child and calls.count(child) == 1:
+                        raise OSError(error, "fixture incomplete subtree")
+                    return list_directory(path)
+
+                with patch.object(image_verify, "list_directory", scan, create=True):
+                    try:
+                        compare_slot(root, archive, {})
+                    except (OSError, StreamError):
+                        assert hidden or error in (errno.EPERM, errno.ENOENT)
+                    else:
+                        assert not hidden and error in (errno.EIO, errno.EINTR, errno.EAGAIN)
+                assert calls.count(root) == (2 if error in (errno.EIO, errno.EINTR, errno.EAGAIN) else 1)
+                extra.unlink(missing_ok=True)
+
+
+def test_slot_content_failure_restarts_the_whole_comparison() -> None:
+    import image_stream
+
+    with tempfile.TemporaryDirectory() as temporary:
+        work = pathlib.Path(temporary)
+        root = work / "slot"
+        root.mkdir()
+        member = root / "file"
+        member.write_bytes(b"fixture")
+        archive = work / "rootfs.tar"
+        with tarfile.open(archive, "w") as output:
+            output.add(root, arcname=".")
+        opened = []
+        reported = []
+        opener = image_stream.open_check
+        pread = getattr(image_stream, "_PREAD", None)
+
+        def open_file(path, *args, **kwargs):
+            opened.append(path)
+            return opener(path, *args, **kwargs)
+
+        def read_at(fd, address, size, offset):
+            if os.readlink(f"/proc/self/fd/{fd}") == str(member) and not reported:
+                reported.append(offset)
+                image_stream.ctypes.set_errno(errno.EIO)
+                return -1
+            return pread(fd, address, size, offset)
+
+        with patch.object(image_stream, "open_check", open_file), \
+                patch.object(image_stream, "_PREAD", read_at, create=True):
+            compare_slot(root, archive, {})
+        assert reported == [0]
+        assert opened.count(archive) == 2
 
 
 def test_sidecar_rejects_wrong_hash_filename_and_trailing_records() -> None:

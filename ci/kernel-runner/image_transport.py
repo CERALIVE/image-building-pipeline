@@ -22,7 +22,7 @@ from urllib.parse import urljoin, urlsplit
 
 from image_capsule import original_url
 from image_policy import ArchivePolicy, require_client_origin
-from image_stream import ExclusiveFile, StreamError, positioned_open, retry_io, unique_object
+from image_stream import ExclusiveFile, StreamError, positioned_open, read_check, retry_check, retry_io, unique_object
 
 ROOT = Path(__file__).resolve().parents[2]
 SEALED = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
@@ -36,9 +36,14 @@ def child_limit(length: int) -> None:
 
 
 def read_json(path: Path) -> dict:
-    if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024 * 1024:
+    return retry_check(_read_json, path)
+
+
+def _read_json(path: Path) -> dict:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
         raise StreamError("missing, linked or oversized reviewed inventory")
-    return json.loads(path.read_text(), object_pairs_hook=unique_object)
+    return json.loads(read_check(path), object_pairs_hook=unique_object)
 
 
 def bsp_pin(url: str, target: Path, seconds: float) -> str:
@@ -263,7 +268,7 @@ def copy_local(source: Path, target: Path, length: int) -> None:
         raise StreamError("local input is not a regular file of the approved size") from error
     if not stat.S_ISREG(info.st_mode) or info.st_size != length:
         raise StreamError("local input is not a regular file of the approved size")
-    with positioned_open(source) as stream, ExclusiveFile(target, 0o666) as output:
+    with positioned_open(source, nofollow=True) as stream, ExclusiveFile(target, 0o666) as output:
         output.open()
         remaining = length
         while remaining:

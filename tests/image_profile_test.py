@@ -1129,7 +1129,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                             for begin, end in (
                                 ("if self.probe:\n", "raise subprocess.TimeoutExpired("),
                                 ("if console_retry_at is not None", "ready = events.select("),
-                                ('if self.probe and name == "console":', "chunk = os.read("),
+                                ('if self.probe and name == "console":', "chunk = read_once("),
                                 ("if self.probe:\n", 'self.state["stream_bytes"]'),
                             ):
                                 last = max(i for i, line in enumerate(capture_src) if end in line)
@@ -1457,7 +1457,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     return boundary(on_loss, action, *args, **kwargs)
                 patches.enter_context(patch.object(image_lifecycle, "optional", fault_boundary))
         if tail_case:
-            native_write, native_pread = os.write, os.pread
+            native_write, native_pread, native_read = os.write, os.pread, image_lifecycle.read_once
             native_signal = signal.signal
             native_pending = signal.sigpending
             native_mkdir = pathlib.Path.mkdir
@@ -1480,6 +1480,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 if receipt_phase(sys._getframe(1)) == "exit":
                     tail_signal_at("checkpoint")
                 return native_pending()
+
+            def tail_read(fd, size):
+                caller = sys._getframe(1)
+                if caller.f_code is ImageJob.capture.__code__ and caller.f_locals.get("name") == "stream":
+                    tail_fault("live-stream-read")
+                return native_read(fd, size)
 
             def tail_signal(sig, handler):
                 if sig == signal.SIGUSR1 and handler == signal.SIG_IGN:
@@ -1545,6 +1551,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
             patches.enter_context(patch.object(image_lifecycle, "partial", tail_partial))
             patches.enter_context(patch.object(os, "open", tail_open))
+            patches.enter_context(patch.object(image_lifecycle, "read_once", tail_read))
             patches.enter_context(patch.object(os, "close", tail_close))
             patches.enter_context(patch.object(os, "write", tail_write))
             patches.enter_context(patch.object(os, "pread", tail_pread))
@@ -2007,24 +2014,33 @@ os.execvp(sys.argv[1], sys.argv[1:])
         if mode.startswith("tail-io:"):
             point, error, count, *_ = mode.removeprefix("tail-io:").split("/")
             marker = directory / "exit.json"
-            required_exhaustion = (point in {"verification-read", "exit-file-fsync"} and int(count) == 3
-                                   or point == "exit-file-fsync" and int(count) == 2
-                                   and error in {"EIO", "ENOSPC", "EDQUOT"})
+            required_exhaustion = (point == "verification-read" and int(count) == 3
+                                   or point == "exit-file-fsync" and int(count) >= 2)
+            live_exhausted = point == "live-stream-read" and int(count) == 3
             required_memory_fault = error == "MemoryError" and (
                 point == "verification-read" or point.startswith(("teardown-", "validation-")))
             checkpoint_cancelled = mode == "tail-io:exit-mask/EINTR/0/checkpoint"
-            failed = (required_exhaustion or required_memory_fault or point.endswith("-temp-unlink")
+            failed = (required_exhaustion or live_exhausted or required_memory_fault or point.endswith("-temp-unlink")
                       or checkpoint_cancelled
                       or point.startswith("rejected-fd-line-") or point == "exit-ignore" and int(count) == 3)
             assert launcher.returncode == int(failed), (mode, launcher.returncode, stderr)
             row = json.loads(marker.read_text()) if marker.exists() else None
             if row is not None:
                 assert row["launcher_exit"] == launcher.returncode
-                assert row["qemu_reaped"] and row["qemu_exit"] == 0 and row["stream_bytes"] == frame.tell()
+                assert row["qemu_reaped"]
+                if live_exhausted:
+                    assert row["stream_bytes"] == 0
+                    assert row["stop_reason"] == "StreamError"
+                else:
+                    assert row["qemu_exit"] == 0 and row["stream_bytes"] == frame.tell()
                 assert row["qemu_priority"] == FIXTURE_PRIORITY
             else:
                 assert failed
-            assert (directory / "artifacts/verification.json").read_bytes() == probe_body
+            artifact = directory / "artifacts/verification.json"
+            if live_exhausted:
+                assert row is not None and not artifact.exists()
+            else:
+                assert artifact.read_bytes() == probe_body
             assert json.loads((root / "launcher-children").read_text()) == []
             initial, final = json.loads((root / "descriptor-check").read_text())
             assert initial == final, (mode, initial, final, stderr)
@@ -2040,13 +2056,15 @@ os.execvp(sys.argv[1], sys.argv[1:])
             if point.endswith("-allocation") or int(count) == 0:
                 assert not (root / "tail-fault-count").exists(), (mode, stderr)
             else:
-                expected_count = (2 if point == "exit-file-fsync" and error in {"EIO", "ENOSPC", "EDQUOT"}
-                                  and required_exhaustion else int(count))
+                expected_count = 2 if point == "exit-file-fsync" and required_exhaustion else int(count)
                 assert int((root / "tail-fault-count").read_text()) == expected_count, (mode, stderr)
             active = root / "returns/active.json"
             if point == "journal-unlink" and int(count) == 3:
                 assert active.exists() and b"journal_removed=false" in stderr
-                reconcile(active.parent)
+                scan = image_lifecycle.list_directory
+                with patch.object(image_lifecycle, "list_directory", side_effect=lambda path, **kwargs:
+                                  [str(os.getpid())] if path == image_lifecycle.PROC_ROOT else scan(path, **kwargs)):
+                    reconcile(active.parent)
                 assert (active.parent / "fixture.reconciled.json").exists()
             assert not active.exists()
             if point.endswith("-fd-line-baseline"):
@@ -2984,7 +3002,7 @@ def test_live_capture_rejects_new_diagnostic_io() -> None:
         "events.unregister(event.fileobj)", "events.unregister(event.fileobj)",
         "self.probe_events.unregister(self.console_read)",
         "self.drain(events)", "close_transport(self.console_writer.close, on_loss)",
-        "os.read(event.fd, 1024 * 1024)",
+        "read_once(event.fd, self.capture_buffer)",
         "events.select(timeout=min(POLL_SECONDS, end - now))",
         "self.register_measure_transport(events, process)",
         "overlay.stat()",
@@ -3067,7 +3085,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         raw_close = Counter({
             "sync_directory": ("os.close(fd)",),
             "dir_close": ("os.close(self.directory_fd)",),
-            "file_close": ("os.close(fd)",),
+            "file_close": ("self.output.close()",),
             "report_error": ("os.close(fd)",),
         }.get(tree.body[0].name, ()))
         registration_methods = {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}
@@ -3337,7 +3355,7 @@ def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
     operations = (
         "verification-read", "readback", "journal-unlink", "journal-dir-open", "journal-dir-fsync",
         "journal-dir-close", "exit-mask", "artifact-open", "artifact-write", "artifact-sync", "artifact-close",
-        "capture-open", "capture-write", "capture-sync",
+        "capture-open", "capture-write", "capture-sync", "live-stream-read",
         *(f"{phase}-{operation}" for phase in ("validation", "teardown", "exit") for operation in (
             "file-open", "write", "file-fsync", "file-close", "rename",
             "dir-open", "dir-fsync", "dir-close",
@@ -3352,7 +3370,11 @@ def test_tail_syscall_faults_preserve_the_validated_probe() -> None:
             cancelled_fixture(f"tail-io:{phase}-temp-unlink/{error}/1")
     for point in ("verification-read", "readback", "exit-write", "exit-file-fsync", "exit-rename",
                   "exit-dir-fsync", "journal-unlink", "exit-mask"):
-        assert cancelled_fixture(f"tail-io:{point}/EINTR/2") == baseline, point
+        row = cancelled_fixture(f"tail-io:{point}/EINTR/2")
+        assert row == (None if point == "exit-file-fsync" else baseline), point
+    for error in ("EAGAIN", "ENOSYS", "EIO"):
+        assert cancelled_fixture(f"tail-io:live-stream-read/{error}/2") == baseline
+    assert cancelled_fixture("tail-io:live-stream-read/EIO/3")["launcher_exit"] == 1
     for point in ("verification-read", "exit-file-fsync", "exit-dir-fsync", "readback", "journal-unlink"):
         cancelled_fixture(f"tail-io:{point}/EINTR/3")
     for error in ("EACCES", "ENOENT", "EBUSY"):
@@ -3399,7 +3421,7 @@ def test_unsupported_durability_preserves_published_outcome() -> None:
         for error in ("ENOSYS", "EINVAL", "ENOTSUP", "EROFS"):
             row = cancelled_fixture(f"tail-io:{path}/{error}/1")
             assert row == baseline, (path, error, baseline, row)
-    for error in ("EIO", "ENOSPC", "EDQUOT"):
+    for error in ("EIO", "ENOSPC", "EDQUOT", "EPERM", "EINTR"):
         assert cancelled_fixture(f"tail-io:exit-file-fsync/{error}/3") is None
         assert cancelled_fixture(f"tail-io:exit-file-fsync/{error}/2") is None
 
@@ -3437,6 +3459,130 @@ def test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode() ->
                 assert list(root.iterdir()) == ([marker] if failures == 1 else [])
                 if failures == 1:
                     assert marker.read_bytes() == attempts[1][1]
+
+
+def test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_temporary() -> None:
+    import image_stream
+
+    for case in ("corruption", "unlink-enoent", "allocation-after-create"):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            target = root / "exit.json"
+            row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
+            real_sync, real_unlink = image_stream.sync_once, pathlib.Path.unlink
+            first = root / ".receipt-original"
+            failures = 0
+
+            def sync(fd):
+                nonlocal failures
+                file = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
+                failures += 1
+                if file == first:
+                    if case == "corruption":
+                        os.ftruncate(fd, 1)
+                        return real_sync(fd)
+                    raise OSError(errno.EIO, "fixture writeback error")
+                return real_sync(fd)
+
+            unlinks = 0
+
+            def unlink(path, *args, **kwargs):
+                nonlocal unlinks
+                if path == first and case == "unlink-enoent":
+                    unlinks += 1
+                    if unlinks == 1 and not kwargs.get("missing_ok"):
+                        raise FileNotFoundError(errno.ENOENT, "fixture did not remove the file")
+                    if unlinks == 1:
+                        return None
+                return real_unlink(path, *args, **kwargs)
+
+            created = 0
+
+            def after_acquisition(frame, event, _value):
+                nonlocal created
+                if event == "return" and frame.f_code is image_stream.create_file.__code__:
+                    created += 1
+                    if created == 2:
+                        raise MemoryError("fixture at exclusive-create return")
+                return after_acquisition
+
+            before = set(os.listdir("/proc/self/fd"))
+            with patch("image_stream.sync_once", sync), patch.object(pathlib.Path, "unlink", unlink):
+                if case == "allocation-after-create":
+                    sys.settrace(after_acquisition)
+                try:
+                    image_lifecycle.receipt(target, row, temporary=first)
+                except image_lifecycle.ReceiptError:
+                    assert case in ("allocation-after-create", "corruption")
+                    assert not target.exists()
+                else:
+                    assert case == "unlink-enoent" or failures == 2
+                    assert json.loads(target.read_bytes()) == row
+                finally:
+                    sys.settrace(None)
+            assert set(os.listdir("/proc/self/fd")) == before
+            assert list(root.iterdir()) == ([target] if target.exists() else [])
+
+
+def test_each_reached_fresh_receipt_recovery_line_keeps_ownership() -> None:
+    import image_stream
+
+    watched = {fn.__code__ for fn in (image_lifecycle.Receipt.file_sync,
+                                     image_lifecycle.Receipt._write_payload,
+                                     image_stream.create_file,
+                                     image_stream.ExclusiveFile.discard,
+                                     image_stream.unlink_owned)}
+    healthy_lines = set()
+
+    def replay(point=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            target, first = directory / "exit.json", directory / ".receipt-original"
+            baseline = set(os.listdir("/proc/self/fd"))
+            row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
+            recovering = False
+            injected = False
+            real_sync = image_stream.sync_once
+
+            def sync(fd):
+                nonlocal recovering
+                if os.readlink(f"/proc/self/fd/{fd}") == str(first):
+                    recovering = True
+                    raise OSError(errno.EIO, "fixture recovery")
+                real_sync(fd)
+
+            def line_fault(frame, event, _arg):
+                nonlocal injected
+                if frame.f_code not in watched:
+                    return None
+                if event == "line" and recovering:
+                    site = (frame.f_code.co_qualname, frame.f_lineno)
+                    if point is None:
+                        healthy_lines.add(site)
+                    elif site == point:
+                        injected = True
+                        sys.settrace(None)
+                        raise MemoryError("fixture fresh receipt recovery")
+                return line_fault
+
+            with patch("image_stream.sync_once", sync):
+                sys.settrace(line_fault)
+                try:
+                    image_lifecycle.receipt(target, row, temporary=first)
+                except image_lifecycle.ReceiptError:
+                    assert point is not None
+                finally:
+                    sys.settrace(None)
+            assert recovering and injected == (point is not None)
+            assert set(os.listdir("/proc/self/fd")) == baseline
+            assert list(directory.iterdir()) == ([target] if target.exists() else [])
+            if target.exists():
+                assert json.loads(target.read_bytes()) == row
+
+    replay()
+    assert len(healthy_lines) >= 12
+    for point in sorted(healthy_lines):
+        replay(point)
 
 
 def test_attempt_preparation_and_journal_survive_transient_io() -> None:
@@ -3978,7 +4124,7 @@ def test_image_admission_requires_effective_cgroup_caps() -> None:
                 raise FileNotFoundError(path)
             return snapshot[str(path)]
 
-        with patch.object(pathlib.Path, "read_text", read_text), \
+        with patch.object(image_resources, "read_check_text", read_text), \
                 patch.object(image_resources, "list_directory", lambda path: [p.name for key in snapshot
                              if (p := pathlib.Path(key)).parent == path]), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
@@ -4013,7 +4159,7 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
                 raise FileNotFoundError(path)
             return snapshot[str(path)]
 
-        with patch.object(pathlib.Path, "read_text", read_text), \
+        with patch.object(image_resources, "read_check_text", read_text), \
                 patch.object(image_resources, "list_directory", lambda path: [p.name for key in snapshot
                              if (p := pathlib.Path(key)).parent == path]), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
@@ -4028,7 +4174,10 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
 
 
 def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() -> None:
-    with tempfile.TemporaryDirectory() as temporary:
+    scan = image_lifecycle.list_directory
+    with tempfile.TemporaryDirectory() as temporary, \
+            patch.object(image_lifecycle, "list_directory", side_effect=lambda path, **kwargs:
+                         [str(os.getpid())] if path == image_lifecycle.PROC_ROOT else scan(path, **kwargs)):
         root = pathlib.Path(temporary)
         # Keep the inode linked through reconciliation so unrelated CI logs cannot reuse it.
         with (root / "overlay").open("w+b") as owned:
@@ -4046,6 +4195,44 @@ def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() 
         record = json.loads((root / "interrupted.reconciled.json").read_text())
         assert record["overlay_descriptors_closed"] is True
         assert record["stop_reason"] == "previous launcher interrupted; guest cleanup unknown"
+
+
+def test_journal_reconciliation_restarts_and_never_certifies_an_incomplete_proc_scan() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        store, proc = root / "store", root / "proc"
+        store.mkdir()
+        fd_directory = proc / "123" / "fd"
+        fd_directory.mkdir(parents=True)
+        (fd_directory / "7").touch()
+        (proc / "123" / "stat").write_text(f"123 (fixture) Z {'0 ' * 19}\n")
+        row = {"attempt": "interrupted", "launcher": "123:0", "overlay_inode": [0, 0]}
+        active = store / "active.json"
+        scan = image_lifecycle.list_directory
+        for site in (store, proc, fd_directory):
+            for error in (errno.EIO, errno.EINTR, errno.EAGAIN, errno.EACCES, errno.EPERM, errno.ENOENT):
+                for count in (1, 3):
+                    active.write_text(json.dumps(row))
+                    record = store / "interrupted.reconciled.json"
+                    record.unlink(missing_ok=True)
+                    calls = []
+
+                    def enumerate_fault(path, *args, **kwargs):
+                        calls.append(path)
+                        if path == site and calls.count(site) <= count:
+                            raise OSError(error, "fixture unreadable inventory")
+                        return scan(path, *args, **kwargs)
+
+                    with patch.object(image_lifecycle, "PROC_ROOT", proc, create=True), \
+                            patch.object(image_lifecycle, "list_directory", enumerate_fault):
+                        try:
+                            reconcile(store)
+                        except (OSError, image_resources.AdmissionError):
+                            assert active.exists() and not record.exists()
+                        else:
+                            assert count == 1 and error in (errno.EIO, errno.EINTR, errno.EAGAIN, errno.ENOENT)
+                            assert calls.count(store) >= 2
+                            assert not active.exists() and json.loads(record.read_bytes())["overlay_descriptors_closed"]
 
 
 def test_image_base_rejects_backing_and_nested_external_data_files() -> None:
@@ -4149,8 +4336,8 @@ def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> Non
                     assert image_vm.run_image(args, None, vm.Cancellation()) == 1
                 launch.assert_not_called()
                 execute.assert_not_called()
-                recovered = error in (errno.EINTR, errno.EAGAIN) and failures == 1
-                assert scans == (2 if recovered else 3 if error in (errno.EINTR, errno.EAGAIN) else 1)
+                recovered = error in (errno.EIO, errno.EINTR, errno.EAGAIN) and failures == 1
+                assert scans == (2 if recovered else 3 if error in (errno.EIO, errno.EINTR, errno.EAGAIN) else 1)
                 assert len(diagnostics) == 1
                 assert ("already contains this board" if recovered else "cannot complete") in str(diagnostics[0])
                 assert not (store / IDENTITY.attempt).exists()
@@ -4235,6 +4422,7 @@ class PairAndAdmissionCases:
         test_image_admission_requires_effective_cgroup_caps,
         test_nice_nine_requires_low_cpu_weight_and_all_hard_caps,
         test_reconciliation_holds_admission_until_owned_overlay_descriptors_close,
+        test_journal_reconciliation_restarts_and_never_certifies_an_incomplete_proc_scan,
         test_image_base_rejects_backing_and_nested_external_data_files,
         test_quarantined_outputs_do_not_reduce_future_pair_disk_admission,
         test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty,
@@ -4254,7 +4442,9 @@ if __name__ == "__main__":
         "--terminal-fallback": (test_finalization_disposition_fallback_preserves_receipt_and_exit,),
         "--read-and-sync": (test_large_frame_retries_each_read_at_the_same_offset,
                             test_unsupported_durability_preserves_published_outcome,
-                            test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode),
+                            test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode,
+                            test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_temporary,
+                            test_each_reached_fresh_receipt_recovery_line_keeps_ownership),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,

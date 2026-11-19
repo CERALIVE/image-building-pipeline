@@ -6,11 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 from image_capsule import INPUT_LIMIT, digest_file, object_id, original_url
 from image_policy import ArchivePolicy
-from image_stream import StreamError
+from image_stream import StreamError, retry_check
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +77,11 @@ def source_files(selection: SourceSelection, records: str, origin: str,
         for filename, directory, digest, length, url in sorted(files):
             path = selection.files[filename]
             source = Path(path)
-            if (source.is_symlink() or not source.is_file()
-                    or any(parent.is_symlink() for parent in source.parents)
-                    or source.stat().st_size != length):
+            try:
+                matches = retry_check(staged_source_matches, source, length)
+            except FileNotFoundError:
+                matches = False
+            if not matches:
                 raise StreamError("staged source must be a regular file of the authenticated size")
             snapshot = Path(temporary) / filename
             copy_local(source, snapshot, length)
@@ -86,3 +89,9 @@ def source_files(selection: SourceSelection, records: str, origin: str,
                 raise StreamError("staged source differs from authenticated SHA256")
             verified.append(SourceFile(filename, directory, digest, length, url, path))
     return tuple(verified)
+
+
+def staged_source_matches(source: Path, length: int) -> bool:
+    info = source.lstat()
+    return (stat.S_ISREG(info.st_mode) and info.st_size == length
+            and all(stat.S_ISDIR(parent.lstat().st_mode) for parent in source.parents))
