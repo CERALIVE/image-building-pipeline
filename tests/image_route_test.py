@@ -112,6 +112,20 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                             error = {"RuntimeError": RuntimeError, "OSError": OSError,
                                      "MemoryError": MemoryError}[fault.split(":")[1]]
                             failed_init = faults.enter_context(patch.object(image_guest, "StageLog", side_effect=error))
+                        elif fault == "close":
+                            injected = False
+
+                            class ConsoleFile(io.FileIO):
+                                def close(self):
+                                    nonlocal injected
+                                    if not self.closed and not injected and os.readlink(
+                                            f"/proc/self/fd/{self.fileno()}") == str(console):
+                                        super().close()
+                                        injected = True
+                                        raise MemoryError("fixture stage close")
+                                    super().close()
+
+                            faults.enter_context(patch("image_stream.FileIO", ConsoleFile))
                         elif fault:
                             operation = getattr(os, fault)
                             injected = False
@@ -121,8 +135,6 @@ def test_guest_probe_emits_only_ordered_stage_data_and_preserves_verdict() -> No
                                 path = str(target) if fault == "open" else os.readlink(f"/proc/self/fd/{target}")
                                 if not injected and path == str(console):
                                     injected = True
-                                    if fault == "close":
-                                        operation(target, *args)
                                     raise MemoryError(f"fixture stage {fault}")
                                 return operation(target, *args)
 
@@ -875,26 +887,28 @@ def test_nested_slot_directory_close_does_not_leak_or_replace_read_failure() -> 
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
         (root / "nested" / "deeper").mkdir(parents=True)
-        open_fd, close_fd = os.open, os.close
+        open_directory = image_verify.open_directory
         for late_at in (root, root / "nested/deeper"):
             live = {}
             calls = []
             baseline = set(os.listdir("/proc/self/fd"))
 
-            def opened(path, flags, *args, dir_fd=None):
-                fd = open_fd(path, flags, *args, dir_fd=dir_fd)
+            def opened(path, *args, dir_fd=None):
+                owner = open_directory(path, *args, dir_fd=dir_fd)
+                fd = owner.fileno()
                 live[fd] = (live[dir_fd] / path) if dir_fd is not None else pathlib.Path(path)
-                return fd
 
-            def closed(fd):
-                assert fd in live, ("reclosed", fd)
-                path = live.pop(fd)
-                calls.append(path)
-                close_fd(fd)
-                if path == late_at:
-                    raise OSError(errno.EIO, "late close already released fd")
+                def close():
+                    assert fd in live, ("reclosed", fd)
+                    path = live.pop(fd)
+                    calls.append(path)
+                    owner.close()
+                    if path == late_at:
+                        raise OSError(errno.EIO, "late close already released fd")
 
-            with patch.object(image_verify.os, "open", opened), patch.object(image_verify.os, "close", closed):
+                return SimpleNamespace(close=close, fileno=owner.fileno)
+
+            with patch.object(image_verify, "open_directory", opened):
                 try:
                     with image_verify.parent_fd(root, "nested/deeper/file"):
                         raise FileNotFoundError(errno.ENOENT, "primary read failure")

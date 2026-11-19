@@ -184,8 +184,8 @@ and closes owned descriptors. Teardown uses a
 null `ended_at` if the timestamp cannot be obtained because of an allocation
 failure. The launcher attempts teardown and publishes `exit.json` before
 retiring the journal. If the terminal receipt cannot be confirmed, the launcher
-exits nonzero and retains the journal for reconciliation. Consumers use `exit.json` to
-determine the verdict. A journal that survives bounded unlink attempts is
+exits nonzero and retains the journal for reconciliation. Consumers must check
+for launcher exit 0 before using `exit.json` as evidence of success. A journal that survives bounded unlink attempts is
 reported as `journal_removed=false` on host stderr and leaves the committed
 receipt and exit code intact. The next run checks the recorded PID start
 times and scans for a remaining reference to the overlay inode under the
@@ -830,25 +830,34 @@ Only an observed temporary owner permits rename replay. The first failure
 that prevents publication is retained with its errno and a fixed diagnostic
 code.
 
-If neither destination check can resolve an uncertain rename, or the last
-sync result is lost, the launcher writes and verifies a fresh failure
-receipt and atomically publishes it before exiting nonzero. It retains the
-active journal for reconciliation. If both data sync attempts have already
-been charged, the failure receipt is visible at runtime without claiming
-data durability. Persistent inability to write or rename and power loss
-cannot be repaired by the launcher.
+Before guest launch the runner prepares the failure receipt bytes, paths
+and exclusive temporary file. If neither destination check can resolve an
+uncertain rename, or the last sync result is lost, it makes up to three
+attempts to atomically publish that failure receipt. It retains the active
+journal. If the two data sync attempts have already been charged, the
+failure receipt is visible at runtime without claiming data durability.
+
+Check the launcher exit status before reading `exit.json`. Only exit 0
+allows consumers to use the receipt as proof of success. A nonzero exit
+always means failure. If all failure replacement attempts fail, the
+launcher exits 70 and reports `terminal receipt replacement unconfirmed;
+launcher exit 70 is authoritative`. The previous receipt can still be
+visible in this case. Historical pair admission checks the active journal
+and the retained reconciliation record before accepting a past receipt.
 
 Directory open, sync and close, temporary-file cleanup and diagnostics are
 attempted independently after the publication decision. A consumed temporary
 is never removed or renamed again. Cleanup cannot change a committed terminal
 result. A final directory-sync failure leaves the file visible at runtime,
 but a crash may lose the rename.
-Cleanup checks device and inode before retrying a directory descriptor close.
-An already closed descriptor or one now belonging to another object is
-cleared without another close. If bounded identity checks remain
-inconclusive after publication, the launcher leaves the read-only
-directory descriptor for process exit. No writable receipt descriptor
-may remain before publication.
+Cleanup closes descriptor owner objects. The native close invalidates
+the owner before the descriptor number can be reused, including when a
+new owner opens the same directory. Regular files use `FileIO` with an
+opener. CPython rejects directories in `FileIO`, so the shared directory
+opener attaches them to a Linux `select.epoll` owner for close-once
+semantics. The helper releases the raw descriptor if native owner
+construction fails. No writable receipt descriptor may remain before
+publication.
 
 After teardown and publication, the CLI verifies `launcher_exit` against
 the status recorded at rename. A missing or unreadable marker is a

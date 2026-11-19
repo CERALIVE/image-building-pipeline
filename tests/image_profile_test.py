@@ -1554,6 +1554,17 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     if not self.closed:
                         tail_close(self.fileno(), lambda _fd: super(TailFileIO, self).close())
 
+            native_directory = image_lifecycle.open_directory
+
+            def tail_directory(*args, **kwargs):
+                owner = native_directory(*args, **kwargs)
+
+                def close():
+                    if not owner.closed:
+                        tail_close(owner.fileno(), lambda _fd: owner.close())
+
+                return DirectoryFixtureOwner(owner, close)
+
             def tail_write(fd, data):
                 phase = receipt_phase(sys._getframe(1))
                 if phase:
@@ -1579,6 +1590,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patches.enter_context(patch.object(os, "open", tail_open))
             patches.enter_context(patch.object(image_lifecycle, "read_once", tail_read))
             patches.enter_context(patch.object(os, "close", tail_close))
+            patches.enter_context(patch.object(image_lifecycle, "open_directory", tail_directory))
             patches.enter_context(patch("image_stream.FileIO", TailFileIO))
             patches.enter_context(patch.object(os, "write", tail_write))
             patches.enter_context(patch.object(os, "pread", tail_pread))
@@ -3195,14 +3207,13 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
             "selectors.DefaultSelector", "selectors.PollSelector", "selectors.EpollSelector",
             "selectors.SelectSelector", "open", "os.open", "os.fdopen", "FileIO", "os.memfd_create",
             "os.pipe", "os.pipe2", "_PIPE2", "os.pidfd_open", "FileIO.__new__", "PipeEnd", "pipe_files",
-            "subprocess.Popen", "tempfile.TemporaryFile", "self._open_log",
+            "subprocess.Popen", "tempfile.TemporaryFile", "self._open_log", "open_owned", "open_directory",
         }
         remaining = Counter(acquisitions)
         raw_close = Counter({
-            "sync_directory": ("os.close(fd)",),
-            "dir_close": ("os.close(fd)",),
+            "sync_directory": ("owner.close()",),
+            "dir_close": ("owner.close()",),
             "file_close": ("self.output.close()",),
-            "report_error": ("os.close(fd)",),
         }.get(tree.body[0].name, ()))
         receipt_close_retries = int(tree.body[0].name == "file_close")
         registration_methods = {"enter_context", "push", "callback", "closing", "aclosing", "__enter__", "__exit__"}
@@ -3231,6 +3242,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
                     if ast.unparse(item.context_expr) not in {
                         "ExitStack()", "self.outputs", "self.capture_scope", "startup", "writers",
                         "job_disk(base, job, cancellation)",
+                        "open_owned('/proc/self/fd/2', 'ab', os.O_NONBLOCK | os.O_NOCTTY, existing=True)",
                         "ImageJob(directory, identity, request['capsule'], cancellation, "
                         "probe=request['payload']['operation'] == 'probe')",
                     } and not (isinstance(item.context_expr, ast.Call)
@@ -3278,7 +3290,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         return bad
 
     functions = (
-        (ImageJob.__init__, ("FileIO", "os.open", "pipe_files")),
+        (ImageJob.__init__, ("open_owned", "pipe_files")),
         (ImageJob.__exit__, ()),
         (ImageJob.prepare_probe_transport, ("selectors.DefaultSelector", "selectors.DefaultSelector", "pipe_files")),
         (ImageJob.prepare_capture, ("selectors.DefaultSelector", "self._open_log")),
@@ -3286,14 +3298,14 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         (ImageJob.close_console_reader, ()),
         (image_lifecycle.pipe_files, ("_PIPE2", "PipeEnd", "PipeEnd")),
         (image_lifecycle.job_disk, ("tempfile.TemporaryFile",)),
-        (image_lifecycle.report_error, ("os.open",)),
-        (image_lifecycle.sync_directory, ("os.open",)),
+        (image_lifecycle.report_error, ("open_owned",)),
+        (image_lifecycle.sync_directory, ("open_directory",)),
         (image_lifecycle.Receipt.file_close, ()),
         (image_lifecycle.Receipt.dir_close, ()),
         (vm.boot, ("FileIO", "os.memfd_create")),
         (vm_process.spawn_owned.__wrapped__, ("FileIO.__new__", "os.pidfd_open", "subprocess.Popen")),
         (vm_process.run, ("selectors.PollSelector",)),
-        (vm_process.read_check_script, ("open", "os.open", "selectors.PollSelector")),
+        (vm_process.read_check_script, ("open_owned", "selectors.PollSelector")),
         (vm_process.terminate, ()),
         (image_vm.execute, ()),
     )
@@ -4131,23 +4143,39 @@ def test_fresh_sync_return_fault_resumes_verification_without_third_sync() -> No
         assert list(root.iterdir()) == [marker] and descriptor_snapshot() == before
 
 
+class DirectoryFixtureOwner:
+    def __init__(self, owner, close):
+        self.owner = owner
+        self.close = close
+        self.fileno = owner.fileno
+
+    @property
+    def closed(self):
+        return self.owner.closed
+
+
 def test_directory_close_is_retryable_before_native_release() -> None:
     with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
         marker = root / "exit.json"
         cancellation = Cancellation()
         before = descriptor_snapshot()
-        real_close = os.close
+        native_directory = image_lifecycle.open_directory
         injected = False
 
-        def close(fd):
-            nonlocal injected
-            if not injected and os.readlink(f"/proc/self/fd/{fd}") == str(root):
-                injected = True
-                raise MemoryError("fixture before directory close")
-            real_close(fd)
+        def open_directory(*args, **kwargs):
+            owner = native_directory(*args, **kwargs)
 
-        with patch.object(os, "close", close):
+            def close():
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    raise MemoryError("fixture before directory close")
+                owner.close()
+
+            return DirectoryFixtureOwner(owner, close)
+
+        with patch.object(image_lifecycle, "open_directory", open_directory):
             image_lifecycle.receipt(marker, {"launcher_exit": 0}, outcome=cancellation)
         assert injected and cancellation.exit_status == 0
         assert descriptor_snapshot() == before
@@ -4200,8 +4228,33 @@ def test_directory_cleanup_preserves_reused_descriptor_after_release() -> None:
     replay_receipt_recovery("close", (None,))
 
 
+def test_directory_cleanup_preserves_new_open_of_same_inode() -> None:
+    replay_receipt_recovery("close-same-directory", (None,))
+
+
+def test_denied_failure_replacement_exits_with_unconfirmed_receipt_status() -> None:
+    replay_receipt_recovery("fallback-denied", ())
+
+
+def test_pair_consumer_rejects_leftover_success_after_nonzero_launcher() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        attempt = store / "prior"
+        attempt.mkdir()
+        acceptance = attempt / "acceptance.json"
+        acceptance.write_text(json.dumps({"schema": 1, "identity": {}, "content_verified": True}))
+        (attempt / "exit.json").write_text(json.dumps({
+            "schema": 1, "identity": {}, "launcher_exit": 0, "pair_complete": True,
+            "acceptance_sha256": hashlib.sha256(acceptance.read_bytes()).hexdigest(),
+        }))
+        assert image_vm.completed_acceptance(acceptance, launcher_status=0) is not None
+        assert image_vm.completed_acceptance(acceptance, launcher_status=70) is None
+        (store / "prior.reconciled.json").write_text(json.dumps({"attempt": "prior"}))
+        assert image_vm.completed_acceptance(acceptance) is None
+
+
 def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
-                            expected_status=None, expected_syncs=None):
+                            expected_status=None, expected_syncs=None, census=None):
     """Run the real receipt and launcher exit, using actual syscalls before late faults."""
     import ctypes
     import image_stream
@@ -4216,22 +4269,29 @@ def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
         result.safe_journal = journal, root
         native_sync, native_stat = image_stream._FSYNC, pathlib.Path.lstat
         native_close, native_rename = os.close, os.replace
+        native_directory = image_lifecycle.open_directory
         native_fstat = os.fstat
         inodes, statuses, renamed, hits, reused = [], [], [], [], []
+        denied, errors = [], []
         pending = list(trace_sites)
-        expected = (int(boundary == "fallback" or boundary == "sync" and len(faults) == 2)
+        expected = (int(boundary.startswith("fallback") or boundary == "sync" and len(faults) == 2)
                     if expected_status is None else expected_status)
         before = descriptor_snapshot()
 
         def replace(source, target):
             assert result.exit_status is None and result.receipt_result.exit_status == 1
+            if boundary == "fallback-denied" and renamed:
+                denied.append(source)
+                raise OSError(errno.ENOSPC, "fixture failure replacement denied")
             native_rename(source, target)
             renamed.append(target)
-            if boundary in ("rename", "bytes", "fallback") and len(renamed) == 1:
+            if (boundary in ("rename", "bytes") or boundary.startswith("fallback")) and len(renamed) == 1:
                 raise MemoryError("fixture after real rename")
+            if boundary == "fallback-post-replace" and len(renamed) == 2:
+                raise MemoryError("fixture after real failure replacement")
 
         def lstat(path, *args, **kwargs):
-            if boundary in ("bytes", "fallback") and len(renamed) == 1 and path == marker:
+            if (boundary == "bytes" or boundary.startswith("fallback")) and len(renamed) == 1 and path == marker:
                 raise OSError(errno.ESTALE, "fixture exhausts destination identity observations")
             if boundary == "rename" and renamed and path == marker and len(hits) < len(faults):
                 error = faults[len(hits)]
@@ -4242,7 +4302,7 @@ def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
             return native_stat(path, *args, **kwargs)
 
         def open_check(path, *args, **kwargs):
-            if boundary == "fallback" and len(renamed) == 1 and path == marker:
+            if boundary.startswith("fallback") and len(renamed) == 1 and path == marker:
                 raise OSError(errno.EIO, "fixture also prevents content confirmation")
             return native_open_check(path, *args, **kwargs)
 
@@ -4259,32 +4319,31 @@ def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
                 raise MemoryError("fixture after native sync, before Python records the result")
             return native_sync(fd)
 
-        def close(fd):
-            if boundary.startswith("close") and not reused and os.readlink(f"/proc/self/fd/{fd}") == str(root):
-                native_close(fd)
-                reopened = os.open(sentinel, os.O_RDONLY)
+        def open_directory(*args, **kwargs):
+            owner = native_directory(*args, **kwargs)
+
+            def close():
+                if owner.closed or not boundary.startswith("close") or reused:
+                    owner.close()
+                    return
+                fd = owner.fileno()
+                owner.close()
+                reopened = (os.open(root, os.O_RDONLY | os.O_DIRECTORY) if boundary.startswith("close-same-")
+                            else os.open(sentinel, os.O_RDONLY))
                 reused.append(reopened)
                 assert reopened == fd
-                if boundary == "close":
+                if boundary in ("close", "close-same-directory"):
                     hits.append(None)
                     raise MemoryError("fixture after native directory close")
-                return None
-            return native_close(fd)
-
-        def fstat(fd):
-            if boundary.startswith("close") and reused and fd == reused[0] and len(hits) < len(faults):
-                error = faults[len(hits)]
-                hits.append(error)
-                if error is None:
-                    raise MemoryError("fixture while checking a reused descriptor")
-                raise OSError(error, "fixture while checking a reused descriptor")
-            return native_fstat(fd)
+            return DirectoryFixtureOwner(owner, close)
 
         trace_hits = []
 
         def trace(frame, event, _value):
+            if census is not None and event == "line" and frame.f_code in census:
+                census[frame.f_code].add(frame.f_lineno)
             if not pending:
-                return None
+                return trace if census is not None else None
             (code, line), error = pending[0]
             if event == "line" and frame.f_code is code and frame.f_lineno == line and len(inodes) >= after_calls:
                 pending.pop(0)
@@ -4296,6 +4355,12 @@ def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
 
         def launch(cancellation):
             assert cancellation is result
+            if boundary == "fallback-reserved":
+                reserved = image_lifecycle.FailureReceipt(marker)
+                cancellation.failure_receipt = reserved
+                reserved.prepare()
+                assert reserved.output.fd == -1
+                assert fcntl.fcntl(reserved.reader.fileno(), fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
             image_lifecycle.receipt(marker, {"launcher_exit": 0, "stop_reason": "fixture"}, outcome=result)
             return result.receipt_result.exit_status
 
@@ -4306,28 +4371,39 @@ def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
                 stack.enter_context(patch.object(image_stream, "_FSYNC", sync))
                 stack.enter_context(patch.object(image_stream, "open_check", open_check))
                 stack.enter_context(patch.object(os, "replace", replace))
-                stack.enter_context(patch.object(os, "close", close))
-                stack.enter_context(patch.object(os, "fstat", fstat))
+                stack.enter_context(patch.object(image_lifecycle, "open_directory", open_directory))
                 stack.enter_context(patch.object(vm, "Cancellation", return_value=result))
                 stack.enter_context(patch.object(vm, "main", launch))
+                stack.enter_context(patch.object(vm, "report_error", errors.append))
                 stack.enter_context(patch.object(os, "_exit", statuses.append))
-                if trace_sites:
+                if trace_sites or census is not None:
                     sys.settrace(trace)
                 try:
                     vm.exit_launcher()
                 finally:
-                    if trace_sites:
+                    if trace_sites or census is not None:
                         sys.settrace(None)
             assert hits == list(faults), (boundary, faults, hits)
             assert marker.is_file(), (boundary, faults, statuses, sorted(root.iterdir()))
-            assert statuses == [expected] and json.loads(marker.read_bytes())["launcher_exit"] == expected
+            disk = json.loads(marker.read_bytes())["launcher_exit"]
+            if boundary == "fallback-denied":
+                assert statuses == [70] and disk == 0 and len(denied) == 3, (statuses, disk, denied)
+                assert errors[-1] == "terminal receipt replacement unconfirmed; launcher exit 70 is authoritative"
+            else:
+                assert statuses == [expected] and disk == expected
             assert journal.exists() == bool(expected)
-            calls = (2 if boundary in ("sync", "fallback") else 1) if expected_syncs is None else expected_syncs
-            assert len(inodes) == len(set(inodes)) == calls
-            assert renamed == [marker] * (2 if boundary == "fallback" else 1)
+            calls = (2 if boundary == "sync" or boundary.startswith("fallback")
+                     else 1) if expected_syncs is None else expected_syncs
+            if boundary == "fallback" and trace_sites:
+                assert 1 <= len(inodes) == len(set(inodes)) <= result.exit_sync_calls <= calls
+            else:
+                assert len(inodes) == len(set(inodes)) == calls
+            assert renamed == [marker] * (2 if boundary.startswith("fallback") and not denied else 1)
             assert sorted(path.name for path in root.iterdir()) == (
                 ["active.json", "exit.json", "sentinel"] if expected else ["exit.json", "sentinel"])
-            if boundary.startswith("close"):
+            if boundary.startswith("close-same-"):
+                assert set(os.listdir(reused[0])) == {"exit.json", "sentinel"}
+            elif boundary.startswith("close"):
                 assert os.read(reused[0], 100) == b"new descriptor owner"
         finally:
             for fd in reused:
@@ -4475,9 +4551,24 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
             assert replay_receipt_recovery("sync", (errno.EIO,), trace_sites=((site, None),),
                                           expected_status=1) == [site]
     replay_receipt_recovery("close", (None,))
-    replay_receipt_recovery("close", (None, None))
     replay_receipt_recovery("bytes", ())
     replay_receipt_recovery("fallback", ())
+    replay_receipt_recovery("fallback-reserved", ())
+    replay_receipt_recovery("fallback-post-replace", ())
+    replay_receipt_recovery("fallback-denied", ())
+    replay_receipt_recovery("close-same-directory", (None,))
+    failure_sites = {function.__code__: set() for function in (
+        image_lifecycle.converge_failure, image_lifecycle.FailureReceipt.attempt,
+        image_lifecycle.FailureReceipt.prepare,
+    )}
+    assert not any(instruction.opname == "FOR_ITER" or "JUMP_BACKWARD" in instruction.opname
+                   for instruction in dis.get_instructions(image_lifecycle.converge_failure))
+    replay_receipt_recovery("fallback", (), census=failure_sites)
+    assert all(failure_sites.values())
+    for code, statements in failure_sites.items():
+        for line in sorted(statements):
+            site = code, line
+            assert replay_receipt_recovery("fallback", (), trace_sites=((site, None),)) == [site]
     # Discover reached statements in the identity proof and fault each of them.
     original = methods._resolve_rename
     lines = set()
@@ -4505,9 +4596,14 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
         # bytes path also exhausts the destination stat with ESTALE.
         assert replay_receipt_recovery("bytes", (), trace_sites=((site, error),)) == [site], (line, error)
     close_source, close_start = inspect.getsourcelines(methods.dir_close)
-    clear = close_start + next(i for i, line in enumerate(close_source) if line.strip() == "self.directory_fd = None")
+    clear = close_start + next(i for i, line in enumerate(close_source) if line.strip() == "self.directory_owner = None")
     site = methods.dir_close.__code__, clear
-    assert replay_receipt_recovery("close-trace", (None,), trace_sites=((site, None),)) == [site]
+    assert replay_receipt_recovery("close-trace", (), trace_sites=((site, None),)) == [site]
+    close_sites = {methods.dir_close.__code__: set()}
+    replay_receipt_recovery("close-same-trace", (), census=close_sites)
+    for line in close_sites[methods.dir_close.__code__]:
+        site = methods.dir_close.__code__, line
+        assert replay_receipt_recovery("close-same-trace", (), trace_sites=((site, None),)) == [site]
 
 
 def test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor() -> None:
@@ -4586,12 +4682,23 @@ def test_attempt_preparation_and_journal_survive_transient_io() -> None:
     for name in ("verify", "verify-artifacts"):
         for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
             cancelled_fixture(f"pair:tail-io:mkdir-{name}/{error}/1")
-    for phase in ("active", "started"):
-        for operation in ("file-open", "write", "file-fsync", "file-close", "rename",
-                          "dir-open", "dir-fsync", "dir-close"):
-            for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
-                row = cancelled_fixture(f"tail-io:{phase}-{operation}/{error}/1")
-                assert row == baseline, (phase, operation, error, baseline, row)
+
+
+def check_journal_preparation(phase: str) -> None:
+    baseline = cancelled_fixture("tail-io:baseline/EINTR/0")
+    for operation in ("file-open", "write", "file-fsync", "file-close", "rename",
+                      "dir-open", "dir-fsync", "dir-close"):
+        for error in ("EINTR", "EPERM", "EIO", "ENOSPC", "EBADF"):
+            row = cancelled_fixture(f"tail-io:{phase}-{operation}/{error}/1")
+            assert row == baseline, (phase, operation, error, baseline, row)
+
+
+def test_active_journal_preparation_survives_transient_io() -> None:
+    check_journal_preparation("active")
+
+
+def test_started_journal_preparation_survives_transient_io() -> None:
+    check_journal_preparation("started")
 
 
 def test_tail_directory_fd_ownership_survives_allocation_faults() -> None:
@@ -4662,6 +4769,53 @@ def test_exclusive_file_creation_has_one_owner() -> None:
     for source in ("os.open(path, os.O_CREAT | os.O_EXCL)", "from os import O_EXCL as flags",
                    "path.open('xb')", "open(path, mode='x')"):
         assert list(bypasses("new_owner.py", ast.parse(source))), source
+
+
+def test_raw_descriptor_calls_are_confined_to_shared_owners() -> None:
+    root = ROOT / "ci/kernel-runner"
+    allowed = {"open_owned": {"open"}, "open_directory": {"open", "close"},
+               "create_file": {"open"}, "close_inherited_descriptor": {"close"}}
+    for file in root.glob("*.py"):
+        tree = ast.parse(file.read_text())
+        permitted = {id(node) for function in tree.body if file.name == "image_stream.py"
+                     and isinstance(function, ast.FunctionDef) and function.name in allowed
+                     for node in ast.walk(function) if isinstance(node, ast.Attribute)
+                     and node.attr in allowed[function.name]}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id == "os" and node.attr in ("open", "close")):
+                assert id(node) in permitted, (file.name, node.lineno, node.attr)
+
+
+def test_interrupted_directory_owner_attachment_releases_descriptor() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = pathlib.Path(temporary)
+        open_directory = image_lifecycle.open_directory
+        source, start = inspect.getsourcelines(open_directory)
+        statements = {start + index for index, line in enumerate(source)
+                      if line.strip() in ("owner = select.epoll.fromfd(fd)", "return owner")}
+        assert len(statements) == 2
+        before = descriptor_snapshot()
+        for statement in statements:
+            reached = []
+
+            def trace(frame, event, _value):
+                if frame.f_code is not open_directory.__code__:
+                    return None
+                if event == "line" and frame.f_lineno == statement:
+                    reached.append(statement)
+                    raise MemoryError("fixture during directory ownership transfer")
+                return trace
+
+            sys.settrace(trace)
+            try:
+                with open_directory(directory):
+                    raise AssertionError("fixture did not interrupt directory open")
+            except MemoryError:
+                pass
+            finally:
+                sys.settrace(None)
+            assert reached == [statement] and descriptor_snapshot() == before
 
 
 def test_receipt_audit_detects_executed_work_outside_step_table() -> None:
@@ -5507,8 +5661,10 @@ if __name__ == "__main__":
         "--tail-syscalls": (test_tail_syscall_faults_preserve_the_validated_probe,
                             test_tail_directory_fd_ownership_survives_allocation_faults,
                             test_receipt_temporary_collisions_do_not_remove_unowned_files,
-                            test_receipt_allocation_faults_close_live_temporary_descriptors,
-                            test_exclusive_file_creation_has_one_owner),
+                            test_exclusive_file_creation_has_one_owner,
+                            test_raw_descriptor_calls_are_confined_to_shared_owners,
+                            test_interrupted_directory_owner_attachment_releases_descriptor),
+        "--receipt-fd-allocation": (test_receipt_allocation_faults_close_live_temporary_descriptors,),
         "--terminal-fallback": (test_finalization_disposition_fallback_preserves_receipt_and_exit,),
         "--read-and-sync": (test_large_frame_retries_each_read_at_the_same_offset,
                             test_unsupported_durability_preserves_published_outcome,
@@ -5529,6 +5685,9 @@ if __name__ == "__main__":
                                   test_post_rename_estale_keeps_disk_and_launcher_in_agreement,
                                   test_unknown_replacement_sync_publishes_failure_without_third_sync,
                                   test_directory_cleanup_preserves_reused_descriptor_after_release,
+                                  test_directory_cleanup_preserves_new_open_of_same_inode,
+                                  test_denied_failure_replacement_exits_with_unconfirmed_receipt_status,
+                                  test_pair_consumer_rejects_leftover_success_after_nonzero_launcher,
                                   test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules,
                                  test_diagnostic_allocation_keeps_first_writeback_failure,
                                  test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor,
@@ -5536,6 +5695,8 @@ if __name__ == "__main__":
         "--admission-restart": (test_priority_syscall_error_restarts_the_whole_observation,
                                 test_late_disk_error_restarts_store_admission_before_execution),
         "--attempt-preparation": (test_attempt_preparation_and_journal_survive_transient_io,),
+        "--active-journal-preparation": (test_active_journal_preparation_survives_transient_io,),
+        "--started-journal-preparation": (test_started_journal_preparation_survives_transient_io,),
         "--term-boundary": (test_priority_failure_reaps_at_the_serial_write_boundary,),
         "--finalization": (test_teardown_survives_allocation_faults_without_stranding_the_journal,
                            test_validated_probe_retries_each_commit_preparation_allocation),

@@ -207,20 +207,19 @@ def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
 def identity_config(path: Path) -> list[list[str]]:
     """Check the directory and file descriptors used for the actual read."""
     try:
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
+        from image_stream import open_directory, open_owned
+
+        with open_directory(path.parent, os.O_NOFOLLOW) as directory_owner:
+            directory = directory_owner.fileno()
             parent = os.fstat(directory)
             if parent.st_mode & 0o022 or parent.st_uid not in (0, os.getuid()):
                 raise StreamError("client identity config directory must not be writable by others")
-            def open_config(name: str, flags: int) -> int:
-                return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY, dir_fd=directory)
-            with open(path.name, "rb", opener=open_config) as stream:
+            with open_owned(path.name, flags=os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY,
+                            dir_fd=directory) as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
                     raise StreamError("client identity config must be a regular file owned by the invoking user, mode 0600")
                 data = stream.read(1024 * 1024 + 1)
-        finally:
-            os.close(directory)
     except OSError:
         raise StreamError("cannot open client identity config as a regular file without following symlinks") from None
     if len(data) > 1024 * 1024 or b"\0" in data:

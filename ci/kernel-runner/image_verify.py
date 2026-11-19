@@ -16,7 +16,8 @@ import tarfile
 
 from image_capsule import Capsule, digest_file
 from image_stream import (
-    Identity, StreamError, close_checked, list_directory, listed_entry, positioned_open, read_input, retry_check,
+    Identity, StreamError, close_checked, list_directory, listed_entry, open_directory, positioned_open, read_input,
+    retry_check,
 )
 
 
@@ -26,17 +27,17 @@ def parent_fd(root: Path, name: str):
     parts = PurePosixPath(name).parts
     if not parts or any(part in (".", "..") for part in parts) or name.startswith("/"):
         raise StreamError("unsafe returned tar path")
-    fd = os.open(root, os.O_DIRECTORY)
+    owner = open_directory(root)
     completed = False
     try:
         for part in parts[:-1]:
-            parent = fd
-            fd = os.open(part, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            parent = owner
+            owner = open_directory(part, os.O_NOFOLLOW, dir_fd=parent.fileno())
             close_checked(parent, completed=True)
-        yield fd, parts[-1]
+        yield owner.fileno(), parts[-1]
         completed = True
     finally:
-        close_checked(fd, completed=completed)
+        close_checked(owner, completed=completed)
 
 
 def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:

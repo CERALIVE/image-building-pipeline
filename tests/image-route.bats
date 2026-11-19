@@ -116,6 +116,12 @@
   [ "$status" -eq 0 ]
 }
 
+@test "image launcher closes receipt descriptors after allocation faults" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --receipt-fd-allocation
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "image launcher preserves the receipt if terminal masking needs signal dispositions" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --terminal-fallback
   printf '%s\n' "$output"
@@ -124,6 +130,18 @@
 
 @test "image launcher prepares directories and recovers journal I/O" {
   run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --attempt-preparation
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image launcher recovers I/O while preparing the active journal" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --active-journal-preparation
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image launcher recovers I/O while preparing the started journal" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --started-journal-preparation
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
 }

@@ -8,7 +8,7 @@ from pathlib import Path
 import signal
 import sys
 
-from image_stream import list_directory, read_check_text, retry_check
+from image_stream import close_inherited_descriptor, list_directory, open_owned, read_check_text, retry_check
 from vm_process import CATCHABLE_SIGNALS, STOP_SIGNALS, Cancellation
 
 STARTUP_ERROR = 78
@@ -39,12 +39,17 @@ def ensure_standard_fds() -> None:
         except OSError as error:
             if error.errno != errno.EBADF:
                 raise
-            opened = os.open(os.devnull, flag)
-            if opened != fd:
-                try:
-                    os.dup2(opened, fd)
-                finally:
-                    os.close(opened)
+            # Keep an owner during replacement even if open takes the target number itself.
+            with open_owned(os.devnull, "rb" if flag == os.O_RDONLY else "wb") as opened:
+                if opened.fileno() != fd:
+                    os.dup2(opened.fileno(), fd)
+                else:
+                    replacement = os.dup(fd)
+                    try:
+                        opened.close()
+                        os.dup2(replacement, fd)
+                    finally:
+                        close_inherited_descriptor(replacement)
         os.set_inheritable(fd, True)
 
     for fd, name, mode in ((0, "stdin", "r"), (1, "stdout", "w"), (2, "stderr", "w")):
@@ -79,7 +84,7 @@ def sanitize_startup(cancellation: Cancellation) -> list[str]:
 
     ensure_standard_fds()
     for fd in sorted(fd_table() - {0, 1, 2}):
-        os.close(fd)
+        close_inherited_descriptor(fd)
     os.umask(PRIVATE_UMASK)
 
     pending_other = signal.sigpending() - {*STOP_SIGNALS, *PYTHON_IGNORES, signal.SIGCHLD}

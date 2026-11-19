@@ -20,7 +20,7 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import job_disk, report_error, retire_journal
+from image_lifecycle import finish_terminal_receipt, job_disk, report_error, retire_journal
 from image_stream import listed_entry, read_check, read_check_text, retry_check, retry_io
 from vm_process import (
     STOP_SIGNALS, Cancellation, ChildContainmentError, ChildSetupError, close_transport, die_with_parent,
@@ -324,15 +324,18 @@ def exit_launcher() -> None:
     finally:
         try:
             if cancellation.exit_receipt is not None:
-                committed = cancellation.exit_status
                 result = cancellation.receipt_result
                 try:
+                    finish_terminal_receipt(cancellation)
+                    committed = cancellation.exit_status
                     if committed is not None:
                         retire_journal(cancellation)
                         verify_exit_receipt(cancellation.exit_receipt, committed)
                 except BaseException as exc:
                     if result.diagnostic is None:
                         result.diagnostic = exc
+                    if result.publication_uncertain and cancellation.exit_status is None:
+                        result.replacement_unconfirmed = True
             else:
                 for stream in (sys.stdout, sys.stderr):
                     try:
@@ -342,7 +345,11 @@ def exit_launcher() -> None:
         finally:
             try:
                 # Keep terminal signal protection and consult only the result slot for image exit.
-                os._exit(cancellation.receipt_result.exit_status if cancellation.exit_receipt is not None else status)
+                try:
+                    if cancellation.receipt_result.replacement_unconfirmed:
+                        report_error("terminal receipt replacement unconfirmed; launcher exit 70 is authoritative")
+                finally:
+                    os._exit(cancellation.receipt_result.exit_status if cancellation.exit_receipt is not None else status)
             finally:
                 cancellation.restore_dispositions()
 

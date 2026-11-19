@@ -22,7 +22,8 @@ import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
 from image_lifecycle import (
-    ImageJob, ReceiptError, create_directory, receipt, receipt_temporary, reconcile, report_error, sync_directory,
+    FailureReceipt, ImageJob, ReceiptError, create_directory, receipt, receipt_temporary, reconcile, report_error,
+    sync_directory,
 )
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
@@ -76,8 +77,20 @@ def validate_base(base: Path, expected_sha256: str,
             or specific.get("data-file-raw") or specific.get("corrupt")):
         raise AdmissionError("image profile requires a dedicated unbacked 128 GiB base")
 
-def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict | None:
+def completed_acceptance(path: Path, *, entries: set[str] | None = None,
+                         launcher_status: int | None = None) -> dict | None:
     """Validate the final marker before consuming a pair's acceptance candidate."""
+    if launcher_status is not None and launcher_status != 0:
+        return None
+    if launcher_status is None:
+        store = path.parent.parent
+        if listed_entry(store, path.parent.name + ".reconciled.json") is not None:
+            return None
+        active = store / "active.json"
+        if listed_entry(store, active.name) is not None:
+            row = json.loads(read_check(active))
+            if row["attempt"] == path.parent.name:
+                return None
     if entries is not None and "exit.json" not in entries:
         return None
     marker_path = path.parent / "exit.json"
@@ -291,7 +304,8 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             allocation_fault = isinstance(exc, MemoryError) or (
                 isinstance(exc, ReceiptError) and isinstance(exc.__cause__, MemoryError))
             # The receipt transaction absorbs step failures after its rename.
-            if retry_commit and allocation_fault and not cancellation.receipt_result.retain_journal:
+            if (retry_commit and allocation_fault and not cancellation.receipt_result.retain_journal
+                    and not cancellation.receipt_result.publication_uncertain):
                 retry_commit = False
                 continue
             result = cancellation.receipt_result
@@ -306,10 +320,14 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             return 1
 
 
-def prepare_exit_receipt(directory: Path, probe: bool, cancellation: Cancellation) -> None:
+def prepare_exit_receipt(directory: Path, probe: bool, cancellation: Cancellation,
+                         identity: Identity | None = None) -> None:
     """Allocate the final transaction paths before the attempt can spawn a child."""
     cancellation.exit_receipt = (directory / "build" if probe else directory) / "exit.json"
     cancellation.exit_temporary = receipt_temporary(cancellation.exit_receipt)
+    cancellation.failure_receipt = FailureReceipt(cancellation.exit_receipt,
+                                                  asdict(identity) if identity is not None else None,
+                                                  probe=probe)
 
 
 def check_capsule(path: Path, sha256: str, cancellation: Cancellation) -> None:
@@ -368,11 +386,12 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
     directory = store / identity.attempt
     create_directory(directory)
     probe = args.image_mode == "probe"
-    prepare_exit_receipt(directory, probe, cancellation)
+    prepare_exit_receipt(directory, probe, cancellation, identity)
     for name in ("build",) if probe else ("build", "verify"):
         job_directory = directory / name
         create_directory(job_directory)
         create_directory(job_directory / "artifacts")
+    retry_io(cancellation.failure_receipt.prepare, recover=True)
     probe_result = directory / "build/artifacts/verification.json" if probe else None
     expected_probe = {"schema": 1, "identity": asdict(identity), "network_denied": True} if probe else None
     retry_check(CAPS.qemu_limit)

@@ -25,7 +25,8 @@ from image_resources import CAPS, GIB, AdmissionError, IOPriorityError, disk_hea
 from image_stages import StageTail, optional
 from image_stream import (
     CONTROL_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, ExclusiveFile, FileSyncError, Identity, Member, PositionedReader,
-    StreamError, can_rewrite, list_directory, positioned_open, read_check_text, read_once, report_error,
+    StreamError, can_rewrite, list_directory, open_directory, open_owned, positioned_open, read_check_text,
+    read_once, report_error,
     retry_check, retry_io, rewrite_file, sync_file, transfer, unlink_owned, write_all,
 )
 from vm_process import (
@@ -58,6 +59,116 @@ class ReceiptError(OSError):
     """A receipt publication failed."""
 
 
+class FailureReceipt:
+    """Reserve the recovery path, prepared bytes and exclusive owner before the attempt."""
+
+    __slots__ = ("path", "temporary", "output", "reader", "payload", "prepared", "synced", "published",
+                 "replace_attempts", "exhausted")
+
+    def __init__(self, path: Path, identity: dict | None = None, *, probe: bool = False) -> None:
+        self.path = path
+        self.temporary = receipt_temporary(path)
+        self.output = ExclusiveFile(self.temporary, readable=True)
+        self.reader = None
+        row = {"schema": 1, "launcher_exit": 1, "stop_reason": "receipt publication failed"}
+        if identity is not None:
+            row["identity"] = identity
+        if probe:
+            row.update(UNAVAILABLE_DIAGNOSTICS)
+        else:
+            row["pair_complete"] = False
+        self.payload = (json.dumps(row, sort_keys=True, indent=2) + "\n").encode("ascii")
+        self.prepared = self.synced = self.published = False
+        self.replace_attempts = 0
+        self.exhausted = ReceiptError("failure receipt replace budget exhausted")
+
+    def prepare(self) -> None:
+        if not self.prepared:
+            if self.output.fd is None:
+                self.output.open()
+            fd = self.output.fileno()
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            write_all(fd, self.payload)
+            self.prepared = True
+        self.output.close()
+        if self.reader is None and not self.synced:
+            self.reader = open_owned(self.temporary, flags=os.O_NOFOLLOW | os.O_NONBLOCK)
+
+    def attempt(self, outcome: Cancellation) -> None:
+        result = outcome.receipt_result
+        if self.replace_attempts and not self.temporary.exists():
+            try:
+                with positioned_open(self.path, archive=True, nofollow=True, nonblocking=True,
+                                     checked=True) as source:
+                    if (stat.S_ISREG(os.fstat(source.fd).st_mode)
+                            and source.read(len(self.payload)) == self.payload and not source.read(1)):
+                        self.published = True
+            except FileNotFoundError:
+                pass
+            if not self.published:
+                raise self.exhausted  # No source name has been proved safe to replay.
+        if not self.published:
+            if self.replace_attempts >= IO_ATTEMPTS:
+                raise self.exhausted
+            if not self.prepared or self.reader is None:
+                self.prepare()
+            if not self.synced and outcome.exit_sync_calls < 2:
+                self.synced = True
+                sync_file(self.reader.fileno(), terminal_budget=outcome)
+            if self.reader is not None:
+                self.reader.close()
+            outcome.begin_finalization()
+            self.replace_attempts += 1; os.replace(self.temporary, self.path)
+            self.published = True
+        result.state = COMMITTED
+
+    def discard(self) -> None:
+        if self.reader is not None:
+            self.reader.close()
+        if not self.published:
+            self.output.discard()
+
+
+def converge_failure(outcome: Cancellation) -> None:
+    """A bounded, unrolled last resort with no new receipt transaction."""
+    result = outcome.receipt_result
+    result.retain_journal = True
+    result.candidate_status = 1
+    result.state = RENAME
+    replacement = outcome.failure_receipt
+    try:
+        replacement.attempt(outcome)
+    except (OSError, MemoryError):
+        try:
+            replacement.attempt(outcome)
+        except (OSError, MemoryError):
+            try:
+                replacement.attempt(outcome)
+            except (OSError, MemoryError):
+                result.replacement_unconfirmed = True
+
+
+def finish_terminal_receipt(outcome: Cancellation) -> None:
+    """Recover an interruption that escaped the receipt dispatcher."""
+    result = outcome.receipt_result
+    if result.state != COMMITTED and result.publication_uncertain and not result.replacement_unconfirmed:
+        try:
+            converge_failure(outcome)
+        except (OSError, MemoryError):
+            converge_failure(outcome)
+    replacement = outcome.failure_receipt
+    if replacement is not None:
+        try:
+            replacement.discard()
+        except (OSError, MemoryError):
+            try:
+                replacement.discard()
+            except (OSError, MemoryError) as error:
+                report_error(error)
+
+
+
 @contextmanager
 def job_disk(base: Path, image_job=None, cancellation: Cancellation | None = None):
     """Shared anonymous disk lifecycle used by vm.py's kernel and image paths."""
@@ -82,14 +193,14 @@ def process_identity(pid: int) -> str:
 
 
 def sync_directory(path: Path) -> None:
-    fd = None
+    owner = None
     try:
-        fd = retry_io(os.open, path, os.O_DIRECTORY, recover=True)
-        sync_file(fd, directory=True)
+        owner = retry_io(open_directory, path, recover=True)
+        sync_file(owner.fileno(), directory=True)
     finally:
-        if fd is not None:
+        if owner is not None:
             try:
-                os.close(fd)
+                owner.close()
             except OSError as error:
                 report_error(error)  # Linux releases the number even on EINTR.
 
@@ -116,7 +227,7 @@ class Receipt:
 
     def __init__(self, path: Path, row: dict, outcome: Cancellation | None,
                  diagnostic: BaseException | None, probe: ImageJob | None = None,
-                 temporary: Path | None = None, *, failure_receipt: bool = False) -> None:
+                 temporary: Path | None = None) -> None:
         self.path = path
         self.row = row
         self.outcome = outcome
@@ -126,8 +237,7 @@ class Receipt:
         self.status = row["launcher_exit"] if outcome is not None else 1
         self.payload: tuple[bytes, ...] = ()
         self.probe = probe
-        self.directory_fd: int | None = None
-        self.directory_inode: os.stat_result | None = None
+        self.directory_owner = None
         self.result = outcome.receipt_result if outcome is not None else ReceiptResult()
         self.result.state = WRITE
         self.result.candidate_status = self.status
@@ -144,9 +254,8 @@ class Receipt:
         self._rename_pending = False
         self._rename_attempts = 0
         self._initial_sync_attempts = outcome.exit_sync_calls if outcome is not None else 0
-        self._failure_receipt = failure_receipt
         self._needs_failure_receipt = False
-        self._checkpoint = (outcome.check_commit if outcome is not None and not failure_receipt
+        self._checkpoint = (outcome.check_commit if outcome is not None
                             and row.get("stop_reason") != "cancelled" else None)
         self.diagnostic = diagnostic
 
@@ -157,6 +266,11 @@ class Receipt:
     @property
     def file_fd(self) -> int | None:
         return self.output.fd
+
+    @property
+    def directory_fd(self) -> int | None:
+        owner = self.directory_owner
+        return None if owner is None or owner.closed else owner.fileno()
 
     @property
     def temporary(self) -> Path:
@@ -211,11 +325,8 @@ class Receipt:
         if not self.result.sync_done:
             self._candidate_inode = retry_io(os.fstat, self.file_fd, recover=True)
             if self.outcome is not None and self.outcome.exit_sync_calls >= 2:
-                # Publish a verified failure marker at runtime without a third data sync.
-                if not self._failure_receipt:
-                    raise ReceiptError("terminal receipt sync budget exhausted")
-            else:
-                sync_file(self.file_fd, terminal_budget=self.outcome, progress=self.result)
+                raise ReceiptError("terminal receipt sync budget exhausted")
+            sync_file(self.file_fd, terminal_budget=self.outcome, progress=self.result)
         self.result.state = VERIFY
 
     def _fresh_rewrite(self) -> None:
@@ -303,6 +414,7 @@ class Receipt:
                 if owner is None:
                     self._needs_failure_receipt = True
                     raise self.failure_error from error
+                self.result.publication_uncertain = False
                 if owner is not False or self._rename_attempts >= IO_ATTEMPTS or not (
                         isinstance(error, MemoryError)
                         or isinstance(error, OSError) and error.errno in RENAME_RETRY):
@@ -316,6 +428,7 @@ class Receipt:
             source = self.temporary
             self._rename_attempts += 1
             try:
+                self.result.publication_uncertain = True
                 self._rename_pending = True; os.replace(source, self.path)
             except BaseException as error:
                 # The attempted syscall may have consumed the temporary before raising.
@@ -326,33 +439,21 @@ class Receipt:
 
     def dir_open(self) -> None:
         if self.renamed:
-            parent = self.path.parent
-            self.directory_inode = retry_io(parent.stat, recover=True)
-            self.directory_fd = retry_io(os.open, parent, os.O_DIRECTORY | os.O_CLOEXEC,
-                                         recover=self.outcome is None)
-            self.directory_inode = retry_io(os.fstat, self.directory_fd, recover=True)
+            self.directory_owner = retry_io(open_directory, self.path.parent, recover=self.outcome is None)
 
     def dir_sync(self) -> None:
         if self.directory_fd is not None:
             sync_file(self.directory_fd, directory=True, recover=self.outcome is None)
 
     def dir_close(self) -> None:
-        fd = self.directory_fd
-        if fd is not None:
+        owner = self.directory_owner
+        if owner is not None:
             try:
-                current = os.fstat(fd)
+                owner.close()
             except OSError as error:
-                if error.errno != errno.EBADF:
-                    raise
-            else:
-                owned = self.directory_inode
-                if owned is not None and current.st_dev == owned.st_dev and current.st_ino == owned.st_ino:
-                    try:
-                        os.close(fd)
-                    except OSError as error:
-                        report_error(error)
-                        return  # Recheck ownership before another close.
-            self.directory_fd = None
+                report_error(error)
+                return
+            self.directory_owner = None
 
     def log_errors(self) -> None:
         if self.diagnostic is not None:
@@ -420,13 +521,34 @@ class Receipt:
         except BaseException as error:
             self._note_cleanup(error)
 
+    def _close_pending(self) -> None:
+        """Release any owner left behind by an interrupted cleanup dispatch."""
+        for _ in range(IO_ATTEMPTS):
+            try:
+                if self.directory_fd is not None:
+                    self.dir_close()
+                if not self.renamed and self._has_temporary():
+                    self.temp_cleanup()
+                if self.directory_fd is None and (self.renamed or not self._has_temporary()):
+                    return
+            except (OSError, MemoryError) as error:
+                self._note_cleanup(error)
+
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             diagnostic: BaseException | None = None, probe: ImageJob | None = None,
-            temporary: Path | None = None, _failure_receipt: bool = False) -> None:
+            temporary: Path | None = None) -> None:
     if outcome is not None and outcome.receipt_result.state == COMMITTED:
         return
-    transaction = Receipt(path, row, outcome, diagnostic, probe, temporary, failure_receipt=_failure_receipt)
+    if outcome is not None and outcome.failure_receipt is None:
+        outcome.failure_receipt = FailureReceipt(path, row.get("identity"), probe=probe is not None)
+    transaction = Receipt(path, row, outcome, diagnostic, probe, temporary)
+    with ExitStack() as owner:
+        owner.callback(transaction._close_pending)
+        publish_receipt(transaction, outcome)
+
+
+def publish_receipt(transaction: Receipt, outcome: Cancellation | None) -> None:
     result = transaction.result
     exceptions = 0
     try:
@@ -467,30 +589,12 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             transaction._finish()
         except BaseException as error:
             transaction._note_cleanup(error)
-        finally:
-            # The dispatcher itself can stop with an owned descriptor.
-            for _ in range(IO_ATTEMPTS):
-                if transaction.directory_fd is None and (transaction.renamed or not transaction._has_temporary()):
-                    break
-                try:
-                    transaction.dir_close()
-                    transaction.temp_cleanup()
-                except (OSError, MemoryError) as error:
-                    transaction._note_cleanup(error)
     failure = transaction.failure
-    if transaction._needs_failure_receipt and not transaction.renamed and outcome is not None and not _failure_receipt:
-        result.retain_journal = True
-        for attempt in range(IO_ATTEMPTS):
-            try:
-                failed = row | {"launcher_exit": 1, "stop_reason": "receipt publication failed"}
-                if "pair_complete" in failed:
-                    failed["pair_complete"] = False
-                    failed.pop("acceptance_sha256", None)
-                receipt(path, failed, outcome=outcome, diagnostic=failure, probe=probe, _failure_receipt=True)
-                break
-            except (OSError, MemoryError):
-                if attempt + 1 == IO_ATTEMPTS:
-                    raise
+    if transaction._needs_failure_receipt and not transaction.renamed and outcome is not None:
+        result.publication_uncertain = True
+        transaction._close_pending()
+        converge_failure(outcome)
+        outcome.failure_receipt.discard()
         return
     if failure is not None and (outcome is None or not transaction.renamed):
         if not transaction.renamed and transaction._has_temporary():
@@ -662,7 +766,7 @@ class ImageJob:
         self.probe_artifact_events: selectors.BaseSelector | None = None
         with ExitStack() as inputs:
             on_loss = self.lose_diagnostics if probe else None
-            capsule_file = FileIO(capsule, "rb", opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW))
+            capsule_file = open_owned(capsule, flags=os.O_NOFOLLOW)
             register_close(inputs, "capsule", capsule_file.close, on_loss)
             self.capsule_fd = capsule_file.fileno()
             self.console_reader, self.console_writer = pipe_files(

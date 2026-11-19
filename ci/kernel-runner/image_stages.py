@@ -46,11 +46,10 @@ class StageLog:
 
     @staticmethod
     def _write(line: bytes) -> bool:
-        fd = os.open(CONSOLE, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
-        try:
-            return os.write(fd, line) == len(line)
-        finally:
-            os.close(fd)
+        from image_stream import open_owned
+
+        with open_owned(CONSOLE, "ab", os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY, existing=True) as output:
+            return os.write(output.fileno(), line) == len(line)
 
     def emit(self, stage: str, count: int = 0) -> None:
         optional(self.lose, self._emit, stage, count)

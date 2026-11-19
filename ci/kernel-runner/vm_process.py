@@ -16,7 +16,7 @@ from threading import get_native_id
 import time
 from typing import Callable
 
-from image_stream import retry_io
+from image_stream import open_owned, retry_io
 
 POLL_SECONDS = 1
 TERM_GRACE_SECONDS = 20
@@ -90,13 +90,14 @@ class ChildContainmentError(OSError):
 
 
 WRITE, SYNC, VERIFY, RENAME, COMMITTED, FRESH_REWRITE = range(6)
+UNCONFIRMED_RECEIPT = 70
 
 
 class ReceiptResult:
     """Preallocated commit result and failure storage."""
 
     __slots__ = ("state", "first_failure_cause", "failure_errno", "failure_code", "candidate_status", "diagnostic",
-                 "sync_done", "retain_journal")
+                 "sync_done", "retain_journal", "publication_uncertain", "replacement_unconfirmed")
 
     def __init__(self) -> None:
         self.state = WRITE
@@ -107,17 +108,21 @@ class ReceiptResult:
         self.diagnostic: BaseException | None = None
         self.sync_done = False
         self.retain_journal = False
+        self.publication_uncertain = False
+        self.replacement_unconfirmed = False
 
     @property
     def exit_status(self) -> int:
-        return self.candidate_status if self.state == COMMITTED else 1
+        if self.state == COMMITTED:
+            return self.candidate_status
+        return UNCONFIRMED_RECEIPT if self.replacement_unconfirmed else 1
 
 
 class Cancellation:
     """Signal state and the authoritative status of a renamed exit receipt."""
 
     __slots__ = ("requested", "exit_receipt", "exit_temporary", "receipt_result", "exit_sync_calls", "finalizing",
-                 "saved_dispositions", "safe_journal", "_pending", "_pending_ref")
+                 "saved_dispositions", "safe_journal", "failure_receipt", "_pending", "_pending_ref")
 
     def __init__(self) -> None:
         self.requested = False
@@ -130,6 +135,7 @@ class Cancellation:
         self._pending_ref = ctypes.pointer(self._pending)
         self.saved_dispositions: dict[int, signal.Handlers | Callable] = {}
         self.safe_journal: tuple[Path, Path] | None = None
+        self.failure_receipt = None
 
     @property
     def exit_status(self) -> int | None:
@@ -346,7 +352,7 @@ def read_check_script(path: Path, cancellation: Cancellation) -> bytes:
     chunks = bytearray()
     cancellation.check()
     with ExitStack() as owners:
-        source = open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK))
+        source = open_owned(path, flags=os.O_NONBLOCK)
         register_close(owners, "check-script", source.close)
         events = selectors.PollSelector()
         register_close(owners, "check-selector", events.close)

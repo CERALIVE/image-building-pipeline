@@ -10,6 +10,7 @@ import hashlib
 from io import BufferedReader, FileIO, RawIOBase
 import json
 import os
+import select
 from pathlib import Path
 import re
 import stat
@@ -78,30 +79,59 @@ def retry_io(operation, *args, recover: bool = False, no_retry: frozenset[int] =
 
 def report_error(error: BaseException | str) -> None:
     """Keep stderr backpressure out of receipt publication and launcher exit."""
-    fd = None
     try:
         message = f"kernel runner: {error}\n".encode(errors="backslashreplace")
         # Reopen so setting nonblocking doesn't change the caller's descriptor.
-        fd = os.open("/proc/self/fd/2", os.O_WRONLY | os.O_APPEND | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
-        os.write(fd, message[:4096])
+        with open_owned("/proc/self/fd/2", "ab", os.O_NONBLOCK | os.O_NOCTTY, existing=True) as output:
+            os.write(output.fileno(), message[:4096])
     except BaseException:
         pass
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except (OSError, MemoryError):
-                pass
 
 
-def close_checked(fd: int, *, completed: bool) -> None:
+def close_checked(owner, *, completed: bool) -> None:
     """Report a late close failure without replacing an earlier error."""
     try:
-        os.close(fd)
+        owner.close()
     except OSError as error:
         report_error(error)
         if completed:
             raise
+
+
+def open_owned(path, mode="rb", flags=0, *, dir_fd=None, checked=False, existing=False):
+    """Let FileIO acquire and release the descriptor inside its native owner."""
+    def opener(name, requested):
+        if existing:
+            requested &= ~(os.O_CREAT | os.O_TRUNC)
+        if checked:
+            return open_check(name, flags | requested, dir_fd=dir_fd)
+        return os.open(name, flags | requested) if dir_fd is None else os.open(name, flags | requested, dir_fd=dir_fd)
+    return FileIO(path, mode, opener=opener)
+
+
+def open_directory(path, flags=0, *, dir_fd=None, checked=False):
+    """Use a native close-once owner for directories, which FileIO rejects."""
+    fd = None
+    owner = None
+    try:
+        if checked:
+            fd = open_check(path, os.O_DIRECTORY | flags, dir_fd=dir_fd)
+        else:
+            requested = os.O_DIRECTORY | os.O_RDONLY | os.O_CLOEXEC | flags
+            fd = os.open(path, requested) if dir_fd is None else os.open(path, requested, dir_fd=dir_fd)
+        owner = select.epoll.fromfd(fd)
+        return owner
+    except (OSError, MemoryError):
+        if owner is None and fd is not None:
+            os.close(fd)
+        elif owner is not None:
+            owner.close()
+        raise
+
+
+def close_inherited_descriptor(fd: int) -> None:
+    """Startup owns its inherited table and closes these entries exactly once."""
+    os.close(fd)
 
 
 def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
@@ -109,9 +139,10 @@ def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
     # glibc readdir treats an ENOENT from getdents as end of directory.
     # A safety check must distinguish a dead directory from normal EOF.
     buffer = ctypes.create_string_buffer(32 * 1024)
-    fd = open_check(path, os.O_DIRECTORY)
+    owner = open_directory(path, checked=True)
     completed = False
     try:
+        fd = owner.fileno()
         names = []
         while (length := _GETDENTS(fd, buffer, len(buffer))) > 0:
             batch = buffer.raw[:length]
@@ -130,7 +161,7 @@ def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
         completed = True
         return names
     finally:
-        close_checked(fd, completed=completed)
+        close_checked(owner, completed=completed)
 
 
 def retry_check(operation, *args, disappearing: bool = False):
@@ -169,9 +200,10 @@ def read_check(path: Path, limit: int = 1024 * 1024) -> bytes:
     """Read a metadata file once. Its outer check owns retries, including EINTR."""
     buffer = ctypes.create_string_buffer(64 * 1024)
     result = bytearray()
-    fd = open_check(path)
+    owner = open_owned(path, checked=True)
     completed = False
     try:
+        fd = owner.fileno()
         while chunk := read_once(fd, buffer):
             result.extend(chunk)
             if len(result) > limit:
@@ -180,7 +212,7 @@ def read_check(path: Path, limit: int = 1024 * 1024) -> bytes:
         completed = True
         return data
     finally:
-        close_checked(fd, completed=completed)
+        close_checked(owner, completed=completed)
 
 
 def read_check_text(path: Path) -> str:
@@ -299,24 +331,22 @@ class PositionedReader(RawIOBase):
 def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = None,
                     nofollow: bool = False, checked: bool = False, nonblocking: bool = False):
     """Own a regular input while exposing buffered reads over retry-safe pread."""
-    fd = None
+    owner = None
     completed = False
     try:
         flags = (os.O_RDONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
                  | (os.O_NONBLOCK if nonblocking else 0))
         if checked:
-            fd = open_check(path, flags, dir_fd=dir_fd)
-        elif dir_fd is None:
-            fd = retry_io(os.open, path, flags, recover=True)
+            owner = open_owned(path, flags=flags, dir_fd=dir_fd, checked=True)
         else:
-            fd = retry_io(os.open, path, flags, dir_fd=dir_fd, recover=True)
-        raw = PositionedReader(fd, checked=checked)
+            owner = retry_io(open_owned, path, flags=flags, dir_fd=dir_fd, recover=True)
+        raw = PositionedReader(owner.fileno(), checked=checked)
         with (raw if archive else BufferedReader(raw)) as stream:
             yield stream
         completed = checked
     finally:
-        if fd is not None:
-            close_checked(fd, completed=completed)
+        if owner is not None:
+            close_checked(owner, completed=completed)
 
 
 def write_all(destination: BinaryIO | int, data: bytes) -> int:
@@ -343,13 +373,18 @@ def read_input(path: Path) -> bytes:
 def create_file(owner: ExclusiveFile) -> None:
     """Record ownership before returning from the exclusive open."""
     flags = (os.O_RDWR if owner.readable else os.O_WRONLY) | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+
+    def opener(_path, _flags):
+        return os.open(owner.path, flags, owner.mode)
+
     for attempt in range(IO_ATTEMPTS):
         try:
-            owner._fd = os.open(owner.path, flags, owner.mode)
+            owner._file.__init__(owner.path, "r+b" if owner.readable else "wb", opener=opener)
         except OSError as error:
             if attempt + 1 == IO_ATTEMPTS or error.errno not in RETRYABLE_IO | CHECK_RETRY:
                 raise
         else:
+            owner._opened = True
             return
 
 
@@ -387,20 +422,16 @@ class ExclusiveFile:
         self.mode = mode
         self.readable = readable
         self._file = FileIO.__new__(FileIO)
-        self._attached = False
-        self._fd: int | None = None
-        self._inode: os.stat_result | None = None
+        self._opened = False
 
     @property
     def fd(self) -> int | None:
-        if self._attached:
-            return -1 if self._file.closed else self._file.fileno()
-        return self._fd
+        if not self._file.closed:
+            return self._file.fileno()
+        return -1 if self._opened else None
 
     def open(self) -> None:
         create_file(self)
-        if self.readable:
-            self._inode = retry_io(os.fstat, self.fileno(), recover=True)
 
     def __enter__(self) -> ExclusiveFile:
         return self
@@ -423,8 +454,7 @@ class ExclusiveFile:
         except OSError as error:
             report_error(error)
         unlink_owned(self.path)
-        self._fd = None
-        self._attached = False
+        self._opened = False
 
     def fileno(self) -> int:
         return self.fd if self.fd is not None else -1
@@ -440,24 +470,9 @@ class ExclusiveFile:
         """Unbuffered writes have nothing to flush."""
 
     def close(self) -> None:
-        if self._fd is None or self._fd == -1:
-            return
-        if self._inode is not None and not self._attached:
-            try:
-                current = os.fstat(self._fd)
-            except OSError as error:
-                if error.errno != errno.EBADF:
-                    raise
-                self._fd = -1
-                return
-            if current.st_dev != self._inode.st_dev or current.st_ino != self._inode.st_ino:
-                self._fd = -1
-                return
-        if not self._attached:
-            if self._file.closed:
-                self._file.__init__(self._fd, "r+b" if self.readable else "wb")
-            self._attached = True
-        self._file.close()
+        if not self._file.closed:
+            self._opened = True
+            self._file.close()
 
 
 def rewrite_file(path: Path, replay: Callable[[int], None]) -> None:
