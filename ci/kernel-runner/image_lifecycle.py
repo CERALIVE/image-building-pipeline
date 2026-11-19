@@ -43,6 +43,7 @@ UNAVAILABLE_DIAGNOSTICS = {
 }
 RECEIPT_RETRY = RETRYABLE_IO | frozenset((errno.EINTR,))
 RENAME_RETRY = RECEIPT_RETRY | frozenset((errno.ENOENT,))
+IDENTITY_RETRY = RENAME_RETRY | frozenset((errno.ESTALE,))
 RECEIPT_EXCEPTION_LIMIT = 16
 
 
@@ -115,7 +116,7 @@ class Receipt:
 
     def __init__(self, path: Path, row: dict, outcome: Cancellation | None,
                  diagnostic: BaseException | None, probe: ImageJob | None = None,
-                 temporary: Path | None = None) -> None:
+                 temporary: Path | None = None, *, failure_receipt: bool = False) -> None:
         self.path = path
         self.row = row
         self.outcome = outcome
@@ -126,6 +127,7 @@ class Receipt:
         self.payload: tuple[bytes, ...] = ()
         self.probe = probe
         self.directory_fd: int | None = None
+        self.directory_inode: os.stat_result | None = None
         self.result = outcome.receipt_result if outcome is not None else ReceiptResult()
         self.result.state = WRITE
         self.result.candidate_status = self.status
@@ -141,7 +143,11 @@ class Receipt:
         self._rename_error: BaseException | None = None
         self._rename_pending = False
         self._rename_attempts = 0
-        self._checkpoint = outcome.check_commit if outcome is not None and row.get("stop_reason") != "cancelled" else None
+        self._initial_sync_attempts = outcome.exit_sync_calls if outcome is not None else 0
+        self._failure_receipt = failure_receipt
+        self._needs_failure_receipt = False
+        self._checkpoint = (outcome.check_commit if outcome is not None and not failure_receipt
+                            and row.get("stop_reason") != "cancelled" else None)
         self.diagnostic = diagnostic
 
     @property
@@ -191,19 +197,25 @@ class Receipt:
             write_all(fd, fragment)
 
     def _verify_payload(self, fd: int) -> None:
-        with PositionedReader(fd, checked=True) as source:
-            if any(source.read(len(fragment)) != fragment for fragment in self.payload) or source.read(1):
-                raise ReceiptError("receipt content differs before publication")
+        if not self._matches_payload(fd):
+            raise ReceiptError("receipt content differs before publication")
         self.verified_inode = self._candidate_inode
         self.result.state = RENAME
+
+    def _matches_payload(self, fd: int) -> bool:
+        with PositionedReader(fd, checked=True) as source:
+            return all(source.read(len(fragment)) == fragment for fragment in self.payload) and not source.read(1)
 
     def file_sync(self) -> None:
         assert self.file_fd is not None and self.file_fd >= 0
         if not self.result.sync_done:
-            if self.outcome is not None and self.outcome.exit_sync_calls >= 2:
-                raise ReceiptError("terminal receipt sync budget exhausted")
             self._candidate_inode = retry_io(os.fstat, self.file_fd, recover=True)
-            sync_file(self.file_fd, terminal_budget=self.outcome, progress=self.result)
+            if self.outcome is not None and self.outcome.exit_sync_calls >= 2:
+                # Publish a verified failure marker at runtime without a third data sync.
+                if not self._failure_receipt:
+                    raise ReceiptError("terminal receipt sync budget exhausted")
+            else:
+                sync_file(self.file_fd, terminal_budget=self.outcome, progress=self.result)
         self.result.state = VERIFY
 
     def _fresh_rewrite(self) -> None:
@@ -214,6 +226,8 @@ class Receipt:
         self.primary.discard()
         self.output = self.replacement
         self._rewritten = True
+        if self.outcome is not None:
+            self._initial_sync_attempts = self.outcome.exit_sync_calls
         self.result.sync_done = False
         self.result.state = SYNC
 
@@ -263,8 +277,17 @@ class Receipt:
             except MemoryError:
                 continue
             except OSError as error:
-                if error.errno not in RENAME_RETRY:
-                    raise
+                if error.errno not in IDENTITY_RETRY:
+                    break
+        # Independently confirm the exact bytes through a non-following, bounded read.
+        for _ in range(IO_ATTEMPTS):
+            try:
+                with positioned_open(self.path, archive=True, nofollow=True, nonblocking=True,
+                                     checked=True) as source:
+                    if stat.S_ISREG(os.fstat(source.fd).st_mode) and self._matches_payload(source.fd):
+                        return True
+            except (OSError, MemoryError):
+                continue
         return None
 
     def rename(self) -> None:
@@ -277,6 +300,9 @@ class Receipt:
                 if owner is True:
                     self.result.state = COMMITTED
                     return
+                if owner is None:
+                    self._needs_failure_receipt = True
+                    raise self.failure_error from error
                 if owner is not False or self._rename_attempts >= IO_ATTEMPTS or not (
                         isinstance(error, MemoryError)
                         or isinstance(error, OSError) and error.errno in RENAME_RETRY):
@@ -300,7 +326,11 @@ class Receipt:
 
     def dir_open(self) -> None:
         if self.renamed:
-            self.directory_fd = retry_io(os.open, self.path.parent, os.O_DIRECTORY, recover=self.outcome is None)
+            parent = self.path.parent
+            self.directory_inode = retry_io(parent.stat, recover=True)
+            self.directory_fd = retry_io(os.open, parent, os.O_DIRECTORY | os.O_CLOEXEC,
+                                         recover=self.outcome is None)
+            self.directory_inode = retry_io(os.fstat, self.directory_fd, recover=True)
 
     def dir_sync(self) -> None:
         if self.directory_fd is not None:
@@ -310,9 +340,18 @@ class Receipt:
         fd = self.directory_fd
         if fd is not None:
             try:
-                os.close(fd)
+                current = os.fstat(fd)
             except OSError as error:
-                report_error(error)
+                if error.errno != errno.EBADF:
+                    raise
+            else:
+                owned = self.directory_inode
+                if owned is not None and current.st_dev == owned.st_dev and current.st_ino == owned.st_ino:
+                    try:
+                        os.close(fd)
+                    except OSError as error:
+                        report_error(error)
+                        return  # Recheck ownership before another close.
             self.directory_fd = None
 
     def log_errors(self) -> None:
@@ -384,10 +423,10 @@ class Receipt:
 
 def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
             diagnostic: BaseException | None = None, probe: ImageJob | None = None,
-            temporary: Path | None = None) -> None:
+            temporary: Path | None = None, _failure_receipt: bool = False) -> None:
     if outcome is not None and outcome.receipt_result.state == COMMITTED:
         return
-    transaction = Receipt(path, row, outcome, diagnostic, probe, temporary)
+    transaction = Receipt(path, row, outcome, diagnostic, probe, temporary, failure_receipt=_failure_receipt)
     result = transaction.result
     exceptions = 0
     try:
@@ -401,12 +440,18 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
                     result.diagnostic = error
                     break
                 retryable = isinstance(error, MemoryError) or (
-                    isinstance(error, OSError) and error.errno in RENAME_RETRY)
+                    isinstance(error, OSError) and error.errno in IDENTITY_RETRY)
                 if (retryable and exceptions < RECEIPT_EXCEPTION_LIMIT
                         and (state == RENAME and (isinstance(error, MemoryError) or transaction._masked)
                              or state == SYNC and result.sync_done
                              or state == VERIFY and isinstance(error, MemoryError))):
                     continue
+                if (state == SYNC and outcome is not None and isinstance(error, MemoryError)
+                        and outcome.exit_sync_calls > transaction._initial_sync_attempts):
+                    if not transaction._rewritten and outcome.exit_sync_calls < 2:
+                        result.state = FRESH_REWRITE
+                        continue
+                    transaction._needs_failure_receipt = True
                 if (isinstance(error, OSError) and state in (SYNC, VERIFY) and not transaction._rewritten
                         and error.errno in RECEIPT_RETRY
                         and (outcome is None or outcome.exit_sync_calls < 2)
@@ -433,6 +478,20 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
                 except (OSError, MemoryError) as error:
                     transaction._note_cleanup(error)
     failure = transaction.failure
+    if transaction._needs_failure_receipt and not transaction.renamed and outcome is not None and not _failure_receipt:
+        result.retain_journal = True
+        for attempt in range(IO_ATTEMPTS):
+            try:
+                failed = row | {"launcher_exit": 1, "stop_reason": "receipt publication failed"}
+                if "pair_complete" in failed:
+                    failed["pair_complete"] = False
+                    failed.pop("acceptance_sha256", None)
+                receipt(path, failed, outcome=outcome, diagnostic=failure, probe=probe, _failure_receipt=True)
+                break
+            except (OSError, MemoryError):
+                if attempt + 1 == IO_ATTEMPTS:
+                    raise
+        return
     if failure is not None and (outcome is None or not transaction.renamed):
         if not transaction.renamed and transaction._has_temporary():
             raise transaction.cleanup_error from failure
@@ -491,7 +550,7 @@ def _reconcile_inventory(store: Path) -> dict | None:
 def retire_journal(cancellation: Cancellation) -> None:
     """Retire a safely released journal after the attempt outcome is settled."""
     journal = cancellation.safe_journal
-    if journal is None:
+    if journal is None or cancellation.receipt_result.retain_journal:
         return
     path, directory = journal
     try:

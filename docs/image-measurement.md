@@ -819,19 +819,36 @@ In that case the validated attempt can commit success. In both modes the
 committed receipt and the launcher exit report the same verdict.
 The receipt result has explicit write, sync, verify, rename and committed
 states. A required sync or readback fault can use one fresh inode under the
-existing sync limit. An allocation failure after verification resumes with
-the same inode. The sync records completion before returning to dispatch so
-verification recovery does not reissue the sync. The result starts failing.
-After rename returns or recovery proves that the final name owns the verified
-inode, one state assignment publishes the candidate status. Only an observed
-temporary owner permits rename replay. The first failure that prevents
-publication is retained with its errno and a fixed diagnostic code.
+two-attempt sync limit. The launcher charges the attempt before calling
+native sync. If the call's result is lost, that inode cannot be used for
+success. A recorded success survives an interruption on return to dispatch.
+An allocation failure after verification resumes with the same inode. The
+result starts failing. One state assignment publishes the candidate status
+after rename returns normally or bounded recovery confirms the destination
+by device and inode or an exact comparison with the prepared receipt bytes.
+Only an observed temporary owner permits rename replay. The first failure
+that prevents publication is retained with its errno and a fixed diagnostic
+code.
+
+If neither destination check can resolve an uncertain rename, or the last
+sync result is lost, the launcher writes and verifies a fresh failure
+receipt and atomically publishes it before exiting nonzero. It retains the
+active journal for reconciliation. If both data sync attempts have already
+been charged, the failure receipt is visible at runtime without claiming
+data durability. Persistent inability to write or rename and power loss
+cannot be repaired by the launcher.
 
 Directory open, sync and close, temporary-file cleanup and diagnostics are
 attempted independently after the publication decision. A consumed temporary
 is never removed or renamed again. Cleanup cannot change a committed terminal
 result. A final directory-sync failure leaves the file visible at runtime,
 but a crash may lose the rename.
+Cleanup checks device and inode before retrying a directory descriptor close.
+An already closed descriptor or one now belonging to another object is
+cleared without another close. If bounded identity checks remain
+inconclusive after publication, the launcher leaves the read-only
+directory descriptor for process exit. No writable receipt descriptor
+may remain before publication.
 
 After teardown and publication, the CLI verifies `launcher_exit` against
 the status recorded at rename. A missing or unreadable marker is a

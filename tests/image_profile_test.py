@@ -4188,6 +4188,158 @@ def test_committed_cleanup_dispatch_fault_still_releases_directory() -> None:
         assert descriptor_snapshot() == before
 
 
+def test_post_rename_estale_keeps_disk_and_launcher_in_agreement() -> None:
+    replay_receipt_recovery("rename", (errno.ESTALE,))
+
+
+def test_unknown_replacement_sync_publishes_failure_without_third_sync() -> None:
+    replay_receipt_recovery("sync", (errno.EIO, None))
+
+
+def test_directory_cleanup_preserves_reused_descriptor_after_release() -> None:
+    replay_receipt_recovery("close", (None,))
+
+
+def replay_receipt_recovery(boundary, faults, *, trace_sites=(), after_calls=0,
+                            expected_status=None, expected_syncs=None):
+    """Run the real receipt and launcher exit, using actual syscalls before late faults."""
+    import ctypes
+    import image_stream
+
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        marker, journal, sentinel = (root / name for name in ("exit.json", "active.json", "sentinel"))
+        journal.touch()
+        sentinel.write_bytes(b"new descriptor owner")
+        result = Cancellation()
+        result.exit_receipt = marker
+        result.safe_journal = journal, root
+        native_sync, native_stat = image_stream._FSYNC, pathlib.Path.lstat
+        native_close, native_rename = os.close, os.replace
+        native_fstat = os.fstat
+        inodes, statuses, renamed, hits, reused = [], [], [], [], []
+        pending = list(trace_sites)
+        expected = (int(boundary == "fallback" or boundary == "sync" and len(faults) == 2)
+                    if expected_status is None else expected_status)
+        before = descriptor_snapshot()
+
+        def replace(source, target):
+            assert result.exit_status is None and result.receipt_result.exit_status == 1
+            native_rename(source, target)
+            renamed.append(target)
+            if boundary in ("rename", "bytes", "fallback") and len(renamed) == 1:
+                raise MemoryError("fixture after real rename")
+
+        def lstat(path, *args, **kwargs):
+            if boundary in ("bytes", "fallback") and len(renamed) == 1 and path == marker:
+                raise OSError(errno.ESTALE, "fixture exhausts destination identity observations")
+            if boundary == "rename" and renamed and path == marker and len(hits) < len(faults):
+                error = faults[len(hits)]
+                hits.append(error)
+                if error is None:
+                    raise MemoryError("fixture during rename confirmation")
+                raise OSError(error, "fixture during rename confirmation")
+            return native_stat(path, *args, **kwargs)
+
+        def open_check(path, *args, **kwargs):
+            if boundary == "fallback" and len(renamed) == 1 and path == marker:
+                raise OSError(errno.EIO, "fixture also prevents content confirmation")
+            return native_open_check(path, *args, **kwargs)
+
+        def sync(fd):
+            inodes.append(native_fstat(fd).st_ino)
+            number = len(inodes) - 1
+            if boundary == "sync" and number < len(faults):
+                error = faults[number]
+                hits.append(error)
+                if error is not None:
+                    ctypes.set_errno(error)
+                    return -1
+                assert native_sync(fd) == 0
+                raise MemoryError("fixture after native sync, before Python records the result")
+            return native_sync(fd)
+
+        def close(fd):
+            if boundary.startswith("close") and not reused and os.readlink(f"/proc/self/fd/{fd}") == str(root):
+                native_close(fd)
+                reopened = os.open(sentinel, os.O_RDONLY)
+                reused.append(reopened)
+                assert reopened == fd
+                if boundary == "close":
+                    hits.append(None)
+                    raise MemoryError("fixture after native directory close")
+                return None
+            return native_close(fd)
+
+        def fstat(fd):
+            if boundary.startswith("close") and reused and fd == reused[0] and len(hits) < len(faults):
+                error = faults[len(hits)]
+                hits.append(error)
+                if error is None:
+                    raise MemoryError("fixture while checking a reused descriptor")
+                raise OSError(error, "fixture while checking a reused descriptor")
+            return native_fstat(fd)
+
+        trace_hits = []
+
+        def trace(frame, event, _value):
+            if not pending:
+                return None
+            (code, line), error = pending[0]
+            if event == "line" and frame.f_code is code and frame.f_lineno == line and len(inodes) >= after_calls:
+                pending.pop(0)
+                trace_hits.append((code, line))
+                if error is None:
+                    raise MemoryError("fixture at a receipt statement")
+                raise OSError(error, "fixture at a receipt statement")
+            return trace
+
+        def launch(cancellation):
+            assert cancellation is result
+            image_lifecycle.receipt(marker, {"launcher_exit": 0, "stop_reason": "fixture"}, outcome=result)
+            return result.receipt_result.exit_status
+
+        try:
+            native_open_check = image_stream.open_check
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(pathlib.Path, "lstat", lstat))
+                stack.enter_context(patch.object(image_stream, "_FSYNC", sync))
+                stack.enter_context(patch.object(image_stream, "open_check", open_check))
+                stack.enter_context(patch.object(os, "replace", replace))
+                stack.enter_context(patch.object(os, "close", close))
+                stack.enter_context(patch.object(os, "fstat", fstat))
+                stack.enter_context(patch.object(vm, "Cancellation", return_value=result))
+                stack.enter_context(patch.object(vm, "main", launch))
+                stack.enter_context(patch.object(os, "_exit", statuses.append))
+                if trace_sites:
+                    sys.settrace(trace)
+                try:
+                    vm.exit_launcher()
+                finally:
+                    if trace_sites:
+                        sys.settrace(None)
+            assert hits == list(faults), (boundary, faults, hits)
+            assert marker.is_file(), (boundary, faults, statuses, sorted(root.iterdir()))
+            assert statuses == [expected] and json.loads(marker.read_bytes())["launcher_exit"] == expected
+            assert journal.exists() == bool(expected)
+            calls = (2 if boundary in ("sync", "fallback") else 1) if expected_syncs is None else expected_syncs
+            assert len(inodes) == len(set(inodes)) == calls
+            assert renamed == [marker] * (2 if boundary == "fallback" else 1)
+            assert sorted(path.name for path in root.iterdir()) == (
+                ["active.json", "exit.json", "sentinel"] if expected else ["exit.json", "sentinel"])
+            if boundary.startswith("close"):
+                assert os.read(reused[0], 100) == b"new descriptor owner"
+        finally:
+            for fd in reused:
+                try:
+                    native_close(fd)
+                except OSError as error:
+                    if error.errno != errno.EBADF:
+                        raise
+        assert descriptor_snapshot() == before
+        return trace_hits
+
+
 def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -> None:
     from image_stream import sync_once
 
@@ -4300,6 +4452,62 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
         for _ in range(96):
             schedule = tuple((rng.choice(boundaries), rng.choice(errors)) for _ in range(rng.randint(1, 5)))
             replay(schedule, rewrite=rng.choice((False, True)))
+    confirmation_errors = (errno.ESTALE, errno.EIO, errno.EINTR, None)
+    for length in (1, 2):
+        for schedule in product(confirmation_errors, repeat=length):
+            replay_receipt_recovery("rename", schedule)
+    for schedule in ((errno.EIO, None), (None, None), (None,)):
+        replay_receipt_recovery("sync", schedule)
+    sync_source, sync_start = inspect.getsourcelines(sync_once)
+    for offset, line in enumerate(sync_source):
+        site = sync_once.__code__, sync_start + offset
+        if line.lstrip().startswith("if _FSYNC"):
+            assert replay_receipt_recovery("sync", (), trace_sites=((site, None),),
+                                          expected_syncs=1) == [site]
+            assert replay_receipt_recovery("sync", (errno.EIO,), trace_sites=((site, None),), after_calls=1,
+                                          expected_status=1, expected_syncs=1) == [site]
+        elif line.lstrip().startswith(("error = ctypes.", "raise OSError")):
+            assert replay_receipt_recovery("sync", (errno.EIO,), trace_sites=((site, None),)) == [site]
+            assert replay_receipt_recovery("sync", (errno.EIO, errno.EIO), trace_sites=((site, None),),
+                                          after_calls=2) == [site]
+        elif line.lstrip().startswith(("if progress is", "progress.sync_done")):
+            assert replay_receipt_recovery("sync", (), trace_sites=((site, None),)) == [site]
+            assert replay_receipt_recovery("sync", (errno.EIO,), trace_sites=((site, None),),
+                                          expected_status=1) == [site]
+    replay_receipt_recovery("close", (None,))
+    replay_receipt_recovery("close", (None, None))
+    replay_receipt_recovery("bytes", ())
+    replay_receipt_recovery("fallback", ())
+    # Discover reached statements in the identity proof and fault each of them.
+    original = methods._resolve_rename
+    lines = set()
+
+    def census(self):
+        def trace(frame, event, _value):
+            if frame.f_code is not original.__code__:
+                return None
+            if event == "line":
+                lines.add(frame.f_lineno)
+            return trace
+
+        sys.settrace(trace)
+        try:
+            return original(self)
+        finally:
+            sys.settrace(None)
+
+    with patch.object(methods, "_resolve_rename", census):
+        replay_receipt_recovery("bytes", ())
+    assert lines
+    for line, error in product(sorted(lines), confirmation_errors):
+        site = original.__code__, line
+        # Each traced fault is coupled with post-rename MemoryError, and the
+        # bytes path also exhausts the destination stat with ESTALE.
+        assert replay_receipt_recovery("bytes", (), trace_sites=((site, error),)) == [site], (line, error)
+    close_source, close_start = inspect.getsourcelines(methods.dir_close)
+    clear = close_start + next(i for i, line in enumerate(close_source) if line.strip() == "self.directory_fd = None")
+    site = methods.dir_close.__code__, clear
+    assert replay_receipt_recovery("close-trace", (None,), trace_sites=((site, None),)) == [site]
 
 
 def test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor() -> None:
@@ -5318,6 +5526,9 @@ if __name__ == "__main__":
                                   test_fresh_sync_return_fault_resumes_verification_without_third_sync,
                                   test_directory_close_is_retryable_before_native_release,
                                   test_committed_cleanup_dispatch_fault_still_releases_directory,
+                                  test_post_rename_estale_keeps_disk_and_launcher_in_agreement,
+                                  test_unknown_replacement_sync_publishes_failure_without_third_sync,
+                                  test_directory_cleanup_preserves_reused_descriptor_after_release,
                                   test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules,
                                  test_diagnostic_allocation_keeps_first_writeback_failure,
                                  test_late_exclusive_file_close_allocation_cannot_close_reused_descriptor,

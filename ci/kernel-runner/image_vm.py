@@ -291,7 +291,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             allocation_fault = isinstance(exc, MemoryError) or (
                 isinstance(exc, ReceiptError) and isinstance(exc.__cause__, MemoryError))
             # The receipt transaction absorbs step failures after its rename.
-            if retry_commit and allocation_fault:
+            if retry_commit and allocation_fault and not cancellation.receipt_result.retain_journal:
                 retry_commit = False
                 continue
             result = cancellation.receipt_result

@@ -96,7 +96,7 @@ class ReceiptResult:
     """Preallocated commit result and failure storage."""
 
     __slots__ = ("state", "first_failure_cause", "failure_errno", "failure_code", "candidate_status", "diagnostic",
-                 "sync_done")
+                 "sync_done", "retain_journal")
 
     def __init__(self) -> None:
         self.state = WRITE
@@ -106,6 +106,7 @@ class ReceiptResult:
         self.candidate_status = 1
         self.diagnostic: BaseException | None = None
         self.sync_done = False
+        self.retain_journal = False
 
     @property
     def exit_status(self) -> int:

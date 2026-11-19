@@ -297,12 +297,13 @@ class PositionedReader(RawIOBase):
 
 @contextmanager
 def positioned_open(path: Path, *, archive: bool = False, dir_fd: int | None = None,
-                    nofollow: bool = False, checked: bool = False):
+                    nofollow: bool = False, checked: bool = False, nonblocking: bool = False):
     """Own a regular input while exposing buffered reads over retry-safe pread."""
     fd = None
     completed = False
     try:
-        flags = os.O_RDONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
+        flags = (os.O_RDONLY | os.O_CLOEXEC | (os.O_NOFOLLOW if nofollow else 0)
+                 | (os.O_NONBLOCK if nonblocking else 0))
         if checked:
             fd = open_check(path, flags, dir_fd=dir_fd)
         elif dir_fd is None:
@@ -388,6 +389,7 @@ class ExclusiveFile:
         self._file = FileIO.__new__(FileIO)
         self._attached = False
         self._fd: int | None = None
+        self._inode: os.stat_result | None = None
 
     @property
     def fd(self) -> int | None:
@@ -397,6 +399,8 @@ class ExclusiveFile:
 
     def open(self) -> None:
         create_file(self)
+        if self.readable:
+            self._inode = retry_io(os.fstat, self.fileno(), recover=True)
 
     def __enter__(self) -> ExclusiveFile:
         return self
@@ -436,8 +440,19 @@ class ExclusiveFile:
         """Unbuffered writes have nothing to flush."""
 
     def close(self) -> None:
-        if self._fd is None:
+        if self._fd is None or self._fd == -1:
             return
+        if self._inode is not None and not self._attached:
+            try:
+                current = os.fstat(self._fd)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+                self._fd = -1
+                return
+            if current.st_dev != self._inode.st_dev or current.st_ino != self._inode.st_ino:
+                self._fd = -1
+                return
         if not self._attached:
             if self._file.closed:
                 self._file.__init__(self._fd, "r+b" if self.readable else "wb")
