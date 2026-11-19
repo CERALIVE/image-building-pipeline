@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import sys
 
+from image_stream import list_directory, retry_check
 from vm_process import CATCHABLE_SIGNALS, STOP_SIGNALS, Cancellation
 
 STARTUP_ERROR = 78
@@ -27,9 +28,8 @@ class StartupError(Exception):
 
 
 def fd_table() -> set[int]:
-    # The directory enumeration can include the already-closed enumeration FD.
-    return {int(name) for name in os.listdir("/proc/self/fd")
-            if os.path.lexists(f"/proc/self/fd/{name}")}
+    return {int(name) for name in retry_check(
+        lambda: list_directory(Path("/proc/self/fd"), omit_open_fd=True))}
 
 
 def ensure_standard_fds() -> None:

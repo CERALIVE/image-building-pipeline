@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Collection
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
+import stat
 from urllib.parse import urlsplit
 
 from image_capsule import object_id, original_url
@@ -111,9 +113,17 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
 
 
 def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolicy:
-    if not path.is_file() or path.stat().st_size > 1024 * 1024:
+    limit = 1024 * 1024
+    if not stat.S_ISREG(path.lstat().st_mode):
         raise StreamError("missing or oversized public trust policy")
-    row = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    with open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)) as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise StreamError("missing or oversized public trust policy")
+        data = source.read(limit + 1)
+    if len(data) > limit:
+        raise StreamError("missing or oversized public trust policy")
+    row = json.loads(data, object_pairs_hook=unique_object)
     required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
     optional = {"addon_public_object", "paseto_public_object", "os_version"}
     if (not required.issubset(row) or set(row) - required - optional

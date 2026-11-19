@@ -135,14 +135,13 @@ def list_directory(path: Path, *, omit_open_fd: bool = False) -> list[str]:
         os.close(fd)
 
 
-def retry_check(operation, *args, disappearing: bool = False):
+def retry_check(operation, *args, errors: frozenset[int] = CHECK_RETRY):
     """Restart a read-only observation, discarding any incomplete result."""
     for attempt in range(IO_ATTEMPTS):
         try:
             return operation(*args)
         except OSError as error:
-            retryable = error.errno in CHECK_RETRY or disappearing and error.errno in (errno.ENOENT, errno.ESRCH)
-            if not retryable or attempt + 1 == IO_ATTEMPTS:
+            if error.errno not in errors or attempt + 1 == IO_ATTEMPTS:
                 raise
 
 

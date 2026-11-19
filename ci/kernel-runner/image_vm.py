@@ -18,7 +18,9 @@ from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
 from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
-from image_stream import Identity, StreamError, decode, exact_json, list_directory, retry_check, unique_object, verify_sidecar
+from image_stream import (
+    Identity, StreamError, decode, exact_json, list_directory, listed_entry, retry_check, unique_object, verify_sidecar,
+)
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -70,6 +72,16 @@ def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict
     """Validate the final marker before consuming a pair's acceptance candidate."""
     if entries is not None and "exit.json" not in entries:
         return None
+    store = path.parent.parent
+    if listed_entry(store, path.parent.name + ".reconciled.json") is not None:
+        return None
+    active = store / "active.json"
+    active_info = listed_entry(store, active.name)
+    if active_info is not None:
+        if not stat.S_ISREG(active_info.st_mode):
+            raise AdmissionError("active journal is not a regular file")
+        if returned_json(active)["attempt"] == path.parent.name:
+            return None
     marker_path = path.parent / "exit.json"
     if entries is not None and not stat.S_ISREG(marker_path.lstat().st_mode):
         raise AdmissionError("private pair marker is not a regular file")

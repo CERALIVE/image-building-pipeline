@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from contextlib import ExitStack, contextmanager
+import errno
 from functools import partial
 import json
 import os
 from pathlib import Path
 import selectors
 import signal
+import stat
 import subprocess
 import time
 import tempfile
@@ -17,7 +19,9 @@ from typing import TextIO
 import uuid
 
 from image_resources import CAPS, GIB, AdmissionError, disk_headroom, process_priority
-from image_stream import CONTROL_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, write_all
+from image_stream import (
+    CONTROL_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, list_directory, retry_check, write_all,
+)
 from vm_process import POLL_SECONDS, STOP_SIGNALS, Cancelled, Cancellation, poll_owned, run, wait
 
 
@@ -179,42 +183,49 @@ def report_error(error: BaseException | str) -> None:
 
 
 def reconcile(store: Path) -> None:
-    active = store / "active.json"
-    if not active.exists():
+    try:
+        row = retry_check(_reconcile_inventory, store, errors=frozenset(
+            (errno.ENOENT, errno.ESRCH, errno.EINTR, errno.EAGAIN)))
+    except OSError as error:
+        raise AdmissionError(f"cannot complete previous image ownership scan: {error}") from error
+    if row is None:
         return
-    row = json.loads(active.read_text())
-    for key in ("launcher", "qemu"):
-        if key not in row:
-            continue
-        pid = int(row[key].split(":")[0])
-        try:
-            current = process_identity(pid)
-            status = (Path("/proc") / str(pid) / "stat").read_text()
-        except FileNotFoundError:
-            continue
-        if current == row[key] and status[status.rindex(")") + 2:].split()[0] != "Z":
-            raise AdmissionError(f"previous owned {key} still running: {row[key]}")
-    owned = tuple(row["overlay_inode"])
-    for process in Path("/proc").iterdir():
-        if not process.name.isdecimal():
-            continue
-        try:
-            descriptors = list((process / "fd").iterdir())
-        except (FileNotFoundError, PermissionError):
-            continue
-        for descriptor in descriptors:
-            try:
-                info = descriptor.stat()
-            except (FileNotFoundError, PermissionError):
-                continue
-            if (info.st_dev, info.st_ino) == owned:
-                raise AdmissionError(f"previous owned overlay still held by {descriptor}")
     receipt(store / (row["attempt"] + ".reconciled.json"), {
         **row, "stop_reason": "previous launcher interrupted; guest cleanup unknown",
         "overlay_descriptors_closed": True, "reconciled_at": time.time(),
     })
-    active.unlink()
+    (store / "active.json").unlink()
     sync_directory(store)
+
+
+def _reconcile_inventory(store: Path) -> dict | None:
+    active = store / "active.json"
+    if active.name not in list_directory(store):
+        return None
+    if not stat.S_ISREG(active.lstat().st_mode):
+        raise AdmissionError("active journal is not a regular file")
+    row = json.loads(active.read_text())
+    proc = Path("/proc")
+    pids = {name for name in list_directory(proc) if name.isdecimal()}
+    for key in ("launcher", "qemu"):
+        if key not in row:
+            continue
+        pid = str(int(row[key].split(":")[0]))
+        if pid not in pids:
+            continue
+        status = (proc / pid / "stat").read_text()
+        fields = status[status.rindex(")") + 2:].split()
+        if f"{pid}:{fields[19]}" == row[key] and fields[0] != "Z":
+            raise AdmissionError(f"previous owned {key} still running: {row[key]}")
+    owned = tuple(row["overlay_inode"])
+    for pid in sorted(pids):
+        directory = proc / pid / "fd"
+        for number in list_directory(directory, omit_open_fd=pid == str(os.getpid())):
+            descriptor = directory / number
+            info = descriptor.stat()
+            if (info.st_dev, info.st_ino) == owned:
+                raise AdmissionError(f"previous owned overlay still held by {descriptor}")
+    return row
 
 
 class ImageJob:

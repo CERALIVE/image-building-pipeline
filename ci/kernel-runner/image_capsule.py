@@ -67,10 +67,17 @@ def original_url(value: str) -> str:
 
 def unpack(capsule: Path, directory: Path, expected: Identity) -> Capsule:
     """Guest-only import; paths and archive link semantics never cross this boundary."""
-    if capsule.stat().st_size > INPUT_LIMIT or digest_file(capsule) != expected.input_sha256:
-        raise StreamError("input capsule length or transport digest mismatch")
+    with capsule.open("rb") as source:
+        if (os.fstat(source.fileno()).st_size > INPUT_LIMIT
+                or hashlib.file_digest(source, "sha256").hexdigest() != expected.input_sha256):
+            raise StreamError("input capsule length or transport digest mismatch")
+        source.seek(0)
+        return unpack_archive(source, directory, expected)
+
+
+def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Capsule:
     directory.mkdir(mode=0o700)
-    with tarfile.open(capsule, "r:") as archive:
+    with tarfile.open(fileobj=source, mode="r:") as archive:
         entries = archive.getmembers()
         if (len(entries) > 20000 or len({entry.name for entry in entries}) != len(entries)
                 or any(not entry.isfile() or entry.issparse() for entry in entries)):

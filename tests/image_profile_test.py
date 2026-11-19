@@ -440,6 +440,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
                         and not mode.startswith(("stderr-flood:", "probe-invalid:"))
+                        and mode != "priority-failure"
                         and mode not in SUCCESS_GUEST_MODES and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
@@ -482,6 +483,16 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return capture(job, process, seconds)
 
     def capture_priority(pid, cancellation):
+        if mode == "priority-failure":
+            deadline = time.monotonic() + 2
+            while not (root / "ready").exists():
+                assert time.monotonic() < deadline, "fixture guest never reached live priority check"
+                time.sleep(0.005)
+            assert pathlib.Path("/proc/thread-self/children").read_text().split() == [str(pid)]
+            (root / "priority-failed").touch()
+            with patch.object(image_resources._LIBC, "syscall", return_value=-1), \
+                    patch.object(image_resources.ctypes, "get_errno", return_value=errno.EPERM):
+                return image_resources.process_priority(pid, cancellation)
         if mode.startswith("stderr-flood:"):
             children = pathlib.Path("/proc/thread-self/children").read_text().split()
             assert children == [str(pid)], ("children during capture", children)
@@ -713,6 +724,11 @@ if not mode.startswith("pair:"):
 with (root / "children").open("a") as logged:
     print(os.getpid(), file=logged)
 (root / "ready").touch()
+if mode == "priority-failure":
+    while not (root / "priority-failed").exists():
+        time.sleep(0.005)
+    os.write(1, (root / "probe.frame").read_bytes())
+    sys.exit(0)
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
 if mode.startswith(("stderr-flood:", "probe-invalid:")):
@@ -823,6 +839,20 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode == "priority-failure":
+            terminal = directory / "exit.json"
+            assert terminal.is_file(), stderr
+            marker = json.loads(terminal.read_text())
+            pid = (root / "pid").read_text()
+            assert (root / "priority-failed").exists()
+            assert marker["qemu"].split(":")[0] == pid and marker["qemu_reaped"] is True
+            assert not pathlib.Path(f"/proc/{pid}").exists()
+            assert launcher.returncode == marker["launcher_exit"] == 1, (stderr, marker)
+            assert marker["stop_reason"] == "IOPriorityError"
+            assert marker["input_descriptor_closed"] and marker["overlay_descriptor_closed"]
+            assert not (directory / "transport-validation.json").exists()
+            assert not (root / "returns/active.json").exists()
+            return
         if mode.startswith(("stderr-flood:", "probe-invalid:")):
             terminal = directory / "exit.json"
             assert terminal.exists(), stderr.decode(errors="replace")
@@ -1697,7 +1727,9 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
 
 
 def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() -> None:
-    with tempfile.TemporaryDirectory() as temporary:
+    with tempfile.TemporaryDirectory() as temporary, \
+            patch.object(image_lifecycle, "list_directory",
+                         side_effect=fixture_process_inventory({str(os.getpid())}), create=True):
         root = pathlib.Path(temporary)
         # Keep the inode linked through reconciliation so unrelated CI logs cannot reuse it.
         with (root / "overlay").open("w+b") as owned:
@@ -1739,39 +1771,159 @@ def test_image_base_rejects_backing_and_nested_external_data_files() -> None:
                     assert not changes
 
 
+def fixture_process_inventory(pids: set[str]):
+    """Limit fixtures to their own real processes without masking their descriptor reads."""
+    from image_stream import list_directory
+
+    def inventory(path, **kwargs):
+        entries = list_directory(path, **kwargs)
+        return [entry for entry in entries if entry in pids] if path == pathlib.Path("/proc") else entries
+
+    return inventory
+
+
 def test_reconciliation_checks_descriptors_of_a_second_real_process() -> None:
-    code = "import os,sys; os.fstat(int(sys.argv[1])); print('ready', flush=True); sys.stdin.read()"
+    code = """
+import os, sys
+fd = int(sys.argv[1])
+def inode():
+    info = os.fstat(fd)
+    print(f'{info.st_dev}:{info.st_ino}', flush=True)
+inode()
+for request in sys.stdin:
+    inode()
+"""
     with tempfile.TemporaryDirectory() as temporary:
         store = pathlib.Path(temporary)
         with (store / "overlay").open("wb") as overlay:
             inode = os.fstat(overlay.fileno())
-            child = subprocess.Popen([sys.executable, "-c", code, str(overlay.fileno())],
+            number = str(overlay.fileno())
+            child = subprocess.Popen([sys.executable, "-c", code, number],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      pass_fds=(overlay.fileno(),))
         with child:
             try:
-                assert select.select([child.stdout], [], [], 2)[0]
-                assert child.stdout.readline() == b"ready\n"
+                expected = f"{inode.st_dev}:{inode.st_ino}\n".encode()
+                assert select.select([child.stdout], [], [], 2)[0] and child.stdout.readline() == expected
                 journal = store / "active.json"
-                journal.write_text(json.dumps({"attempt": "interrupted",
-                                               "overlay_inode": [inode.st_dev, inode.st_ino]}))
+                row = {"attempt": "interrupted", "overlay_inode": [inode.st_dev, inode.st_ino],
+                       "launcher": f"{child.pid}:0"}  # Force an identity read without bypassing the FD scan.
+                journal.write_text(json.dumps(row))
                 record = store / "interrupted.reconciled.json"
-                try:
-                    reconcile(store)
-                except image_resources.AdmissionError as error:
-                    assert f"/proc/{child.pid}/fd/" in str(error), error
-                else:
-                    raise AssertionError("a second process still held the owned overlay")
+                proc = pathlib.Path("/proc")
+                child_status = proc / str(child.pid) / "stat"
+                fd_root = child_status.with_name("fd")
+                descriptor = fd_root / number
+                inventory = fixture_process_inventory({str(child.pid)})
+                stat_path, lstat_path, read_text = pathlib.Path.stat, pathlib.Path.lstat, pathlib.Path.read_text
+                cases = [(descriptor, errno.EACCES, 1), (descriptor, errno.ENOENT, 1), (None, None, 0)]
+                cases += list(product((proc, child_status, fd_root, descriptor, journal),
+                                      (errno.EACCES, errno.EPERM, errno.EIO, errno.EBUSY, errno.ESRCH,
+                                       errno.ENOENT, errno.EINTR, errno.EAGAIN), (1, 3)))
+                for site, error, count in cases:
+                    attempts = []
+                    faults = []
+
+                    def observe(path):
+                        if path == site and len(faults) < count:
+                            faults.append(path)
+                            raise OSError(error, "fixture incomplete process observation", path)
+
+                    def scan(path, **kwargs):
+                        if path == store:
+                            attempts.append(path)
+                        observe(path)
+                        return inventory(path, **kwargs)
+
+                    def descriptor_stat(path, **kwargs):
+                        if path == descriptor:
+                            observe(path)
+                        return stat_path(path, **kwargs)
+
+                    def journal_stat(path):
+                        if path == journal:
+                            observe(path)
+                        return lstat_path(path)
+
+                    def process_read(path):
+                        if path == child_status:
+                            observe(path)
+                        return read_text(path)
+
+                    with patch.object(image_lifecycle, "list_directory", scan, create=True), \
+                            patch.object(pathlib.Path, "stat", descriptor_stat), \
+                            patch.object(pathlib.Path, "lstat", journal_stat), \
+                            patch.object(pathlib.Path, "read_text", process_read):
+                        try:
+                            reconcile(store)
+                        except image_resources.AdmissionError as exc:
+                            recoverable = error in (errno.ESRCH, errno.ENOENT, errno.EINTR, errno.EAGAIN)
+                            holder_found = site is None or (recoverable and count == 1)
+                            assert (str(descriptor) in str(exc) and "still held" in str(exc)) == holder_found
+                        else:
+                            raise AssertionError(("a second process still held the owned overlay", site, error))
+                    expected_attempts = (min(count + 1, 3) if recoverable else 1)
+                    assert len(attempts) == expected_attempts and len(faults) == min(count, expected_attempts)
+                    assert json.loads(journal.read_text()) == row and not record.exists()
+                    child.stdin.write(b"check\n")
+                    child.stdin.flush()
+                    assert select.select([child.stdout], [], [], 2)[0] and child.stdout.readline() == expected
+                with patch.object(image_lifecycle, "list_directory", inventory, create=True), \
+                        patch.object(pathlib.Path, "stat", side_effect=AssertionError("journal existence must use inventory")):
+                    # The real recorded launcher must be checked even if a stat-style presence check would fail.
+                    journal.write_text(json.dumps(row | {"launcher": image_lifecycle.process_identity(child.pid)}))
+                    try:
+                        reconcile(store)
+                    except image_resources.AdmissionError as exc:
+                        assert "previous owned launcher still running" in str(exc)
+                    else:
+                        raise AssertionError("live recorded launcher was missed")
                 assert journal.exists() and not record.exists()
                 child.stdin.close()
                 assert child.wait(timeout=2) == 0
-                reconcile(store)
+                with patch.object(image_lifecycle, "list_directory", inventory, create=True):
+                    reconcile(store)
                 assert not journal.exists()
                 assert json.loads(record.read_text())["overlay_descriptors_closed"] is True
             finally:
                 if child.poll() is None:
                     child.kill()
                     child.wait(timeout=2)
+
+
+def test_startup_inventory_keeps_a_real_inherited_fd_despite_a_failed_presence_probe() -> None:
+    with tempfile.TemporaryFile() as owned:
+        target = f"/proc/self/fd/{owned.fileno()}"
+        lexists = os.path.lexists
+        with patch.object(os.path, "lexists", side_effect=lambda path: path != target and lexists(path)):
+            assert owned.fileno() in vm_startup.fd_table()
+
+
+def test_reconciliation_restarts_after_a_real_process_disappears() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        path = store / "active.json"
+        path.write_text(json.dumps({"attempt": "interrupted", "overlay_inode": [0, 0]}))
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                              stdin=subprocess.PIPE) as child:
+            proc = pathlib.Path("/proc")
+            pid = str(child.pid)
+            fd = proc / pid / "fd"
+            inventory = fixture_process_inventory({pid})
+            calls = []
+
+            def scan(directory, **kwargs):
+                calls.append(directory)
+                if directory == fd:
+                    child.stdin.close()
+                    assert child.wait(timeout=2) == 0
+                return inventory(directory, **kwargs)
+
+            with patch.object(image_lifecycle, "list_directory", scan):
+                reconcile(store)
+            assert calls == [store, proc, fd, store, proc]
+        assert not path.exists()
+        assert json.loads((store / "interrupted.reconciled.json").read_text())["overlay_descriptors_closed"] is True
 
 
 def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
@@ -1800,6 +1952,12 @@ def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
             "acceptance_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
         }))
         assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == allocated
+        for name in ("active.json", "previous.reconciled.json"):
+            interrupted = store / name
+            interrupted.write_text(json.dumps({"attempt": "previous"}))
+            assert image_vm.completed_acceptance(candidate) is None
+            assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == 0
+            interrupted.unlink()
 
 
 def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> None:
@@ -2215,6 +2373,10 @@ def test_admission_and_live_sampling_require_conclusive_bfq_weights() -> None:
 def test_full_launcher_probe_stderr_flood() -> None:
     for mib in (3, 8):
         cancelled_fixture(f"stderr-flood:{mib}")
+
+
+def test_launcher_refuses_and_reaps_after_failed_live_priority_sample() -> None:
+    cancelled_fixture("priority-failure")
 
 
 def test_probe_exact_result_types_never_commit_success() -> None:

@@ -33,6 +33,7 @@ import image_vm
 import vm
 from image_stream import Identity, Member, StreamError, decode, encode, verify_sidecar
 from image_capsule import unpack
+from image_policy import load_policy
 from image_verify import compare_slot
 from image_urls import InputURLError, canonical_url
 
@@ -95,7 +96,7 @@ def test_missing_terminal_manifest_is_refused() -> None:
     rejected(payload[:payload.index(b'{"id":"manifest"')])
 
 def test_capsule_accepts_only_declared_digest_named_regular_objects() -> None:
-    for case in ("valid", "object-hash", "extra-path", "credential-field"):
+    for case in ("valid", "object-hash", "extra-path", "credential-field", "replace-after-hash"):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             source = b"public source bundle fixture"
@@ -123,14 +124,28 @@ def test_capsule_accepts_only_declared_digest_named_regular_objects() -> None:
                     archive.addfile(header, io.BytesIO(data))
             expected = Identity(IDENTITY.attempt, IDENTITY.board, IDENTITY.commit, IDENTITY.epoch,
                                 hashlib.sha256(capsule.read_bytes()).hexdigest())
-            try:
-                result = unpack(capsule, root / "imported", expected)
-            except StreamError:
-                assert case != "valid"
-            else:
-                assert case == "valid"
-                assert result.source_commit == IDENTITY.commit
-                assert (root / "imported" / source_sha).read_bytes() == source
+            real_digest = hashlib.file_digest
+            replaced = []
+
+            def digest(stream, algorithm):
+                result = real_digest(stream, algorithm)
+                if case == "replace-after-hash":
+                    capsule.rename(root / "reviewed.tar")
+                    capsule.write_bytes(b"unreviewed bytes at the same path")
+                    replaced.append(True)
+                return result
+
+            valid = case in ("valid", "replace-after-hash")
+            with patch.object(hashlib, "file_digest", digest):
+                try:
+                    result = unpack(capsule, root / "imported", expected)
+                except StreamError:
+                    assert not valid
+                else:
+                    assert valid
+                    assert result.source_commit == IDENTITY.commit
+                    assert (root / "imported" / source_sha).read_bytes() == source
+            assert replaced == ([True] if case == "replace-after-hash" else [])
             assert not (root.parent / "escaped").exists()
 
 
@@ -158,6 +173,32 @@ def test_slot_comparison_rejects_changed_bytes_extra_files_and_root_metadata() -
                 pass
             else:
                 raise AssertionError(f"slot comparison accepted {case}")
+
+
+def test_public_trust_policy_requires_a_regular_selected_file() -> None:
+    repo = {"keyring": "a" * 64, "fingerprints": ["B" * 40], "suite": "stable",
+            "component": "main", "arch": "arm64", "index_path": "Packages.gz", "max_age_seconds": 3600}
+    policy = {"schema": 1, "root_der_sha256": "c" * 64, "repositories": {
+        name: repo | {"origin": origin} for name, origin in (
+            ("firstparty", "https://apt.ceralive.tv"), ("bsp", "https://apt.armbian.com"),
+            ("debian-source", "https://deb.debian.org/debian"))},
+        "kernel_metadata": dict.fromkeys(("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"),
+                                         "d" * 64),
+        "builder_images": [{"object": "e" * 64, "tag": "fixture:v1",
+                            "image_id": "sha256:" + "f" * 64, "arch": "arm64"}]}
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        trusted = root / "trusted.json"
+        trusted.write_text(json.dumps(policy))
+        assert load_policy(trusted).root_der_sha256 == policy["root_der_sha256"]
+        link = root / "policy.json"
+        link.symlink_to(trusted)
+        try:
+            load_policy(link)
+        except StreamError:
+            pass
+        else:
+            raise AssertionError("a symlink nominated the approved public trust policy")
 
 
 def test_sidecar_rejects_wrong_hash_filename_and_trailing_records() -> None:
@@ -406,6 +447,58 @@ def test_probe_requires_affirmative_route_and_tcp_denial() -> None:
                 assert result in (errno.ENETUNREACH, errno.EHOSTUNREACH)
 
 
+def test_real_guest_probe_emits_only_the_frame_for_its_outcome() -> None:
+    addresses = ["10.0.2.2", "169.254.169.254", "192.168.0.1", "1.1.1.1"]
+    cases = (
+        ("[]", (errno.ENETUNREACH,), addresses, None),
+        ("[]", (errno.EINTR, errno.EAGAIN, errno.ENETUNREACH), addresses[:1] * 2 + addresses, None),
+        ("[{}]", (), [], StreamError),
+        ("[]", (0,), addresses[:1], StreamError),
+        ("[]", (errno.EIO,), addresses[:1] * 3, OSError),
+    )
+    for route, errors, expected_addresses, expected_error in cases:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            request, wire = root / "request", root / "wire"
+            request.write_text(json.dumps({"schema": 1, "identity": asdict(IDENTITY),
+                                           "operation": "probe", "trust": {}}))
+            replies = iter(errors[:-1])
+            connected = []
+
+            def connect(address):
+                connected.append(address)
+                error = next(replies, errors[-1])
+                if error:
+                    raise OSError(error, "fixture TCP outcome")
+
+            paths = {"/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw": request,
+                     "/dev/virtio-ports/ceralive-artifacts": wire}
+            with patch.object(image_guest, "HOME", root / "guest"), \
+                    patch.object(image_guest, "Path", side_effect=lambda p: paths.get(p, pathlib.Path(p))), \
+                    patch.object(image_guest, "unpack", side_effect=lambda _p, output, _i: output.mkdir()), \
+                    patch.object(image_guest, "source_checkout", return_value=root / "source"), \
+                    patch.object(image_guest, "command", return_value=route), \
+                    patch.object(image_guest.socket, "socket") as factory:
+                factory.return_value.__enter__.return_value.connect = connect
+                try:
+                    image_guest.main()
+                except (StreamError, OSError) as exc:
+                    assert type(exc) is expected_error
+                else:
+                    assert expected_error is None
+            assert connected == [(address, 443) for address in expected_addresses]
+            target = root / "decoded"
+            target.mkdir()
+            with wire.open("rb") as frame:
+                members = decode(frame, target, IDENTITY)
+            name = "verification.json" if expected_error is None else "failure.json"
+            assert [member.id for member in members] == [name]
+            expected = {"schema": 1, "identity": asdict(IDENTITY)}
+            expected.update({"network_denied": True} if expected_error is None else
+                            {"failure": expected_error.__name__, "exit": None})
+            assert json.loads((target / name).read_text()) == expected
+
+
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:
     child = """
 import os, signal, sys
@@ -475,9 +568,18 @@ def test_generated_image_payload_starts_mirror_and_reports_http_outcomes() -> No
     # Substitute only the bind address and the fixture's signature verifier.
     # The isolated interpreter can import only the standard library and the installed files.
     child = """
-import errno, http.server, os, pathlib, runpy, selectors, sys
+import errno, hashlib, http.server, os, pathlib, runpy, selectors, sys
 script, port_file = map(pathlib.Path, sys.argv[1:3])
 mode = sys.argv[3]
+objects = pathlib.Path(os.environ["CERALIVE_SEALED_INPUTS"])
+if mode == "marker-error":
+    write_text = pathlib.Path.write_text
+    def fail_marker(path, *args, **kwargs):
+        if path == objects / "missing-object":
+            port_file.with_name("marker-failed").touch()
+            raise OSError(errno.EIO, "fixture failed miss marker")
+        return write_text(path, *args, **kwargs)
+    pathlib.Path.write_text = fail_marker
 if mode == "stop-retry":
     read = os.read
     selector = selectors.DefaultSelector
@@ -504,6 +606,9 @@ class LoopbackServer(http.server.HTTPServer):
         class FixtureHandler(handler):
             def end_headers(self):
                 super().end_headers()
+                if mode == "short-source":
+                    expected = hashlib.sha256(b"public package fixture").hexdigest()
+                    (objects / expected).write_bytes(b"public package fixtur")
                 if mode == "short":
                     original = self.wfile
                     class Short:
@@ -524,7 +629,7 @@ runpy.run_path(str(script), run_name="__main__")
         assemble_image_payload(root)
         library = root / "usr/local/lib/ceralive-kernel-runner"
         script, address = library / "sealed-inputs.py", root / "mirror-port"
-        for mode in ("hit", "miss", "short", "stop-retry"):
+        for mode in ("hit", "miss", "short", "short-source", "marker-error", "foreign-term", "stop-retry"):
             healthy = mode in ("hit", "stop-retry")
             with bootstrap_fixture() as objects, subprocess.Popen(
                 [sys.executable, "-B", "-I", "-S", "-c", child, str(script), str(address), mode],
@@ -539,22 +644,36 @@ runpy.run_path(str(script), run_name="__main__")
                     if ready != b"CERALIVE_SEALED_MIRROR_READY\n":
                         stdout, stderr = mirror.communicate(timeout=2)
                         raise AssertionError((mirror.returncode, ready + stdout, stderr))
+                    if mode == "foreign-term":
+                        mirror.terminate()
+                        stdout, stderr = mirror.communicate(timeout=2)
+                        assert (mirror.returncode, stdout) == (1, b""), stderr
+                        assert not (objects / "missing-object").exists()
+                        continue
                     connection = http.client.HTTPConnection("127.0.0.1", int(address.read_text()), timeout=2)
                     try:
-                        url = PACKAGE_URL + ".missing" if mode == "miss" else PACKAGE_URL
+                        url = PACKAGE_URL + ".missing" if mode in ("miss", "marker-error") else PACKAGE_URL
                         connection.request("GET", url)
-                        response = connection.getresponse()
                         try:
+                            response = connection.getresponse()
                             body = response.read()
                         except http.client.IncompleteRead as error:
-                            assert mode == "short" and error.partial == b"public package fixtur"
+                            assert mode in ("short", "short-source") and error.partial == b"public package fixtur"
                             body = error.partial
+                        except http.client.RemoteDisconnected:
+                            assert mode == "marker-error"
+                        else:
+                            assert mode not in ("short", "short-source", "marker-error")
                     finally:
                         connection.close()
                     stdout, stderr = mirror.communicate(b"S", timeout=2)
                     assert (mirror.returncode, stdout) == (
                         (0, b"CERALIVE_SEALED_MIRROR_STOPPED\n") if healthy else (1, b"")
                     ), stderr
+                    if mode == "marker-error":
+                        assert address.with_name("marker-failed").is_file()
+                        assert not (objects / "missing-object").exists()
+                        continue
                     assert response.status == (404 if mode == "miss" else 200)
                     if mode == "miss":
                         assert (objects / "missing-object").read_text() == hashlib.sha256(url.encode()).hexdigest() + "\n"

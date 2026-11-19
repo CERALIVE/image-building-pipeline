@@ -88,6 +88,12 @@ plan lock second; keep the innermost direct parent as literal
 locks. Confirm that any preceding heavy unit has finished teardown or adopted
 the same host lock before queueing a measurement.
 
+If an active journal remains, admission requires a complete process and
+descriptor inventory before certifying overlay closure. An inaccessible
+entry refuses admission and leaves the journal in place. A disappearance
+or interrupt restarts the inventory from the beginning, up to three total
+observations. Only a complete scan without a holder can retire the journal.
+
 For an independently prepared and approved base, capsule and public policy,
 the example assumes a shell at nice 0. `nice -n 10` is a relative adjustment.
 If the shell inherits another value, adjust the increment to start at nice 10.
@@ -116,7 +122,10 @@ check remain prerequisites for admitting expensive measurements.
 
 A capsule is an uncompressed regular tar containing exactly `inventory.json`
 and unique regular `objects/<sha256>` members. No links, sparse members or
-guest-selected destination paths are accepted. Inventory is at most 1 MiB;
+guest-selected destination paths are accepted. The guest hashes and imports
+the capsule from the same open descriptor. The host reads the approved public
+trust policy from a regular file without following a final symlink.
+Inventory is at most 1 MiB;
 each member's exact length and SHA-256 are checked during guest import.
 
 The schema-1 inventory has these exact fields:
