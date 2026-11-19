@@ -3,6 +3,7 @@
 
 import base64
 import errno
+import fcntl
 import hashlib
 import http.client
 import io
@@ -254,12 +255,46 @@ def test_slot_inventory_restarts_at_root_and_refuses_unreadable_or_extra_entries
                 extra.unlink(missing_ok=True)
 
 
+def test_slot_content_read_error_restarts_the_comparison() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        work = pathlib.Path(temporary)
+        root = work / "slot"
+        root.mkdir()
+        member = root / "file"
+        member.write_bytes(b"fixture")
+        archive = work / "rootfs.tar"
+        with tarfile.open(archive, "w") as output:
+            output.add(root, arcname=".")
+        real_digest = image_verify.hashlib.file_digest
+        real_open = tarfile.open
+        attempts = []
+        injected = []
+
+        def digest(source, algorithm):
+            if type(source) is io.BufferedReader and not injected:
+                assert os.readlink(f"/proc/self/fd/{source.fileno()}") == str(member)
+                injected.append(source.tell())
+                raise OSError(errno.EIO, "fixture slot content read")
+            return real_digest(source, algorithm)
+
+        def open_tar(*args, **kwargs):
+            attempts.append(args[0])
+            return real_open(*args, **kwargs)
+
+        with patch.object(image_verify.hashlib, "file_digest", digest), patch.object(tarfile, "open", open_tar):
+            compare_slot(root, archive, {})
+        assert injected == [0] and attempts == [archive, archive]
+
+
 def test_mirror_requires_readiness_and_owned_clean_shutdown() -> None:
     child = """
 import os, signal, sys
 mode = sys.argv[1]
 if mode == 'early':
     sys.exit(0)
+if mode == 'partial':
+    print('CERALIVE_', end='', flush=True)
+    signal.pause()
 print('CERALIVE_SEALED_MIRROR_READY', flush=True)
 if mode in ('clean', 'bad'):
     if os.read(sys.stdin.fileno(), 1) != b'S':
@@ -271,27 +306,74 @@ if mode in ('clean', 'bad'):
 while True:
     signal.pause()
 """
-    for mode in ("clean", "legacy", "early", "bad", "foreign-term", "kill"):
+    for mode in ("clean", "legacy", "early", "partial", "full-control", "bad", "foreign-term", "kill"):
         with subprocess.Popen([sys.executable, "-c", child, mode], stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE) as mirror:
             entered = False
             try:
-                with patch.object(image_guest, "MIRROR_STOP_SECONDS", 0.25), image_guest.ready_mirror(mirror):
+                with patch.object(image_guest, "MIRROR_READY_SECONDS", 2 if mode != "partial" else 0.25), \
+                        patch.object(image_guest, "MIRROR_STOP_SECONDS", 0.25), image_guest.ready_mirror(mirror):
                     entered = True
                     if mode in ("foreign-term", "kill"):
                         os.kill(mirror.pid, signal.SIGTERM if mode == "foreign-term" else signal.SIGKILL)
                         mirror.wait(timeout=2)
+                    if mode == "full-control":
+                        fd = mirror.stdin.fileno()
+                        capacity = fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
+                        assert os.write(fd, b"x" * capacity) == capacity
             except StreamError:
-                assert mode in ("legacy", "early", "bad", "foreign-term", "kill"), mode
+                assert mode in ("legacy", "early", "partial", "full-control", "bad", "foreign-term", "kill"), mode
             else:
                 assert mode == "clean", mode
             finally:
                 if mirror.poll() is None:
                     mirror.kill()
                     mirror.wait(timeout=2)
-            assert entered == (mode != "early"), mode
+            assert entered == (mode not in ("early", "partial")), mode
+            if mode in ("partial", "full-control"):
+                assert mirror.returncode == -signal.SIGTERM, mode
             if mode in ("clean", "legacy"):
                 assert mirror.returncode == (0 if mode == "clean" else -signal.SIGTERM)
+
+
+def test_mirror_control_retries_partial_reads_and_readiness() -> None:
+    child = """
+import sys
+print('CERALIVE_SEALED_MIRROR_READY', flush=True)
+assert sys.stdin.buffer.read(1) == b'S'
+print('CERALIVE_SEALED_MIRROR_STOPPED', flush=True)
+"""
+    read = os.read
+    select_type = image_guest.selectors.DefaultSelector
+    ready, stopped = b"CERALIVE_SEALED_MIRROR_READY\n", b"CERALIVE_SEALED_MIRROR_STOPPED\n"
+    for position in (0, len(ready), len(ready + stopped)):
+        with subprocess.Popen([sys.executable, "-c", child], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE) as mirror:
+            received = bytearray()
+            injected = set()
+
+            def fault(fd, size):
+                if fd != mirror.stdout.fileno():
+                    return read(fd, size)
+                if len(received) == position and "read" not in injected:
+                    injected.add("read")
+                    raise OSError(errno.EIO, "fixture mirror read")
+                chunk = read(fd, min(size, 7))
+                received.extend(chunk)
+                return chunk
+
+            class Selector(select_type):
+                def select(self, timeout=None):
+                    events = super().select(timeout)
+                    if any(mask & image_guest.selectors.EVENT_WRITE for _, mask in events) and "select" not in injected:
+                        injected.add("select")
+                        raise OSError(errno.ENOSYS, "fixture mirror control readiness")
+                    return events
+
+            with patch.object(image_guest.os, "read", fault), \
+                    patch.object(image_guest.selectors, "DefaultSelector", Selector), image_guest.ready_mirror(mirror):
+                pass
+            assert injected == {"read", "select"} and received == ready + stopped and mirror.returncode == 0
 
 
 def test_probe_requires_affirmative_route_and_tcp_denial() -> None:
@@ -393,12 +475,44 @@ def test_generated_image_payload_starts_mirror_and_reports_http_outcomes() -> No
     # Substitute only the bind address and the fixture's signature verifier.
     # The isolated interpreter can import only the standard library and the installed files.
     child = """
-import http.server, pathlib, runpy, sys
-script, port_file = map(pathlib.Path, sys.argv[1:])
+import errno, http.server, os, pathlib, runpy, selectors, sys
+script, port_file = map(pathlib.Path, sys.argv[1:3])
+mode = sys.argv[3]
+if mode == "stop-retry":
+    read = os.read
+    selector = selectors.DefaultSelector
+    def interrupt(operation):
+        marker = port_file.with_name(operation)
+        if not marker.exists():
+            marker.touch()
+            raise OSError(errno.EIO, "fixture stop " + operation)
+    def read_control(fd, size):
+        if fd == 0:
+            interrupt("read")
+        return read(fd, size)
+    class StopSelector(selector):
+        def select(self, timeout=None):
+            events = super().select(timeout)
+            if any(key.fd == 0 for key, _ in events):
+                interrupt("select")
+            return events
+    os.read = read_control
+    selectors.DefaultSelector = StopSelector
 class LoopbackServer(http.server.HTTPServer):
     def __init__(self, address, handler):
         assert address == ("127.0.0.1", 3142)
-        super().__init__(("127.0.0.1", 0), handler)
+        class FixtureHandler(handler):
+            def end_headers(self):
+                super().end_headers()
+                if mode == "short":
+                    original = self.wfile
+                    class Short:
+                        def write(self, data):
+                            return original.write(data[:-1])
+                        def __getattr__(self, name):
+                            return getattr(original, name)
+                    self.wfile = Short()
+        super().__init__(("127.0.0.1", 0), FixtureHandler)
         port_file.write_text(str(self.server_port))
 http.server.HTTPServer = LoopbackServer
 sys.path.insert(0, str(script.parent))
@@ -410,9 +524,10 @@ runpy.run_path(str(script), run_name="__main__")
         assemble_image_payload(root)
         library = root / "usr/local/lib/ceralive-kernel-runner"
         script, address = library / "sealed-inputs.py", root / "mirror-port"
-        for missed in (False, True):
+        for mode in ("hit", "miss", "short", "stop-retry"):
+            healthy = mode in ("hit", "stop-retry")
             with bootstrap_fixture() as objects, subprocess.Popen(
-                [sys.executable, "-B", "-I", "-S", "-c", child, str(script), str(address)],
+                [sys.executable, "-B", "-I", "-S", "-c", child, str(script), str(address), mode],
                 cwd=root, env={"PATH": os.environ["PATH"], "HOME": temporary, "LANG": "C.UTF-8",
                                "CERALIVE_SEALED_INPUTS": str(objects),
                                "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
@@ -426,22 +541,28 @@ runpy.run_path(str(script), run_name="__main__")
                         raise AssertionError((mirror.returncode, ready + stdout, stderr))
                     connection = http.client.HTTPConnection("127.0.0.1", int(address.read_text()), timeout=2)
                     try:
-                        url = PACKAGE_URL + ".missing" if missed else PACKAGE_URL
+                        url = PACKAGE_URL + ".missing" if mode == "miss" else PACKAGE_URL
                         connection.request("GET", url)
                         response = connection.getresponse()
-                        body = response.read()
+                        try:
+                            body = response.read()
+                        except http.client.IncompleteRead as error:
+                            assert mode == "short" and error.partial == b"public package fixtur"
+                            body = error.partial
                     finally:
                         connection.close()
                     stdout, stderr = mirror.communicate(b"S", timeout=2)
                     assert (mirror.returncode, stdout) == (
-                        (1, b"") if missed else (0, b"CERALIVE_SEALED_MIRROR_STOPPED\n")
+                        (0, b"CERALIVE_SEALED_MIRROR_STOPPED\n") if healthy else (1, b"")
                     ), stderr
-                    assert response.status == (404 if missed else 200)
-                    if missed:
+                    assert response.status == (404 if mode == "miss" else 200)
+                    if mode == "miss":
                         assert (objects / "missing-object").read_text() == hashlib.sha256(url.encode()).hexdigest() + "\n"
                     else:
-                        assert body == b"public package fixture"
+                        assert body == (b"public package fixture" if healthy else b"public package fixtur")
                         assert not (objects / "missing-object").exists()
+                    if mode == "stop-retry":
+                        assert all(address.with_name(op).is_file() for op in ("read", "select"))
                     validity = json.loads((objects / "metadata-validity.json").read_text())
                     release_sha = json.loads((objects / "inventory.json").read_text())["repositories"]["debian-bootstrap"]["inrelease"]
                     assert validity["purpose"] == "rootfs-measurement"

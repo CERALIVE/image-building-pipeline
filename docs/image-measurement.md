@@ -73,11 +73,13 @@ The sampler excludes the cgroup v2 mount root, where these per-cgroup
 controls can be absent. The workload and each non-root ancestor must expose
 `memory.max`, `memory.swap.max`, `cpu.max` and `io.weight`. The workload also
 needs `cpu.weight`. A missing, unreadable or malformed required control
-refuses admission. The I/O check applies the bound to the effective default
-and to every device named by a workload or ancestor override. For each device,
-the override replaces that level's default before taking the minimum across
-the hierarchy. A transient EIO, EINTR or EAGAIN restarts the whole sample within
-the retry bound.
+refuses admission. `io.bfq.weight` may be absent throughout the sampled
+hierarchy. When available, it must be readable and valid at every sampled
+level. The I/O check applies the same bound independently to `io.weight` and
+`io.bfq.weight`, including their defaults and every device named by an
+override. The override replaces that level's default before taking the
+minimum across the hierarchy. A transient EIO, EINTR or EAGAIN or an
+inconclusive BFQ observation restarts the whole sample within the retry bound.
 
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,

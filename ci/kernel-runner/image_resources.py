@@ -17,6 +17,7 @@ from vm_process import Cancellation
 GIB: Final = 1024**3
 MIN_NICE: Final = 9
 MAX_CPU_WEIGHT: Final = 10
+MAX_IO_WEIGHT: Final = 10
 
 SYS_IOPRIO_GET: Final = 252
 IOPRIO_WHO_PROCESS: Final = 1
@@ -35,6 +36,13 @@ class IOPriorityError(AdmissionError):
 
 class IOPrioritySyscallError(OSError):
     """A native sampling error whose errno must reach the observation retry."""
+
+
+class BFQObservationError(OSError):
+    """An incomplete BFQ observation must restart the cgroup sample."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(errno.EIO, reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +97,7 @@ def cgroup_limits(pid: int | str) -> int:
     quotas = []
     swaps = []
     weights: list[dict[str, int]] = []
+    bfq_weights: list[dict[str, int]] = []
 
     def read(path: Path, field: str) -> str:
         try:
@@ -100,6 +109,19 @@ def cgroup_limits(pid: int | str) -> int:
         if not re.fullmatch(r"[0-9]+", value):
             raise ValueError("expected an unsigned decimal integer")
         return int(value)
+
+    def parse_weights(text: str) -> dict[str, int]:
+        by_device: dict[str, int] = {}
+        for line in text.strip().splitlines():
+            selector, value = line.split()
+            weight = number(value)
+            if (selector in by_device or not 1 <= weight <= 10000 or
+                    (selector != "default" and not re.fullmatch(r"[0-9]+:[0-9]+", selector))):
+                raise ValueError("invalid I/O weight")
+            by_device[selector] = weight
+        if "default" not in by_device:
+            raise ValueError("expected one default I/O weight")
+        return by_device
 
     # Controllers expose these controls on non-root cgroups. A missing
     # workload or ancestor control cannot be filled in from another sample.
@@ -120,17 +142,20 @@ def cgroup_limits(pid: int | str) -> int:
                 if cpu_quota == 0:
                     raise ValueError("CPU quota is zero")
                 quotas.append(cpu_quota / period)
-            by_device: dict[str, int] = {}
-            for line in read(path, "io.weight").splitlines():
-                selector, value = line.split()
-                weight = number(value)
-                if (selector in by_device or not 1 <= weight <= 10000 or
-                        (selector != "default" and not re.fullmatch(r"[0-9]+:[0-9]+", selector))):
-                    raise ValueError("invalid I/O weight")
-                by_device[selector] = weight
-            if "default" not in by_device:
-                raise ValueError("expected one default I/O weight")
-            weights.append(by_device)
+            weights.append(parse_weights(read(path, "io.weight")))
+            bfq = path / "io.bfq.weight"
+            try:
+                try:
+                    text = bfq.read_text()
+                except FileNotFoundError:
+                    try:
+                        bfq.lstat()
+                    except FileNotFoundError:
+                        continue
+                    raise
+                bfq_weights.append(parse_weights(text))
+            except (OSError, ValueError) as error:
+                raise BFQObservationError(f"cannot sample {bfq}: {error}") from error
         weight = number(read(group, "cpu.weight"))
     except ValueError as error:
         raise AdmissionError(f"invalid cgroup limit: {error}") from error
@@ -140,10 +165,13 @@ def cgroup_limits(pid: int | str) -> int:
         raise AdmissionError("image profile needs effective CPUQuota <= 400%")
     if not swaps or min(swaps) != 0:
         raise AdmissionError("image profile needs effective MemorySwapMax=0")
-    # Each level uses its own default unless it overrides this device.
-    if any(min(level.get(device, level["default"]) for level in weights) > 10
-           for device in set().union(*weights)):
-        raise AdmissionError("image profile needs effective IOWeight <= 10")
+    if bfq_weights and len(bfq_weights) != len(weights):
+        raise BFQObservationError("io.bfq.weight is missing on part of the cgroup hierarchy")
+    for field, hierarchy in (("io.weight", weights), ("io.bfq.weight", bfq_weights)):
+        # A device override replaces the default only at its own level.
+        if any(min(level.get(device, level["default"]) for level in hierarchy) > MAX_IO_WEIGHT
+               for device in set().union(*hierarchy)):
+            raise AdmissionError(f"image profile needs effective IOWeight <= {MAX_IO_WEIGHT} for {field}")
     if not 1 <= weight <= MAX_CPU_WEIGHT:
         raise AdmissionError(f"image profile needs CPUWeight <= {MAX_CPU_WEIGHT} on its cgroup")
     return weight

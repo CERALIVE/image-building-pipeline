@@ -14,13 +14,16 @@ import json
 import hashlib
 import os
 import pathlib
+import pty
 import runpy
+import select
 import selectors
 import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -455,7 +458,53 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     def fixture_capture(job, process, seconds):
         if mode.startswith("stderr-flood:"):
             assert process.stderr is None, "launcher received a guest stderr read end"
+            children = pathlib.Path("/proc/thread-self/children").read_text().split()
+            assert children == [str(process.pid)], ("children at capture entry", children)
+            read = os.read
+            received = 0
+            interrupted = False
+            stream_fd = process.stdout.fileno()
+
+            def read_capture(fd, size):
+                nonlocal received, interrupted
+                if fd == stream_fd and received and not interrupted:
+                    interrupted = True
+                    raise OSError(errno.EIO, "fixture live frame read")
+                chunk = read(fd, size)
+                if fd == stream_fd:
+                    received += len(chunk)
+                return chunk
+
+            with patch.object(os, "read", read_capture):
+                capture(job, process, seconds)
+            assert interrupted and received == 787_274
+            return
         return capture(job, process, seconds)
+
+    def capture_priority(pid, cancellation):
+        if mode.startswith("stderr-flood:"):
+            children = pathlib.Path("/proc/thread-self/children").read_text().split()
+            assert children == [str(pid)], ("children during capture", children)
+            (root / "sole-child").touch()
+        return image_resources.process_priority(pid, cancellation) if inherited else FIXTURE_PRIORITY
+
+    if mode.startswith("stderr-flood:"):
+        def audit_capture_spawns(event, args):
+            if event not in {"subprocess.Popen", "os.fork", "os.posix_spawn"}:
+                return
+            assert not (directory / "started.json").exists(), ("extra child during capture", event)
+            assert event == "subprocess.Popen", event
+            argv = args[1]
+            name = pathlib.Path(argv[0]).name
+            if name == "setpriv":
+                assert "qemu-system-x86_64" in argv
+                name = "qemu-system-x86_64"
+            if name == "qemu-system-x86_64":
+                assert not pathlib.Path("/proc/thread-self/children").read_text().split()
+            with (root / "launches").open("a") as log:
+                print(" ".join((name, argv[1])) if name == "qemu-img" else name, file=log)
+
+        sys.addaudithook(audit_capture_spawns)
 
     def fixture_return(job, verifier):
         # Only the production build's multi-GiB artifact set is substituted.
@@ -549,9 +598,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
             patch.object(image_lifecycle, "disk_headroom"),
-            patch.object(image_lifecycle, "process_priority",
-                         side_effect=image_resources.process_priority if inherited else None,
-                         return_value=FIXTURE_PRIORITY),
+            patch.object(image_lifecycle, "process_priority", capture_priority),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
             patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
             # Keep priority observations independent of the runner's inherited I/O class.
@@ -777,13 +824,21 @@ os.execvp(sys.argv[1], sys.argv[1:])
 
         directory = root / "returns/fixture/build"
         if mode.startswith(("stderr-flood:", "probe-invalid:")):
-            marker = json.loads((directory / "exit.json").read_text())
+            terminal = directory / "exit.json"
+            assert terminal.exists(), stderr.decode(errors="replace")
+            marker = json.loads(terminal.read_text())
             assert marker["qemu_exit"] == 0 and marker["qemu_reaped"] is True
             if mode.startswith("stderr-flood:"):
                 assert launcher.returncode == marker["launcher_exit"] == 0, stderr
+                assert (root / "sole-child").exists()
+                assert (root / "launches").read_text().splitlines() == [
+                    "qemu-img info", "qemu-img create", "qemu-system-x86_64"]
                 assert (root / "flood-completed").read_text() == str(int(mode.split(":")[1]) * 1024**2)
                 assert not (directory / "diagnostic.partial").exists()
                 assert marker["stream_bytes"] == 787_274
+                assert marker["identity"] == asdict(identity)
+                assert marker["input_descriptor_closed"] and marker["overlay_descriptor_closed"]
+                assert not (root / "returns/active.json").exists()
             else:
                 assert (directory / "transport-validation.json").is_file(), (mode, stderr, marker)
                 assert launcher.returncode == marker["launcher_exit"] == 1, (mode, stderr)
@@ -1684,6 +1739,41 @@ def test_image_base_rejects_backing_and_nested_external_data_files() -> None:
                     assert not changes
 
 
+def test_reconciliation_checks_descriptors_of_a_second_real_process() -> None:
+    code = "import os,sys; os.fstat(int(sys.argv[1])); print('ready', flush=True); sys.stdin.read()"
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        with (store / "overlay").open("wb") as overlay:
+            inode = os.fstat(overlay.fileno())
+            child = subprocess.Popen([sys.executable, "-c", code, str(overlay.fileno())],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     pass_fds=(overlay.fileno(),))
+        with child:
+            try:
+                assert select.select([child.stdout], [], [], 2)[0]
+                assert child.stdout.readline() == b"ready\n"
+                journal = store / "active.json"
+                journal.write_text(json.dumps({"attempt": "interrupted",
+                                               "overlay_inode": [inode.st_dev, inode.st_ino]}))
+                record = store / "interrupted.reconciled.json"
+                try:
+                    reconcile(store)
+                except image_resources.AdmissionError as error:
+                    assert f"/proc/{child.pid}/fd/" in str(error), error
+                else:
+                    raise AssertionError("a second process still held the owned overlay")
+                assert journal.exists() and not record.exists()
+                child.stdin.close()
+                assert child.wait(timeout=2) == 0
+                reconcile(store)
+                assert not journal.exists()
+                assert json.loads(record.read_text())["overlay_descriptors_closed"] is True
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+
+
 def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         store = pathlib.Path(temporary)
@@ -1768,6 +1858,127 @@ def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> Non
                 assert len(diagnostics) == 1
                 assert ("already contains this board" if recovered else "cannot complete") in str(diagnostics[0])
                 assert not (store / IDENTITY.attempt).exists()
+
+
+def test_late_disk_error_restarts_store_admission_before_execution() -> None:
+    for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            store = root / "store"
+            store.mkdir(mode=0o700)
+            base, capsule = root / "base", root / "capsule"
+            base.touch()
+            capsule.write_bytes(b"fixture capsule")
+            args = SimpleNamespace(base=base, input_capsule=capsule,
+                                   input_sha256=hashlib.sha256(capsule.read_bytes()).hexdigest(),
+                                   base_sha256="a" * 64, trust_policy=root / "trust", output_dir=store,
+                                   attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                                   source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None,
+                                   group_id=None, image_mode="probe")
+            steps = []
+            inventory = image_vm.list_directory
+
+            def policy(_path):
+                steps.append("policy")
+                return FixturePolicy()
+
+            def scan(path):
+                if path == store:
+                    steps.append("store")
+                return inventory(path)
+
+            def disk(*_args):
+                steps.append("disk")
+                if steps.count("disk") <= failures:
+                    raise OSError(error, "fixture late disk observation")
+
+            def execute(_base, directory, request, *_args):
+                steps.append("execute")
+                artifacts = directory / "artifacts"
+                artifacts.mkdir(parents=True)
+                (artifacts / "verification.json").write_text(json.dumps({
+                    "schema": 1, "identity": request["payload"]["identity"], "network_denied": True}))
+                return artifacts
+
+            success = failures == 1 and error != errno.EPERM
+            with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                                validate_base=lambda *_: None, load_policy=policy, list_directory=scan,
+                                disk_admission=disk, execute=execute), \
+                    patch.object(image_resources.ImageCaps, "qemu_limit"):
+                try:
+                    image_vm.measure_image(args, None, Cancellation(), [])
+                except image_resources.AdmissionError as exc:
+                    assert not success and exc.__cause__.errno == error, (error, failures, exc)
+                else:
+                    assert success, (error, failures)
+            tries = 1 if error == errno.EPERM else min(failures + 1, 3)
+            assert steps == ["policy", "store", "disk"] * tries + (["execute"] if success else []), steps
+            assert (store / IDENTITY.attempt).exists() == success
+
+
+def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
+    body = json.dumps({"schema": 1, "identity": asdict(IDENTITY), "network_denied": True}).encode()
+    frame = io.BytesIO()
+    encode(frame, [("verification.json", body)], IDENTITY)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "image").mkdir()
+        (root / "image/raw").touch()
+        wire, returned = root / "wire", root / "returned"
+        wire.write_bytes(frame.getvalue())
+        helper = root / "image_guest.py"
+        helper.write_text(f"import pathlib, sys\npathlib.Path({str(returned)!r}).write_bytes("
+                          f"pathlib.Path({str(wire)!r}).read_bytes())\n"
+                          "print('late stdout', flush=True)\nprint('late stderr', file=sys.stderr, flush=True)\n"
+                          "raise SystemExit(int(sys.argv[1]))\n")
+        observed = root / "poweroff"
+        for tool, command in (
+            ("modprobe", "exit 0"),
+            ("systemctl", f'[[ $* = poweroff ]] && cmp -s "{wire}" "{returned}" && : >"{observed}"'),
+        ):
+            stub = root / tool
+            stub.write_text(f"#!/bin/bash\n{command}\n")
+            stub.chmod(0o700)
+        wrapper = (ROOT / "ci/kernel-runner/guest-job.sh").read_text()
+        wrapper = wrapper.replace("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive", str(root))
+        wrapper = wrapper.replace("/usr/local/lib/ceralive-kernel-runner/image_guest.py", f'"{helper}" "$1"')
+        master, slave = pty.openpty()
+        failures = []
+        try:
+            with ExitStack() as pipes:
+                writers = []
+                for _ in range(2):
+                    reader, writer = os.pipe()
+                    pipes.callback(os.close, reader)
+                    pipes.callback(os.close, writer)
+                    capacity = fcntl.fcntl(writer, fcntl.F_GETPIPE_SZ)
+                    assert os.write(writer, b"x" * capacity) == capacity
+                    writers.append(writer)
+                termios.tcflow(slave, termios.TCOOFF)
+                for status, sink in product((0, 1, 37), (str(root / "serial"), os.ttyname(slave), "/dev/full")):
+                    observed.unlink(missing_ok=True)
+                    returned.unlink(missing_ok=True)
+                    with subprocess.Popen(
+                        ["/bin/bash", "-c", wrapper.replace("/dev/ttyS0", sink), "fixture", str(status)],
+                        env={"PATH": f"{root}:/usr/bin:/bin"}, start_new_session=True,
+                        stdout=writers[0], stderr=writers[1],
+                    ) as guest:
+                        try:
+                            guest.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(guest.pid, signal.SIGKILL)
+                            guest.wait()
+                            failures.append((sink, status, "shutdown exceeded two seconds"))
+                        else:
+                            if not observed.is_file() or guest.returncode != status:
+                                failures.append((sink, status, observed.is_file(), guest.returncode))
+                    assert returned.read_bytes() == frame.getvalue()
+                    if sink == str(root / "serial"):
+                        assert pathlib.Path(sink).read_bytes() == f"\nCERALIVE_JOB_DONE={status}\n".encode()
+        finally:
+            os.close(slave)
+            os.close(master)
+        assert not failures, failures
 
 
 def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
@@ -1913,7 +2124,12 @@ def test_admission_and_live_sampling_enforce_all_device_io_weights() -> None:
         ("default 10\n8:0 0\n", "default 100\n", "invalid cgroup limit"),
         ("default 10\n8:0 9\n8:0 10\n", "default 100\n", "invalid cgroup limit"),
     )
-    with patch.object(pathlib.Path, "read_text", lambda path: files[str(path)]), \
+    def read_text(path):
+        if str(path) not in files:
+            raise FileNotFoundError(errno.ENOENT, "fixture absent control", str(path))
+        return files[str(path)]
+
+    with patch.object(pathlib.Path, "read_text", read_text), \
             patch.object(image_resources, "require_process_priority", return_value=9), \
             patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
             patch.object(image_resources._LIBC, "syscall", return_value=0):
@@ -1928,6 +2144,72 @@ def test_admission_and_live_sampling_enforce_all_device_io_weights() -> None:
                     assert expected and expected in str(error), (child_weights, parent_weights, observe, error)
                 else:
                     assert expected is None, (child_weights, parent_weights, observe, "invalid device weight accepted")
+
+
+def test_admission_and_live_sampling_require_conclusive_bfq_weights() -> None:
+    child, parent = "/sys/fs/cgroup/parent/child", "/sys/fs/cgroup/parent"
+    caps = {"memory.max": str(24 * image_resources.GIB), "memory.swap.max": "0",
+            "cpu.max": "400000 100000", "io.weight": "default 7\n"}
+    baseline = {f"{level}/{name}": value for level in (child, parent) for name, value in caps.items()}
+    baseline.update({"/proc/self/cgroup": "0::/parent/child\n", "/proc/123/cgroup": "0::/parent/child\n",
+                     f"{child}/cpu.weight": "10", "/proc/meminfo": "MemAvailable: 33554432 kB\n"})
+    high = "default 100\n"
+    cases = (
+        (None, None, None, 0, True, 1),
+        (high, high, None, 0, False, 1),
+        ("default 11\n", high, None, 0, False, 1),
+        ("default 10\n", high, None, 0, True, 1),
+        ("default 7\n", high, None, 0, True, 1),
+        ("default 7\n8:1 100\n", high, None, 0, False, 1),
+        ("default 7\n8:1 10\n253:17 9\n", high, None, 0, True, 1),
+        ("default 7\n8:1 9\n253:17 11\n", high, None, 0, False, 1),
+        ("default 7\n8:1 100\n", "default 11\n8:1 9\n", None, 0, True, 1),
+        (high, "default 10\n253:17 11\n", None, 0, False, 1),
+        ("default 7\n", None, None, 0, False, 3),
+        (None, "default 7\n", None, 0, False, 3),
+        ("default 7\n", "default 7\n8:1 malformed\n", None, 0, False, 3),
+        ("default 7\n8:1 8\n8:1 9\n", high, None, 0, False, 3),
+    )
+    for child_text, parent_text, code, failures, accept, observations in (
+        *cases,
+        *((("default 7\n", high, error, count, count == 1, count + (count == 1)))
+          for error, count in product((errno.EIO, errno.EINTR, errno.EAGAIN, errno.EACCES, errno.ENOENT), (1, 3))),
+    ):
+        files = baseline.copy()
+        for level, text in ((child, child_text), (parent, parent_text)):
+            if text is not None:
+                files[f"{level}/io.bfq.weight"] = text
+        for pid, observe in (("self", image_resources.cgroup_admission),
+                             ("123", lambda: image_resources.process_priority(123, Cancellation()))):
+            reads = []
+            fault = f"{parent}/io.bfq.weight"
+
+            def read_text(path):
+                name = str(path)
+                reads.append(name)
+                if name == fault and code is not None and reads.count(name) <= failures:
+                    raise OSError(code, "fixture BFQ read")
+                if name not in files:
+                    raise FileNotFoundError(errno.ENOENT, "fixture absent control")
+                return files[name]
+
+            def lstat(path):
+                if str(path) not in files:
+                    raise FileNotFoundError(errno.ENOENT, "fixture absent control")
+                return os.stat_result((0,) * 10)
+
+            with patch.object(pathlib.Path, "read_text", read_text), patch.object(pathlib.Path, "lstat", lstat), \
+                    patch.object(image_resources, "require_process_priority", return_value=9), \
+                    patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
+                    patch.object(image_resources._LIBC, "syscall", return_value=0):
+                try:
+                    observe()
+                except (image_resources.AdmissionError, OSError) as exc:
+                    assert not accept and ("bfq" in str(exc) or "BFQ" in str(exc)), (pid, reads, exc)
+                else:
+                    assert accept, (pid, child_text, parent_text, code, reads)
+            assert reads.count(f"/proc/{pid}/cgroup") == observations, (pid, reads)
+            assert reads.count(f"{child}/memory.max") == observations, (pid, reads)
 
 
 def test_full_launcher_probe_stderr_flood() -> None:
