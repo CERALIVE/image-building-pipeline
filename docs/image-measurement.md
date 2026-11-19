@@ -180,12 +180,11 @@ the committed outcome.
 
 An arbitrary main-path `MemoryError` fails the attempt with a nonzero exit.
 On the tested post-spawn paths the launcher writes teardown, reaps its child,
-closes owned descriptors, and removes the active journal. Teardown uses a
+and closes owned descriptors. Teardown uses a
 null `ended_at` if the timestamp cannot be obtained because of an allocation
 failure. The launcher attempts teardown and publishes `exit.json` before
-retiring the journal. If required teardown publication fails after safe child
-and overlay release, journal retirement still runs and the launcher exits
-nonzero. A failed exit receipt may be absent. Consumers use `exit.json` to
+retiring the journal. If the terminal receipt cannot be confirmed, the launcher
+exits nonzero and retains the journal for reconciliation. Consumers use `exit.json` to
 determine the verdict. A journal that survives bounded unlink attempts is
 reported as `journal_removed=false` on host stderr and leaves the committed
 receipt and exit code intact. The next run checks the recorded PID start
@@ -821,9 +820,11 @@ committed receipt and the launcher exit report the same verdict.
 The receipt result has explicit write, sync, verify, rename and committed
 states. A required sync or readback fault can use one fresh inode under the
 existing sync limit. An allocation failure after verification resumes with
-the same inode. The launcher arms the preallocated result before rename.
-If rename raises, it checks both names for the verified inode. Only an
-observed temporary owner permits replay. The first failure that prevents
+the same inode. The sync records completion before returning to dispatch so
+verification recovery does not reissue the sync. The result starts failing.
+After rename returns or recovery proves that the final name owns the verified
+inode, one state assignment publishes the candidate status. Only an observed
+temporary owner permits rename replay. The first failure that prevents
 publication is retained with its errno and a fixed diagnostic code.
 
 Directory open, sync and close, temporary-file cleanup and diagnostics are
@@ -879,7 +880,7 @@ separately checks for the missing-object marker. TERM and KILL are cleanup
 signals after failure. Control reads and the shutdown request use nonblocking
 I/O. A transient zero-progress error in either the readiness wait or the I/O
 operation gets a new readiness check within the original deadline. The
-base-owned mirror also retries transient stop-byte reads before deciding
+base-owned mirror also retries transient readiness waits and stop-byte reads before deciding
 whether to acknowledge. The historical source selection uses the same
 base-owned control path.
 The offline probe requires an empty JSON list of default routes

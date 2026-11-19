@@ -95,15 +95,21 @@ WRITE, SYNC, VERIFY, RENAME, COMMITTED, FRESH_REWRITE = range(6)
 class ReceiptResult:
     """Preallocated commit result and failure storage."""
 
-    __slots__ = ("state", "first_failure_cause", "failure_errno", "failure_code", "exit_status", "diagnostic")
+    __slots__ = ("state", "first_failure_cause", "failure_errno", "failure_code", "candidate_status", "diagnostic",
+                 "sync_done")
 
     def __init__(self) -> None:
         self.state = WRITE
         self.first_failure_cause: BaseException | None = None
         self.failure_errno: int | None = None
         self.failure_code = "receipt publication failed"
-        self.exit_status = 1
+        self.candidate_status = 1
         self.diagnostic: BaseException | None = None
+        self.sync_done = False
+
+    @property
+    def exit_status(self) -> int:
+        return self.candidate_status if self.state == COMMITTED else 1
 
 
 class Cancellation:

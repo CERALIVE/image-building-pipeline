@@ -645,7 +645,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if trace_terminal and destination == directory.parent / "exit.json":
             inject_terminal("rename:published")
 
-    def sync(fd):
+    def sync(fd, progress=None):
         phase = receipt_phase(sys._getframe(1)) if tail_case else None
         if phase:
             point = f"{phase}-{'dir' if os.path.isdir(f'/proc/self/fd/{fd}') else 'file'}-fsync"
@@ -655,6 +655,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if startup:
             # Keep receipt publication real without timing host disk flushes in the startup matrix.
             os.fstat(fd)
+            if progress is not None:
+                progress.sync_done = True
             return
         path = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
         if fail_sync and path == directory:
@@ -676,6 +678,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 sigmask(signal.SIG_SETMASK, previous)
         else:
             fsync(fd)
+        if progress is not None:
+            progress.sync_done = True
         if final:
             terminal_synced = True
         if mode in {"raising-handler", "shutdown-gap", "mask-restore-error"} \
@@ -2095,7 +2099,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
                                   [str(os.getpid())] if path == image_lifecycle.PROC_ROOT else scan(path, **kwargs)):
                     reconcile(active.parent)
                 assert (active.parent / "fixture.reconciled.json").exists()
-            assert not active.exists()
+            assert active.exists() == (row is None), (mode, stderr)
             if point.endswith("-fd-line-baseline"):
                 return json.loads((root / "live-receipt-lines").read_text())
             if (point.endswith(("-sync", "-fsync")) and error != "MemoryError"
@@ -2219,7 +2223,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert (root / "diag-injected").is_file() and b"fixture console fault" in stderr
             assert not (root / "pid").exists() and not (directory / "started.json").exists()
             assert not (directory / "exit.json").exists() and not (directory / "artifacts").exists()
-            assert not (root / "returns/active.json").exists() and not list(root.glob("job-*"))
+            assert (root / "returns/active.json").is_file() == (mode.split(":")[1] != "pipe"), (mode, stderr)
+            assert not list(root.glob("job-*"))
             if (root / "leaks").exists():
                 assert json.loads((root / "leaks").read_text()) == []
             with (root / "fixture.lock").open("rb") as lock:
@@ -2276,12 +2281,12 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
             return
         if mode.startswith(("teardown-memory:", "commit-memory:")) or mode == "fault:fail:teardown-rename":
-            assert not (root / "returns/active.json").exists(), (mode, stderr)
             assert not pathlib.Path(f"/proc/{(root / 'pid').read_text()}").exists()
             assert not list(root.rglob(".receipt-*")), (mode, stderr)
             assert (directory / "artifacts/verification.json").read_bytes() == probe_body
             teardown_path = directory / "teardown.json"
             exit_path = directory / "exit.json"
+            assert (root / "returns/active.json").exists() == (not exit_path.exists()), (mode, stderr)
             if mode.startswith("commit-memory:"):
                 assert (root / "commit-path-prepared").exists()
                 assert launcher.returncode == json.loads(exit_path.read_text())["launcher_exit"] == 0, (mode, stderr)
@@ -3195,7 +3200,7 @@ def test_live_and_teardown_closes_go_through_transport_guard() -> None:
         remaining = Counter(acquisitions)
         raw_close = Counter({
             "sync_directory": ("os.close(fd)",),
-            "dir_close": ("os.close(self.directory_fd)",),
+            "dir_close": ("os.close(fd)",),
             "file_close": ("self.output.close()",),
             "report_error": ("os.close(fd)",),
         }.get(tree.body[0].name, ()))
@@ -3563,7 +3568,7 @@ def test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode() ->
                 row = {"schema": 1, "launcher_exit": 0, "stop_reason": "verified"}
                 attempts = []
 
-                def lose_writeback(fd):
+                def lose_writeback(fd, progress=None):
                     info = os.fstat(fd)
                     if stat.S_ISDIR(info.st_mode):
                         return fsync(fd)
@@ -3571,7 +3576,9 @@ def test_receipt_writeback_failure_rewrites_prepared_bytes_on_a_fresh_inode() ->
                     if len(attempts) <= failures:
                         os.ftruncate(fd, 0)
                         raise OSError(error, "modeled writeback loss")
-                    return fsync(fd)
+                    fsync(fd)
+                    if progress is not None:
+                        progress.sync_done = True
 
                 with patch("image_stream.sync_once", lose_writeback):
                     try:
@@ -3600,16 +3607,16 @@ def test_receipt_recovery_does_not_publish_unverified_bytes_or_abandon_a_tempora
             first = root / ".receipt-original"
             failures = 0
 
-            def sync(fd):
+            def sync(fd, progress=None):
                 nonlocal failures
                 file = pathlib.Path(os.readlink(f"/proc/self/fd/{fd}"))
                 failures += 1
                 if file == first:
                     if case == "corruption":
                         os.ftruncate(fd, 1)
-                        return real_sync(fd)
+                        return real_sync(fd, progress)
                     raise OSError(errno.EIO, "fixture writeback error")
-                return real_sync(fd)
+                return real_sync(fd, progress)
 
             unlinks = 0
 
@@ -3665,12 +3672,12 @@ def test_terminal_receipt_sync_has_one_two_call_budget() -> None:
             issued = []
             verified = False
 
-            def sync(fd):
+            def sync(fd, progress=None):
                 index = len(issued)
                 issued.append(os.fstat(fd).st_ino)
                 if index < len(sequence):
                     raise OSError(sequence[index], "fixture terminal sync")
-                real_sync(fd)
+                real_sync(fd, progress)
 
             expected = len(sequence) == 1 or errno.ENOSYS in sequence[:2]
             with patch("image_stream.sync_once", sync), patch("image_stream.report_error"):
@@ -3757,12 +3764,12 @@ def test_each_reached_fresh_receipt_recovery_line_keeps_ownership() -> None:
             injected = False
             real_sync = image_stream.sync_once
 
-            def sync(fd):
+            def sync(fd, progress=None):
                 nonlocal recovering
                 if os.readlink(f"/proc/self/fd/{fd}") == str(first):
                     recovering = True
                     raise OSError(errno.EIO, "fixture recovery")
-                real_sync(fd)
+                real_sync(fd, progress)
 
             def line_fault(frame, event, _arg):
                 nonlocal injected
@@ -3814,7 +3821,7 @@ def test_failed_terminal_rewrite_cleans_both_temps_after_allocation_faults() -> 
             hit = False
             occurrences = Counter()
 
-            def sync(_fd):
+            def sync(_fd, _progress=None):
                 nonlocal syncs
                 syncs += 1
                 raise OSError(errno.EIO, "both terminal syncs failed")
@@ -3867,11 +3874,11 @@ def test_readback_allocation_after_second_sync_preserves_verified_receipt() -> N
         native_read = image_stream._PREAD
         native_sync = image_stream.sync_once
 
-        def sync(fd):
+        def sync(fd, progress=None):
             syncs.append(os.fstat(fd).st_ino)
             if len(syncs) == 1:
                 raise OSError(errno.EIO, "fixture first fsync")
-            native_sync(fd)
+            native_sync(fd, progress)
 
         def read(fd, destination, size, offset):
             nonlocal injected
@@ -3897,12 +3904,12 @@ def test_verified_replacement_survives_allocation_at_final_checkpoint() -> None:
         calls = 0
         checkpoints = 0
 
-        def sync_once(fd):
+        def sync_once(fd, progress=None):
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise OSError(errno.EIO, "fixture first sync")
-            sync(fd)
+            sync(fd, progress)
 
         def checkpoint(mask):
             nonlocal checkpoints
@@ -3937,12 +3944,12 @@ def test_verified_receipt_steps_survive_each_reached_allocation_site() -> None:
                                              methods.rename, methods._advance, Cancellation.check_commit,
                                              image_stream.ExclusiveFile.close)}
 
-            def sync(fd):
+            def sync(fd, progress=None):
                 nonlocal count
                 count += 1
                 if count == 1:
                     raise OSError(errno.EIO, "fixture first sync")
-                native_sync(fd)
+                native_sync(fd, progress)
 
             def trace(frame, event, _value):
                 nonlocal verified, injected
@@ -3991,7 +3998,7 @@ def test_diagnostic_allocation_keeps_first_writeback_failure() -> None:
             errors = iter((errno.EIO, errno.ENOSPC))
             failed_diagnostic = False
 
-            def sync_once(_fd):
+            def sync_once(_fd, _progress=None):
                 raise OSError(next(errors), "fixture required sync")
 
             def log_errors(_receipt):
@@ -4049,6 +4056,103 @@ def test_real_rename_survives_allocation_and_false_enoent() -> None:
         assert descriptor_snapshot() == before
 
 
+def test_interrupted_rename_failure_keeps_journal_and_failing_exit() -> None:
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        marker, journal = root / "exit.json", root / "active.json"
+        journal.touch()
+        before = descriptor_snapshot()
+        denied = OSError(errno.EIO, "fixture before rename")
+        injected = False
+        statuses = []
+        attempts = 0
+        replace = os.replace
+        source, start = inspect.getsourcelines(image_lifecycle.Receipt.rename)
+        failure_line = start + next(i for i, line in enumerate(source) if line.strip() == "self._rename_error = error")
+
+        def publish(source, target):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise denied
+            replace(source, target)
+
+        def trace(frame, event, _arg):
+            nonlocal injected
+            if frame.f_code is image_lifecycle.Receipt.rename.__code__:
+                if event == "line" and frame.f_lineno == failure_line and not injected:
+                    assert frame.f_locals["error"] is denied
+                    injected = True
+                    sys.settrace(None)
+                    raise MemoryError("fixture before rename failure recording")
+                return trace
+            return None
+
+        def main(cancellation):
+            cancellation.exit_receipt = marker
+            cancellation.safe_journal = journal, root
+            image_lifecycle.receipt(marker, {"launcher_exit": 0}, outcome=cancellation)
+            return 0
+
+        with patch.object(vm, "main", main), patch.object(os, "replace", publish), \
+                patch.object(os, "_exit", statuses.append):
+            sys.settrace(trace)
+            try:
+                vm.exit_launcher()
+            finally:
+                sys.settrace(None)
+        assert injected and attempts == 1 and statuses == [1]
+        assert list(root.iterdir()) == [journal]
+        assert descriptor_snapshot() == before
+
+
+def test_fresh_sync_return_fault_resumes_verification_without_third_sync() -> None:
+    import image_stream
+
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        marker = root / "exit.json"
+        cancellation = Cancellation()
+        before = descriptor_snapshot()
+        real_sync = image_stream.sync_once
+        synced = []
+
+        def sync(fd, progress=None):
+            synced.append(os.fstat(fd).st_ino)
+            if len(synced) == 1:
+                raise OSError(errno.EIO, "fixture first sync")
+            real_sync(fd, progress)
+            raise MemoryError("fixture after successful native sync")
+
+        with patch.object(image_stream, "sync_once", sync):
+            image_lifecycle.receipt(marker, {"launcher_exit": 0}, outcome=cancellation)
+        assert cancellation.exit_status == 0 and json.loads(marker.read_bytes())["launcher_exit"] == 0
+        assert len(synced) == len(set(synced)) == cancellation.exit_sync_calls == 2
+        assert list(root.iterdir()) == [marker] and descriptor_snapshot() == before
+
+
+def test_directory_close_is_retryable_before_native_release() -> None:
+    with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        marker = root / "exit.json"
+        cancellation = Cancellation()
+        before = descriptor_snapshot()
+        real_close = os.close
+        injected = False
+
+        def close(fd):
+            nonlocal injected
+            if not injected and os.readlink(f"/proc/self/fd/{fd}") == str(root):
+                injected = True
+                raise MemoryError("fixture before directory close")
+            real_close(fd)
+
+        with patch.object(os, "close", close):
+            image_lifecycle.receipt(marker, {"launcher_exit": 0}, outcome=cancellation)
+        assert injected and cancellation.exit_status == 0
+        assert descriptor_snapshot() == before
+
+
 def test_committed_cleanup_dispatch_fault_still_releases_directory() -> None:
     """A committed receipt still owns its directory descriptor during cleanup."""
     with fixture_signal_mask(), tempfile.TemporaryDirectory() as temporary:
@@ -4101,16 +4205,21 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
         marker = root / "exit.json"
+        journal = root / "active.json"
         baseline = descriptor_snapshot()
 
         def replay(schedule, *, rewrite):
             result = Cancellation()
+            result.exit_receipt = marker
+            result.safe_journal = journal, root
+            journal.touch()
             row = {"launcher_exit": rng.choice((0, 1)), "stop_reason": "fixture"}
             requested_faults = list(schedule)
             injected = []
             syncs = []
             commits = 0
             failure = None
+            statuses = []
 
             def fault(site, phase):
                 for index, (boundary, error) in enumerate(requested_faults):
@@ -4131,16 +4240,27 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
 
             def publish(source, target):
                 nonlocal commits
-                assert result.receipt_result.state == vm_process.COMMITTED
-                assert result.exit_status == row["launcher_exit"]
+                assert result.receipt_result.state == vm_process.RENAME
+                assert result.exit_status is None and result.receipt_result.exit_status == 1
                 native_replace(source, target)
+                assert os.stat(target).st_ino == syncs[-1]
                 commits += 1
 
-            def sync(fd):
+            def sync(fd, progress=None):
                 syncs.append(os.fstat(fd).st_ino)
                 if rewrite and len(syncs) == 1:
                     raise OSError(errno.EIO, "fixture first sync")
-                sync_once(fd)
+                sync_once(fd, progress)
+
+            def launch(cancellation):
+                nonlocal failure
+                assert cancellation is result
+                try:
+                    image_lifecycle.receipt(marker, row, outcome=result)
+                except image_lifecycle.ReceiptError as error:
+                    failure = error
+                    raise
+                return result.receipt_result.exit_status
 
             with fixture_signal_mask(), ExitStack() as patches:
                 for site in sites:
@@ -4148,13 +4268,14 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
                         patches.enter_context(patch.object(methods, site, wrap(site, getattr(methods, site))))
                 patches.enter_context(patch.object(os, "replace", wrap("replace", publish)))
                 patches.enter_context(patch("image_stream.sync_once", sync))
-                try:
-                    image_lifecycle.receipt(marker, row, outcome=result)
-                except image_lifecycle.ReceiptError as error:
-                    failure = error
+                patches.enter_context(patch.object(vm, "Cancellation", return_value=result))
+                patches.enter_context(patch.object(vm, "main", launch))
+                patches.enter_context(patch.object(os, "_exit", statuses.append))
+                vm.exit_launcher()
 
             assert len(syncs) <= 2 and len(syncs) == len(set(syncs)), (schedule, syncs)
             assert commits == int(marker.exists()), (schedule, commits)
+            assert statuses == [row["launcher_exit"] if commits else 1], (schedule, statuses, failure)
             assert descriptor_snapshot() == baseline, schedule
             if commits:
                 assert failure is None and result.exit_status == row["launcher_exit"]
@@ -4163,10 +4284,11 @@ def test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules() -
                 marker.unlink()
             else:
                 assert failure is not None and result.exit_status is None
-                assert result.receipt_result.exit_status == 1 and not list(root.iterdir()), schedule
+                assert result.receipt_result.exit_status == 1 and list(root.iterdir()) == [journal], schedule
                 assert result.receipt_result.first_failure_cause is failure.__cause__, schedule
                 if isinstance(failure.__cause__, OSError):
                     assert result.receipt_result.failure_errno == failure.__cause__.errno
+                journal.unlink()
             return len(injected)
 
         for boundary, error in product(boundaries, errors):
@@ -4423,10 +4545,12 @@ def test_pair_publication_failure_and_signal_matrix() -> None:
                         inject("temp-write")
                         return real_dump(*args, **kwargs)
 
-                    def sync(fd):
+                    def sync(fd, progress=None):
                         kind = "dir-sync" if pathlib.Path(f"/proc/self/fd/{fd}").is_dir() else "file-sync"
                         inject(kind)
-                        return real_fsync(fd)
+                        real_fsync(fd)
+                        if progress is not None:
+                            progress.sync_done = True
 
                     def replace_file(source, destination):
                         inject("rename")
@@ -5190,6 +5314,9 @@ if __name__ == "__main__":
                                  test_verified_replacement_survives_allocation_at_final_checkpoint,
                                  test_verified_receipt_steps_survive_each_reached_allocation_site,
                                   test_real_rename_survives_allocation_and_false_enoent,
+                                  test_interrupted_rename_failure_keeps_journal_and_failing_exit,
+                                  test_fresh_sync_return_fault_resumes_verification_without_third_sync,
+                                  test_directory_close_is_retryable_before_native_release,
                                   test_committed_cleanup_dispatch_fault_still_releases_directory,
                                   test_receipt_states_preserve_verdict_and_ownership_under_fault_schedules,
                                  test_diagnostic_allocation_keeps_first_writeback_failure,

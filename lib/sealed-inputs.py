@@ -35,6 +35,15 @@ CONTROL_ATTEMPTS = 3
 CONTROL_RETRY = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM, errno.ENOSYS))
 
 
+def retry_control(operation, *args):
+    for attempt in range(CONTROL_ATTEMPTS):
+        try:
+            return operation(*args)
+        except OSError as error:
+            if error.errno not in CONTROL_RETRY or attempt + 1 == CONTROL_ATTEMPTS:
+                raise
+
+
 class SealedError(Exception):
     """A sealed object or independent trust policy is missing or inconsistent."""
 
@@ -339,7 +348,7 @@ def serve(directory: Path, *, managed: bool = False) -> None:
                     events.register(server, selectors.EVENT_READ)
                     print("CERALIVE_SEALED_MIRROR_READY", flush=True)
                     while not missing:
-                        ready = events.select()
+                        ready = retry_control(events.select)
                         if not ready:
                             continue
                         if any(key.fileobj is server for key, _ in ready):
@@ -348,15 +357,7 @@ def serve(directory: Path, *, managed: bool = False) -> None:
                             if missing or handler_error or not request_complete or served != started:
                                 raise SealedError("sealed mirror request did not complete")
                         else:
-                            for attempt in range(CONTROL_ATTEMPTS):
-                                try:
-                                    stop_byte = os.read(control, 1)
-                                except OSError as error:
-                                    if error.errno not in CONTROL_RETRY or attempt + 1 == CONTROL_ATTEMPTS:
-                                        raise
-                                else:
-                                    break
-                            if stop_byte != b"S":
+                            if retry_control(os.read, control, 1) != b"S":
                                 raise SealedError("invalid mirror shutdown request")
                             break
             else:

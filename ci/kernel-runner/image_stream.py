@@ -206,34 +206,38 @@ class FileSyncError(OSError):
     """The file may have lost data and cannot be synced again as recovery."""
 
 
-def sync_once(fd: int) -> None:
+def sync_once(fd: int, progress=None) -> None:
     """Expose even EINTR so a regular file is never synced twice."""
     if _FSYNC(fd) == -1:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
+    if progress is not None:
+        progress.sync_done = True
 
 
 def sync_file(fd: int, *, directory: bool = False, recover: bool = True,
-              terminal_budget=None) -> None:
+              terminal_budget=None, progress=None) -> None:
     """Sync data or report unsupported durability."""
     try:
         if directory:
             retry_io(os.fsync, fd, recover=recover, no_retry=UNSUPPORTED_SYNC)
         elif terminal_budget is not None:
             # Reserve the call at the sync boundary so a late exception cannot refund it.
-            terminal_budget.exit_sync_calls += 1; sync_once(fd)
+            terminal_budget.exit_sync_calls += 1; sync_once(fd, progress)
         else:
             try:
-                sync_once(fd)
+                sync_once(fd) if progress is None else sync_once(fd, progress)
             except OSError as error:
                 if error.errno != errno.EINTR:
                     raise
-                sync_once(fd)
+                sync_once(fd) if progress is None else sync_once(fd, progress)
     except OSError as error:
         if error.errno not in UNSUPPORTED_SYNC:
             if directory:
                 raise
             raise FileSyncError(error.errno, "fsync failed") from error
+        if progress is not None:
+            progress.sync_done = True
         report_error("durability=unsupported")
 
 

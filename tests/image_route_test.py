@@ -799,18 +799,31 @@ class Listener:
 objects = [{'urls': [url], 'sha256': digest}] if hit else []
 serve.__globals__.update(HTTPServer=Listener, inventory=lambda _: {'objects': objects},
                          mirror_validities=lambda _: [])
-if mode.startswith('control-read-'):
+if mode.startswith(('control-read-', 'control-select-')):
     import errno
     read = os.read
     injected = False
-    def read_stop(fd, size):
+    def fail_once():
         global injected
-        if fd == 0 and not injected:
+        if not injected:
             injected = True
             (work / 'stop-errno').touch()
-            raise OSError(getattr(errno, mode.removeprefix('control-read-')), 'fixture stop pipe read')
+            raise OSError(getattr(errno, mode.rsplit('-', 1)[-1]), 'fixture stop control')
+    def read_stop(fd, size):
+        if fd == 0:
+            fail_once()
         return read(fd, size)
-    os.read = read_stop
+    if mode.startswith('control-read-'):
+        os.read = read_stop
+    else:
+        import selectors
+        class FaultySelector(selectors.DefaultSelector):
+            def select(self, timeout=None):
+                ready = super().select(timeout)
+                if any(key.fd == 0 for key, _ in ready):
+                    fail_once()
+                return ready
+        selectors.DefaultSelector = FaultySelector
 serve(work, managed=True)
 """
     with tempfile.TemporaryDirectory() as tmp:
@@ -827,7 +840,7 @@ serve(work, managed=True)
                                       stderr=subprocess.DEVNULL, pass_fds=(read_end, write_end)) as mirror:
                     try:
                         with image_guest.ready_mirror(mirror):
-                            if mode != "healthy" and not mode.startswith("control-read-"):
+                            if mode != "healthy" and not mode.startswith("control-"):
                                 os.write(write_end, b"R")
                     except (StreamError, BrokenPipeError):
                         assert not expected, (mode, fault)
@@ -843,11 +856,12 @@ serve(work, managed=True)
 
         for mode in ("healthy", "miss", "marker-error", "foreign", "unclassified", "short-object", "short-send"):
             replay(mode, mode == "healthy")
-        for error in ("EINTR", "EAGAIN", "EIO", "EPERM", "ENOSYS"):
-            observed = marker.with_name("stop-errno")
-            observed.unlink(missing_ok=True)
-            replay(f"control-read-{error}", True)
-            assert observed.exists(), error
+        for operation in ("read", "select"):
+            for error in ("EINTR", "EAGAIN", "EIO", "EPERM", "ENOSYS"):
+                observed = marker.with_name("stop-errno")
+                observed.unlink(missing_ok=True)
+                replay(f"control-{operation}-{error}", True)
+                assert observed.exists(), (operation, error)
         for mode in ("hit", "miss"):
             baseline = set(replay(mode, mode == "hit"))
             assert baseline

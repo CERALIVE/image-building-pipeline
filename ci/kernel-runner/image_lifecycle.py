@@ -43,6 +43,7 @@ UNAVAILABLE_DIAGNOSTICS = {
 }
 RECEIPT_RETRY = RETRYABLE_IO | frozenset((errno.EINTR,))
 RENAME_RETRY = RECEIPT_RETRY | frozenset((errno.ENOENT,))
+RECEIPT_EXCEPTION_LIMIT = 16
 
 
 def encode_diagnostic_fields(fields: dict) -> bytes:
@@ -127,6 +128,8 @@ class Receipt:
         self.directory_fd: int | None = None
         self.result = outcome.receipt_result if outcome is not None else ReceiptResult()
         self.result.state = WRITE
+        self.result.candidate_status = self.status
+        self.result.sync_done = False
         self.failure: BaseException | None = None
         self.failure_error = ReceiptError("receipt publication failed")
         self.cleanup_error = ReceiptError("receipt temporary cleanup could not be verified")
@@ -136,6 +139,7 @@ class Receipt:
         self._closed = False
         self._masked = False
         self._rename_error: BaseException | None = None
+        self._rename_pending = False
         self._rename_attempts = 0
         self._checkpoint = outcome.check_commit if outcome is not None and row.get("stop_reason") != "cancelled" else None
         self.diagnostic = diagnostic
@@ -195,10 +199,12 @@ class Receipt:
 
     def file_sync(self) -> None:
         assert self.file_fd is not None and self.file_fd >= 0
-        if self.outcome is not None and self.outcome.exit_sync_calls >= 2:
-            raise ReceiptError("terminal receipt sync budget exhausted")
-        self._candidate_inode = retry_io(os.fstat, self.file_fd, recover=True)
-        sync_file(self.file_fd, terminal_budget=self.outcome); self.result.state = VERIFY
+        if not self.result.sync_done:
+            if self.outcome is not None and self.outcome.exit_sync_calls >= 2:
+                raise ReceiptError("terminal receipt sync budget exhausted")
+            self._candidate_inode = retry_io(os.fstat, self.file_fd, recover=True)
+            sync_file(self.file_fd, terminal_budget=self.outcome, progress=self.result)
+        self.result.state = VERIFY
 
     def _fresh_rewrite(self) -> None:
         # Keep the failed inode linked until the replacement has its own name.
@@ -208,6 +214,7 @@ class Receipt:
         self.primary.discard()
         self.output = self.replacement
         self._rewritten = True
+        self.result.sync_done = False
         self.result.state = SYNC
 
     def file_close(self) -> None:
@@ -229,6 +236,9 @@ class Receipt:
             finally:
                 if self.replacement is not None:
                     self.replacement.discard()
+
+    def _has_temporary(self) -> bool:
+        return self.primary.fd is not None or (self.replacement is not None and self.replacement.fd is not None)
 
     def mask_block(self) -> None:
         if self.outcome is not None:
@@ -261,31 +271,31 @@ class Receipt:
         if self.file_fd != -1 or self.verified_inode is None:
             raise ReceiptError("receipt is not verified and closed")
         while True:
-            if self._rename_error is not None:
+            if self._rename_pending:
                 error = self._rename_error
                 owner = self._resolve_rename()
                 if owner is True:
-                    self.result.exit_status = self.status
                     self.result.state = COMMITTED
                     return
-                if owner is not False or self._rename_attempts == IO_ATTEMPTS or not (
+                if owner is not False or self._rename_attempts >= IO_ATTEMPTS or not (
                         isinstance(error, MemoryError)
                         or isinstance(error, OSError) and error.errno in RENAME_RETRY):
+                    if error is None:
+                        raise self.failure_error
                     raise error
+                self._rename_pending = False
                 self._rename_error = None
             if self._checkpoint is not None:
                 retry_io(self._checkpoint, recover=True)
             source = self.temporary
             self._rename_attempts += 1
             try:
-                # The syscall is the only fallible operation after arming the result.
-                self.result.exit_status = self.status
-                self.result.state = COMMITTED; os.replace(source, self.path)
+                self._rename_pending = True; os.replace(source, self.path)
             except BaseException as error:
                 # The attempted syscall may have consumed the temporary before raising.
                 self._rename_error = error
-                self.result.exit_status = 1; self.result.state = RENAME
             else:
+                self.result.state = COMMITTED
                 return
 
     def dir_open(self) -> None:
@@ -297,17 +307,19 @@ class Receipt:
             sync_file(self.directory_fd, directory=True, recover=self.outcome is None)
 
     def dir_close(self) -> None:
-        if self.directory_fd is not None:
+        fd = self.directory_fd
+        if fd is not None:
             try:
-                os.close(self.directory_fd)
+                os.close(fd)
             except OSError as error:
                 report_error(error)
-            finally:
-                self.directory_fd = None
+            self.directory_fd = None
 
     def log_errors(self) -> None:
         if self.diagnostic is not None:
             report_error(self.diagnostic)
+        if self.failure is not None:
+            report_error(self.failure)
         if self.result.diagnostic is not None:
             report_error(self.result.diagnostic)
 
@@ -360,8 +372,7 @@ class Receipt:
             try:
                 if self.directory_fd is not None:
                     self.dir_close()
-                if not self.renamed and (self.primary.fd is not None
-                        or self.replacement is not None and self.replacement.fd is not None):
+                if not self.renamed and self._has_temporary():
                     self.temp_cleanup()
             except BaseException as error:
                 self._note_cleanup(error)
@@ -378,19 +389,23 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
         return
     transaction = Receipt(path, row, outcome, diagnostic, probe, temporary)
     result = transaction.result
-    resume = 0
+    exceptions = 0
     try:
-        while True:
+        while result.state != COMMITTED:
             try:
                 transaction._advance()
             except BaseException as error:
+                exceptions += 1
                 state = result.state
                 if state == COMMITTED:
                     result.diagnostic = error
                     break
-                if (isinstance(error, MemoryError) and state in (VERIFY, RENAME)
-                        and resume < IO_ATTEMPTS - 1):
-                    resume += 1
+                retryable = isinstance(error, MemoryError) or (
+                    isinstance(error, OSError) and error.errno in RENAME_RETRY)
+                if (retryable and exceptions < RECEIPT_EXCEPTION_LIMIT
+                        and (state == RENAME and (isinstance(error, MemoryError) or transaction._masked)
+                             or state == SYNC and result.sync_done
+                             or state == VERIFY and isinstance(error, MemoryError))):
                     continue
                 if (isinstance(error, OSError) and state in (SYNC, VERIFY) and not transaction._rewritten
                         and error.errno in RECEIPT_RETRY
@@ -400,18 +415,26 @@ def receipt(path: Path, row: dict, *, outcome: Cancellation | None = None,
                     continue
                 if state == RENAME and transaction.file_fd == -1:
                     transaction._closed = True
-                result.exit_status = 1
                 transaction._record_failure(error)
-            break
+                break
     finally:
         try:
             transaction._finish()
         except BaseException as error:
             transaction._note_cleanup(error)
+        finally:
+            # The dispatcher itself can stop with an owned descriptor.
+            for _ in range(IO_ATTEMPTS):
+                if transaction.directory_fd is None and (transaction.renamed or not transaction._has_temporary()):
+                    break
+                try:
+                    transaction.dir_close()
+                    transaction.temp_cleanup()
+                except (OSError, MemoryError) as error:
+                    transaction._note_cleanup(error)
     failure = transaction.failure
     if failure is not None and (outcome is None or not transaction.renamed):
-        if not transaction.renamed and (transaction.primary.fd is not None or (
-                transaction.replacement is not None and transaction.replacement.fd is not None)):
+        if not transaction.renamed and transaction._has_temporary():
             raise transaction.cleanup_error from failure
         if isinstance(failure, Cancelled):
             raise failure

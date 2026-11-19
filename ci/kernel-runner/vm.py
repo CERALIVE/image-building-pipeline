@@ -327,8 +327,8 @@ def exit_launcher() -> None:
                 committed = cancellation.exit_status
                 result = cancellation.receipt_result
                 try:
-                    retire_journal(cancellation)
                     if committed is not None:
+                        retire_journal(cancellation)
                         verify_exit_receipt(cancellation.exit_receipt, committed)
                 except BaseException as exc:
                     if result.diagnostic is None:
