@@ -27,7 +27,7 @@
 #                 rules file shadowed by an image-owned /etc basename, and exactly
 #                 one owner for every modem-support file present
 #
-# Reads the rootfs without a chroot; uses host dpkg only for version comparison.
+# Reads the rootfs without a chroot; uses host dpkg for version validation and comparison.
 # Exit 0 only when there are zero hard FAILs.
 #
 # shellcheck shell=bash
@@ -137,15 +137,32 @@ main() {
   # a held package is MORE certainly installed than an ordinary one, not less.
   local installed_records installed
   installed_records="$(awk '
-    /^Package: / { pkg=$2 }
-    /^Status: / { eflag=$3; state=$4 }
-    /^Version: / { version=$2 }
-    function emit_installed() {
-      if (eflag == "ok" && state == "installed" && pkg != "") print pkg "\t" version
+    /^[^ \t]/ { single_line=0 }
+    /^Package:/ {
+      if (++package_fields != 1 || $0 != "Package: " $2) malformed=1
+      pkg=$2; single_line=1
     }
-    /^$/ { emit_installed(); pkg=""; eflag=""; state=""; version="" }
+    /^Status:/ {
+      if (++status_fields != 1 || $0 != "Status: " $2 " " $3 " " $4 ||
+          $2 !~ /^(unknown|install|hold|deinstall|purge)$/) malformed=1
+      eflag=$3; state=$4; single_line=1
+    }
+    /^Version:/ {
+      if (++version_fields != 1 || $0 !~ /^Version: / || index($0, sprintf("%c", 0))) malformed=1
+      version=substr($0, 10); single_line=1
+    }
+    /^[ \t]/ && single_line { malformed=1 }
+    function emit_installed() {
+      if (eflag == "ok" && state == "installed" && pkg != "")
+        print pkg "\t" (malformed ? "!" : version)
+    }
+    /^$/ {
+      emit_installed()
+      pkg=""; eflag=""; state=""; version=""
+      package_fields=status_fields=version_fields=malformed=single_line=0
+    }
     END { emit_installed() }
-  ' "${status_file}" | sort -u)"
+  ' "${status_file}")"
   installed=" $(cut -f1 <<<"${installed_records}" | sort -u | tr '\n' ' ') "
   local n_installed
   n_installed="$(echo "${installed}" | wc -w)"
@@ -188,13 +205,19 @@ main() {
   fi
 
   # First Debian trixie-security revision with the nginx2root fix.
-  local nginx_floor=1.26.3-3+deb13u11 version
+  local nginx_floor=1.26.3-3+deb13u11 version diagnostic
   for p in nginx nginx-common nginx-light; do
-    version="$(awk -F '\t' -v pkg="${p}" '$1 == pkg { print $2 }' <<<"${installed_records}")"
+    version="$(awk -F '\t' -v pkg="${p}" '
+      $1 == pkg { version=substr($0, length(pkg) + 2); count++ }
+      END { if (count) print (count == 1 ? version : "!") }
+    ' <<<"${installed_records}")"
     if [[ -z "${version}" ]]; then
       fail "nginx security floor: ${p} has no installed version (requires >= ${nginx_floor})"
-    elif ! dpkg --compare-versions "${version}" ge "${nginx_floor}"; then
-      fail "nginx security floor: ${p} ${version} does not meet minimum ${nginx_floor}"
+    # dpkg trims boundary whitespace even in --validate-version.
+    elif [[ "${version}" == *[[:space:]]* ]] || ! dpkg --validate-version "${version}" >/dev/null 2>&1; then
+      fail "nginx security floor: ${p} has a malformed installed version or status record"
+    elif ! diagnostic="$(dpkg --compare-versions "${version}" ge "${nginx_floor}" 2>&1)" || [[ -n "${diagnostic}" ]]; then
+      fail "nginx security floor: ${p} ${version} could not be verified at >= ${nginx_floor}${diagnostic:+: ${diagnostic}}"
     fi
   done
 
