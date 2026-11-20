@@ -260,11 +260,25 @@ def failure_record(path: Path, identity: Identity) -> dict:
     except Exception:
         # The parser's diagnostics may include receipt data.
         raise StreamError("returned artifact set is incomplete") from None
-    base = {"schema": 1, "identity": asdict(identity), "failure": "StreamError", "exit": None}
+    if type(row) is not dict:
+        raise StreamError("invalid guest failure diagnostics")
+    kind, status = row.get("failure"), row.get("exit")
+    if kind == "CalledProcessError":
+        # A normally exited Linux child reports a nonzero 8-bit status, not a signal.
+        if type(status) is not int or not 1 <= status <= 255:
+            raise StreamError("invalid guest failure diagnostics")
+    elif status is not None or kind not in (
+            "StreamError", "TimeoutExpired", "OSError", "BlockingIOError", "BrokenPipeError",
+            "ChildProcessError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError",
+            "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError",
+            "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError",
+            "ValueError", "JSONDecodeError", "UnicodeDecodeError", "UnicodeEncodeError", "KeyError"):
+        raise StreamError("invalid guest failure diagnostics")
+    base = {"schema": 1, "identity": asdict(identity), "failure": kind, "exit": status}
     if exact_json(row, base):
         return base
     fields = {"failure_code", "expected_config_digest", "observed_config_digest"}
-    if (type(row) is not dict or set(row) != set(base) | fields
+    if (kind not in ("StreamError", "CalledProcessError") or set(row) != set(base) | fields
             or not exact_json({key: row[key] for key in base}, base)):
         raise StreamError("invalid guest failure diagnostics")
     code, expected, observed = (row[key] for key in
@@ -324,6 +338,10 @@ def validate_return(job: ImageJob, verifier: bool, guest_exit: RuntimeError | No
         create_directory(target)
         receipt(target / "failure.json", failure)
         code = failure.get("failure_code")
+        if failure["failure"] == "CalledProcessError":
+            raise StreamError(f"guest build command failed (exit {failure['exit']})")
+        if failure["failure"] == "TimeoutExpired":
+            raise StreamError("guest command timed out")
         raise StreamError(f"guest builder check failed: {code}" if code else "guest reported a failure")
     if not verifier:
         stages = measurement_stages(returned_json(target / "measurement.json"), job.identity,
