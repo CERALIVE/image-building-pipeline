@@ -27,7 +27,7 @@ runtime_build_apt_signature_diagnostics() {
   umask
   stat -Lc 'keyring: %a %u:%g %s %n' /usr/share/keyrings/debian-archive-keyring.gpg
   stat -c 'sqv: %a %u:%g %s %n' /usr/bin/sqv
-  stat -c 'build-only source: %a %u:%g %s %n' "${CERALIVE_BUILD_APT_DIR}/sources/debian.sources"
+  stat -c 'build-only source: %a %u:%g %s %n' "${CERALIVE_BUILD_APT_DIR}/sources/"*
   stat -Lc 'executable ancestor: %a %u:%g %n' / /usr /usr/bin /lib /usr/lib /usr/lib/aarch64-linux-gnu
   if stat -Lc 'apt lists: %a %u:%g %n' /var/lib/apt /var/lib/apt/lists /var/lib/apt/lists/partial; then
     :
@@ -95,17 +95,28 @@ runtime_build_apt_signature_diagnostics() {
 runtime_build_apt_scope() {
   local proxy="${CERALIVE_BUILD_APT_PROXY:-}"
   local shipped="${CERALIVE_BUILD_APT_SHIPPED_SOURCES:-/etc/apt/sources.list.d/debian.sources}"
+  if [[ "${CERALIVE_SEALED_APT:-0}" == 1 && "${proxy}" != http://127.0.0.1:3142 ]]; then
+    log "FATAL: sealed runtime APT requires the guest-local mirror"; return 1
+  fi
   [[ -n "${proxy}" && -z "${CERALIVE_BUILD_APT_DIR:-}" ]] || return 0
   [[ "${proxy}" =~ ^http://[a-zA-Z0-9.:-]+(:[0-9]+)?$ ]] || {
     log "FATAL: invalid build-only APT cache URL"; return 1;
   }
-  CERALIVE_BUILD_APT_DIR="$(mktemp -d /tmp/ceralive-build-apt.XXXXXX)"
+  CERALIVE_BUILD_APT_DIR="$(mktemp -d /tmp/ceralive-build-apt.XXXXXX)" || return 1
   trap runtime_build_apt_cleanup EXIT
-  mkdir -p "${CERALIVE_BUILD_APT_DIR}/sources"
-  sed "s|https://deb.debian.org/|${proxy}/HTTPS///deb.debian.org/|g" \
-    "${shipped}" >"${CERALIVE_BUILD_APT_DIR}/sources/debian.sources"
+  mkdir -p "${CERALIVE_BUILD_APT_DIR}/sources" || return 1
   printf 'Dir::Etc::sourcelist "/dev/null";\nDir::Etc::sourceparts "%s";\n' \
-    "${CERALIVE_BUILD_APT_DIR}/sources" >"${CERALIVE_BUILD_APT_DIR}/apt.conf"
+    "${CERALIVE_BUILD_APT_DIR}/sources" >"${CERALIVE_BUILD_APT_DIR}/apt.conf" || return 1
+  if [[ "${CERALIVE_SEALED_APT:-0}" == 1 ]]; then
+    # shellcheck source=mkosi/runtime/sealed-apt-policy.sh
+    source "$(dirname -- "${BASH_SOURCE[0]}")/sealed-apt-policy.sh" || return 1
+    sealed_apt_sources "${proxy}/HTTPS///deb.debian.org" \
+      >"${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list" || return 1
+    sealed_apt_config >>"${CERALIVE_BUILD_APT_DIR}/apt.conf" || return 1
+  else
+    sed "s|https://deb.debian.org/|${proxy}/HTTPS///deb.debian.org/|g" \
+      "${shipped}" >"${CERALIVE_BUILD_APT_DIR}/sources/debian.sources" || return 1
+  fi
   export APT_CONFIG="${CERALIVE_BUILD_APT_DIR}/apt.conf"
   log "runtime Debian downloads use build-only HTTPS/// cache remap (${proxy}); shipped debian.sources unchanged"
 }
