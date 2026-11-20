@@ -470,7 +470,7 @@ zero new hawkBit code:
 
 ## 9. Verifying the contract (consumable check)
 
-hawkBit need not be running to validate the *shape*; when it is (task 40 `docker-compose up`),
+hawkBit need not be running to validate the *shape*; once provisioned on its dedicated server,
 these exercise every documented endpoint. `$U` = `$HAWKBIT_ADMIN_USER:<plaintext>`,
 `$H` = `http://127.0.0.1:8080`.
 

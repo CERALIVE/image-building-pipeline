@@ -140,6 +140,9 @@ if args[:1] == ['info']:
 elif args[:2] == ['image', 'inspect']:
     print('sha256:fixture')
 elif args[:1] == ['run']:
+    assert args[1:3] == ['--cpus=4', '--memory=16g'], args
+    assert os.readlink('/proc/self/fd/0') == '/dev/null'
+    assert os.getsid(0) == os.getpid()
     if 'dpkg-query' in args:
         print('gcc-aarch64-linux-gnu=14.2 arm64')
     elif 'aarch64-linux-gnu-gcc' in args:

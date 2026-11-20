@@ -59,11 +59,14 @@ speaks DDI v1.
 cd image-building-pipeline/fleet/hawkbit
 cp hawkbit.env.example .env
 $EDITOR .env            # set DB + admin creds + R2_BUNDLE_BASE_URL (see "Auth" below)
-docker-compose up -d
-docker-compose ps       # postgres healthy, then hawkbit healthy (~60–90s cold start)
 ```
 
-Compose **fails closed**: every required secret uses `${VAR:?...}`, so `up` aborts with a
+Have the fleet operator deploy `fleet/hawkbit/docker-compose.yml` on the
+dedicated server using its provisioning process. Do not launch this deployment
+from a pipeline workstation. Check PostgreSQL health first, then hawkBit
+(typically 60–90 seconds after a cold start).
+
+Compose **fails closed**: every required secret uses `${VAR:?...}`, so startup aborts with a
 clear error if `HAWKBIT_DB_PASSWORD`, `HAWKBIT_ADMIN_PASSWORD`, `R2_BUNDLE_BASE_URL`, etc.
 are unset. There is no path to a blank/default boot.
 

@@ -147,7 +147,7 @@ ensure_kernel_builder_image() {
   assert_container_daemon_supported "${runtime}"
   [[ -f "${KERNEL_BUILDER_DOCKERFILE}" ]] \
     || die "kernel builder Dockerfile missing: ${KERNEL_BUILDER_DOCKERFILE}"
-  if container_engine "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then
+  if "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then
     log_info "kernel builder image ${tag} present"
     return 0
   fi

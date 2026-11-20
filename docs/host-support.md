@@ -224,9 +224,9 @@ per checkout.
 
 ## Persistent Debian APT cache on build hosts
 
-Install Docker Compose on a Linux build runner, then run `./dev-cache up` from
-this checkout (or `docker compose -f ci/apt-cache/compose.yml up -d --wait` in
-runner provisioning). The image is pinned by OCI digest and stores downloaded
+Install the Compose plugin on an authorized Linux build runner, then run
+`DOCKER_CONTEXT=default ./dev-cache up` from this checkout. It uses the guarded
+system socket during runner provisioning as well. The image is pinned by OCI digest and stores downloaded
 packages in the `apt-cache` named volume; `./dev-cache down` stops the service
 without deleting the volume. `./dev-cache status` reports the listener and report
 page. On an always-on runner the Compose service's `restart: unless-stopped`

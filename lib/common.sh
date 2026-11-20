@@ -187,6 +187,9 @@ container_engine() {
 
 assert_container_daemon_supported() {
   local runtime="${1:?assert_container_daemon_supported needs a runtime}" daemon_os
+  if [[ "${runtime}" == "podman" ]]; then
+    podman() { container_engine podman "$@"; }
+  fi
   [[ "${runtime}" == "docker" ]] || return 0
 
   daemon_os="$(container_engine "${runtime}" info --format '{{.OperatingSystem}}')" \
@@ -195,6 +198,17 @@ assert_container_daemon_supported() {
   if [[ "${daemon_os}" == *"Docker Desktop"* ]]; then
     die "containerized build refuses the Docker Desktop daemon (OperatingSystem='${daemon_os}'). Its bind mount is a VM share: root in the container cannot unlink host-root-owned files (mkosi's cache invalidation dies in 'rm: cannot remove …: Permission denied'), and it supports no POSIX ACLs/xattrs (mkosi's 'tar --acls --xattrs' dies in 'acl_set_file_at: Operation not supported'). Select a native Linux daemon — e.g. DOCKER_CONTEXT=default with unix:///var/run/docker.sock — and re-run."
   fi
+
+  # The immutable kernel recipe invokes the selected runtime by name, including
+  # in its EXIT trap. Bind that name only in the admitted builder's shell.
+  docker() {
+    if [[ "${1:-}" == "run" ]]; then
+      shift
+      container_engine docker run --cpus=4 --memory=16g "$@"
+    else
+      container_engine docker "$@"
+    fi
+  }
 
   log_info "container daemon: ${daemon_os} (native bind mounts — real uids, ACLs and xattrs)"
   return 0

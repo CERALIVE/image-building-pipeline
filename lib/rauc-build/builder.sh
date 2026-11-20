@@ -60,7 +60,7 @@ ensure_rauc_builder_image() {
   assert_container_daemon_supported "${runtime}"
   [[ -f "${RAUC_BUILDER_DOCKERFILE}" ]] \
     || die "rauc builder Dockerfile missing: ${RAUC_BUILDER_DOCKERFILE}"
-  if container_engine "${runtime}" image inspect "${tag}" >/dev/null; then
+  if "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then
     log_info "rauc builder image ${tag} present"
     return 0
   fi

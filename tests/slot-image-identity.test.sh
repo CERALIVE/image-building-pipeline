@@ -35,7 +35,11 @@ for tool in mkfs.ext4 tune2fs dumpe2fs e2fsck debugfs python3 sha256sum; do
   command -v "${tool}" >/dev/null 2>&1 || { bad "missing required command: ${tool}"; exit 1; }
 done
 
-require_cmd() { command -v "$1" >/dev/null 2>&1 || { printf 'missing required command: %s\n' "$1" >&2; return 1; }; }
+# shellcheck source=lib/common.sh
+source "${repo}/lib/common.sh"
+# Keep the fixture's collecting assertion profile.
+set +e
+trap - ERR
 # shellcheck source=lib/disk/slot-image.sh
 source "${SLOT_IMAGE}"
 

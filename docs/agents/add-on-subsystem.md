@@ -456,12 +456,9 @@ build already found ~48 MB of its closure present from the mkosi builder's run.
   that path IS the cache, so the cleanup deletes the index it exists to leave
   behind. The size argument does not survive either — a cache-mounted directory
   contributes nothing to the image layer at all.
-- **`docker build --no-cache` is NOT how to test this.** It resets cache mounts
-  along with the layer cache, so the second build re-downloads everything and the
-  cache looks broken. That is what the first measurement of this change reported
-  before the confound was isolated. Prune only the layer cache —
-  `docker builder prune -af --filter=type=regular` — and the layer re-executes
-  against a warm mount.
+- **Measure on an authorized disposable builder.** Invalidate only the layer
+  cache, not the cache mounts, so the apt layer re-executes against a warm mount.
+  Workstations use prebuilt images under the [system engine policy](../host-support.md#local-container-engine).
 
 **`RUN --mount` and BuildKit are ONE change, not two.** The legacy `docker build`
 builder does not ignore an unknown `--mount` flag, it refuses to PARSE the

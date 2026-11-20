@@ -1009,11 +1009,9 @@ through: it sets `DOCKER_BUILDKIT=1` for docker, needs no switch for podman, and
 refuses a runtime below the floor where cache mounts exist (docker 23, podman 4)
 with a message naming the real cause.
 
-> **Measuring this yourself:** `docker build --no-cache` is the wrong tool. It
-> resets the cache mounts as well as the layer cache, so the second build looks
-> exactly like the first and the cache appears not to work. Prune only the layer
-> cache — `docker builder prune -af --filter=type=regular` — and the apt layer
-> re-executes against a warm mount.
+> **Measuring cache reuse:** On a disposable authorized builder, invalidate only
+> the layer cache, not the cache mounts, so the apt layer re-executes against a
+> warm mount. For workstation use, see the [system engine policy](docs/host-support.md#local-container-engine).
 
 ### Persistent kernel-source mirror
 

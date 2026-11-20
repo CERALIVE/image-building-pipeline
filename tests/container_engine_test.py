@@ -2,9 +2,11 @@
 
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 import pty
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,101 @@ SOCKET = "unix:///var/run/docker.sock"
 SESSION = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
            "DBUS_SESSION_BUS_ADDRESS", "SSH_TTY")
 CAPS = ("--cpus", "2", "--memory=1g")
+ENGINES = {"docker", "podman", "docker-compose", "podman-compose", "podman-docker", "nerdctl", "buildx"}
+VERBS = {"run", "exec", "create", "start", "build", "buildx", "compose", "up", "down", "restart",
+         "pull", "push", "load", "save", "image", "container", "info", "ps", "inspect", "logs",
+         "cp", "export", "rm", "stop", "attach", "system", "context", "builder"}
+ENGINE_VAR = re.compile(r"\$(?:\{)?(?:[A-Z_]*(?:docker|podman|nerdctl)[A-Z_]*|"
+                        r"runtime|build_mode|container_engine)(?::[-+][^}]+)?\}?", re.I)
+GLOBAL_VALUE = {"-H", "--host", "--context", "--config", "-l", "--log-level", "--namespace",
+                "-n", "--address", "-a", "-f", "--file", "-p", "--project-name",
+                "--project-directory", "--env-file"}
+ENGINE_TEXT = r"(?:docker(?:-compose)?|podman(?:-compose|-docker)?|nerdctl|buildx)"
+INLINE_ENGINE = re.compile(
+    rf"""(?:^|[\s"'`/(]){ENGINE_TEXT}["']?\s+(?:--?\S+\s+)*(?:{'|'.join(sorted(VERBS))})\b"""
+)
+PYTHON_ENGINE = re.compile(
+    rf"""\[\s*['"](?:/[\w./-]+/)?{ENGINE_TEXT}['"]\s*,\s*['"](?:{'|'.join(sorted(VERBS))})['"]"""
+)
+
+
+def raw_engine(line: str) -> bool:
+    """Recognize ordinary shell dispatch without running or expanding shell input."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars="();|&<>`")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        # A multiline quoted payload may start after a valid wrapper invocation.
+        prefix = re.sub(r'\b(?:[^\s"\']*/)?container-engine\.py\s+["\']?docker["\']?\b',
+                        "guarded_engine", line)
+        return bool(INLINE_ENGINE.search(prefix))
+    for index, token in enumerate(tokens):
+        if " " in token:
+            # Quoted command bodies (e.g. EXIT traps or a shell -c operand).
+            if (index and tokens[index - 1] in {"trap", "-c", "command:"}) or "$(" in token:
+                if raw_engine(token):
+                    return True
+            continue
+        if token.startswith('"') and token.endswith('",'):
+            if raw_engine(token[1:-2]):
+                return True
+            continue
+        fallback = re.fullmatch(r"\$\{\w+:-([^}]+)\}", token)
+        executable = fallback[1] if fallback else token
+        if executable.rsplit("/", 1)[-1] not in ENGINES and not ENGINE_VAR.fullmatch(token):
+            continue
+        if index and tokens[index - 1].rsplit("/", 1)[-1] in {"container-engine.py", "container_engine"}:
+            continue
+        j = index + 1
+        while j < len(tokens) and tokens[j].startswith("-") and tokens[j] != "--":
+            flag = tokens[j]
+            j += 2 if flag in GLOBAL_VALUE else 1
+        if tokens[j:j + 1] == ["--"]:
+            j += 1
+        if j < len(tokens) and tokens[j] in VERBS:
+            return True
+    return False
+
+
+def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
+    """Yield suspicious instructions from source and copyable examples."""
+    fenced = False
+    recipe = path.name.casefold() in {"makefile", "gnumakefile", "justfile"} or path.suffix == ".mk"
+    shell = path.suffix in {".sh", ".bash", ".bats"} or recipe or text.startswith(
+        ("#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env sh", "#!/usr/bin/env bash")
+    )
+    markup = path.suffix in {".md", ".yml", ".yaml"} or recipe or path.name == "package.json"
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if index and lines[index - 1].endswith("\\"):
+            continue
+        stripped = line.strip()
+        if path.suffix == ".md":
+            if stripped.startswith(("```", "~~~")):
+                fenced = not fenced
+                continue
+            if not fenced:
+                continue
+        payload = stripped.removeprefix("#").strip()
+        if recipe:
+            payload = payload.lstrip("@-+")
+        if stripped.startswith("#") and not re.match(
+            rf"(?:(?:sudo|env|command|exec|xargs)\s+|[^\s]*?/)*{ENGINE_TEXT}\b", payload
+        ):
+            continue  # Explanatory comments are not command examples.
+        end = index
+        while lines[end].endswith("\\") and end + 1 < len(lines):
+            end += 1
+            payload = payload.removesuffix("\\") + lines[end].strip()
+        if path.suffix == ".py":
+            suspect = not stripped.startswith("#") and bool(PYTHON_ENGINE.search(line))
+        else:
+            suspect = raw_engine(payload) if shell or markup or stripped.startswith("#") else False
+            if markup and not suspect and not ("container-engine.py" in payload or "container_engine " in payload):
+                suspect = bool(INLINE_ENGINE.search(payload))
+        if suspect:
+            yield index + 1, line
 
 
 class ContainerEngineTest(TestCase):
@@ -41,6 +138,7 @@ elif args[2:4] == ['container', 'inspect']:
                                            Privileged=False, PidMode='', IpcMode='private', Devices=[]))]))
 """)
         fake.chmod(0o700)
+        (root / "podman").symlink_to(fake)
         self.env = {"PATH": f"{root}:{os.defpath}", "FAKE_LOG": str(self.log),
                     "FAKE_CONTEXT": "default", "FAKE_ENDPOINT": SOCKET,
                     "FAKE_NANO_CPUS": "2000000000", **dict.fromkeys(SESSION, "host-session")}
@@ -149,39 +247,135 @@ elif args[2:4] == ['container', 'inspect']:
         self.assertIn("use a prebuilt builder image", result.stderr)
         self.assertEqual([row["argv"][:2] for row in self.calls()], [["context", "inspect"]])
 
+    def test_legacy_builder_inspects_and_launches_through_the_guard(self) -> None:
+        script = """
+source "$1/lib/build-kernel.sh"
+ensure_kernel_builder_image docker fixture-base fixture-tag
+runtime=docker
+"$runtime" "$2" --rm fixture-tag true
+"""
+        command = ["bash", "-c", script, "fixture", str(ROOT), "run"]
+        result = subprocess.run(command, cwd=ROOT, env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [row for row in self.calls() if row["argv"][:2] != ["context", "inspect"]]
+        self.assertEqual([row["argv"] for row in calls], [
+            ["-H", SOCKET, "info", "--format", "{{.OperatingSystem}}"],
+            ["-H", SOCKET, "image", "inspect", "fixture-tag"],
+            ["-H", SOCKET, "run", "--cpus=4", "--memory=16g", "--rm", "fixture-tag", "true"],
+        ])
+        for child in calls:
+            self.assertEqual(child["stdin"], "/dev/null")
+            self.assertTrue(child["session"])
+            self.assertFalse(set(SESSION) & set(child["env"]))
+
+        self.log.unlink()
+        result = subprocess.run(command, cwd=ROOT, env={**self.env, "DOCKER_CONTEXT": "desktop-linux"},
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("system Docker socket", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_legacy_rauc_inspection_and_podman_fallback_cannot_bypass_guard(self) -> None:
+        script = """
+source "$1/lib/build-rauc.sh"
+ensure_rauc_builder_image "$2" fixture-base fixture-tag linux/amd64
+"""
+        prefix = ["bash", "-c", script, "fixture", str(ROOT)]
+        result = subprocess.run([*prefix, "docker"], cwd=ROOT, env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]["argv"], ["-H", SOCKET, "image", "inspect", "fixture-tag"])
+        self.log.unlink()
+        result = subprocess.run([*prefix, "podman"], cwd=ROOT, env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("system Docker socket", result.stderr)
+        self.assertEqual(self.calls(), [])
+
     def test_no_raw_container_start_in_repo_scripts(self) -> None:
         result = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
             cwd=ROOT, env={**os.environ, "GIT_MASTER": "1"}, capture_output=True, text=True, check=True,
         )
-        raw = re.compile(
-            r"""(?:^|[\s;|(&`'"/])(?:docker|podman|\$\{?(?:runtime|RUNTIME|BUILD_MODE)\}?)[\'"]?\s+"""
-            r"""(?:container\s+)?(?:run|exec|create|start)\b|"""
-            r"""\[\s*['"](?:docker|podman)['"]\s*,\s*['"](?:run|exec|create|start)['"]""")
+        allowed_paths = {
+            # These invoke the real CLI on hosted runners, not workstation builds.
+            ".github/workflows/kernel-release.yml", ".github/workflows/real-build-audit.yml",
+            ".github/workflows/release-candidate-build.yml", ".github/workflows/v2-ci.yml",
+            # This is the boundary that implements the policy.
+            "ci/container-engine.py",
+            # The guard must be able to spell its inert negative probes.
+            "tests/container_engine_test.py",
+        }
+        # These legacy dispatches retain their master bytes. Each follows
+        # assert_container_daemon_supported, which binds the shell command to the guard.
+        # The immutable kernel gate hashes lib/build-kernel.sh and lib/kernel/builder.sh.
+        guarded_legacy = {
+            "lib/build-kernel.sh": (
+                """trap "${runtime} run --rm -v '${work}/src:/src' '${KERNEL_BUILDER_IMAGE_TAG}' bash -c """
+                """'find /src -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'; rm -rf '${work}'" EXIT""",
+                '"${runtime}" run "${container_args[@]}" -e KERNEL_EPOCH_ONLY=1 \\',
+                'builder_packages="$("${runtime}" run --rm "${KERNEL_BUILDER_IMAGE_TAG}" \\',
+                'builder_compiler="$("${runtime}" run --rm "${KERNEL_BUILDER_IMAGE_TAG}" aarch64-linux-gnu-gcc --version)" \\',
+                """builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \\""",
+                '"${runtime}" run "${container_args[@]}" "${KERNEL_BUILDER_IMAGE_TAG}" \\',
+            ),
+            "lib/kernel/builder.sh": ('if "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then',),
+            "lib/rauc-build/builder.sh": ('if "${runtime}" image inspect "${tag}" >/dev/null 2>&1; then',),
+            # Baked payload uses only the daemon inside the disposable guest.
+            "ci/kernel-runner/provision.sh": ("docker buildx version",),
+            "ci/kernel-runner/image_guest.py": (
+                'run_gate(["docker", "load", "-i", str(archive)], env=env, timeout=600,',
+                'inspected = json.loads(command(["docker", "image", "inspect", builder["tag"]], env))[0]',
+            ),
+        }
         unexpected = []
         self.maxDiff = None
         for name in sorted(set(result.stdout.rstrip("\0").split("\0"))):
             path = ROOT / name
-            if not path.is_file() or name.startswith(".github/") or path.name in (
-                "container_engine_test.py", "container-engine.py"
-            ):
+            if not path.is_file() or name in allowed_paths:
                 continue
-            if path.suffix not in (".sh", ".bash", ".bats", ".py") and name not in (
-                "build", "dev-push", "dev-cache", "run-tests"
-            ):
+            if (path.suffix not in {".sh", ".bash", ".bats", ".py", ".md", ".yml", ".yaml", ".example", ".mk", ""}
+                    and not path.name.startswith("Dockerfile") and path.name != "package.json"):
                 continue
-            for number, line in enumerate(path.read_text().splitlines(), 1):
-                if name == "tests/release-cache-contract.test.sh" and line.strip() == (
-                    '"docker run --rm --read-only --network none",'
-                ):
-                    continue  # Asserts a hosted-only workflow command, never executes it.
-                line = re.sub(r'(?:container_engine|container-engine\.py["\']?)\s+["\']?'
-                              r'(?:docker|podman|\$\{?(?:runtime|RUNTIME|BUILD_MODE)\}?)["\']?(?=\s)',
-                              "guarded_engine", line)
-                if line.lstrip().startswith(("#", "assert ", "[[ ")) or not raw.search(line):
+            data = path.read_bytes()
+            if b"\x00" in data:
+                continue
+            for number, line in engine_lines(path, data.decode("utf-8")):
+                stripped = line.strip()
+                if stripped in guarded_legacy.get(name, ()):
                     continue
                 unexpected.append(f"{name}:{number}: {line.strip()}")
         self.assertEqual(unexpected, [])
+
+    def test_static_scan_catches_inert_bypass_forms(self) -> None:
+        probes = (
+            "docker run fixture", "docker -H unix:///tmp/other.sock run fixture",
+            "docker --host=unix:///tmp/other.sock create fixture",
+            "docker --context other start fixture", "docker --config /tmp/other exec fixture true",
+            "docker -l debug run fixture", "docker buildx build .", "docker compose up",
+            "docker-compose -f compose.yml up", "podman-compose up", "nerdctl --namespace k8s.io run fixture",
+            "podman-docker run fixture", "podman run fixture", "/usr/bin/docker --context other run fixture",
+            "sudo docker run fixture", "env DOCKER_HOST=other docker run fixture",
+            "command docker run fixture", "exec docker run fixture", "xargs -r docker run",
+            "'docker' run fixture", '"$DOCKER" run fixture', "${DOCKER:-docker} run fixture",
+            "${ENGINE:-/usr/bin/docker} run fixture", "cid=$(docker create fixture)", "docker \\\n  run fixture",
+        )
+        for probe in probes:
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path("probe.sh"), probe)), probe)
+        for filename, probe in (
+            ("probe.md", "```bash\n/usr/bin/docker --context other run fixture\n```"),
+            ("compose.yml", 'command: "/usr/bin/docker run fixture"'),
+            ("Makefile", "probe:\n\t@docker compose up"),
+            ("justfile", "probe:\n  nerdctl run fixture"),
+            ("package.json", '{"scripts": {"fixture": "docker buildx build ."}}'),
+        ):
+            with self.subTest(filename=filename):
+                self.assertTrue(list(engine_lines(Path(filename), probe)), probe)
+        self.assertFalse(list(engine_lines(Path("safe.sh"), 'container_engine "${runtime}" run fixture')))
+        self.assertFalse(list(engine_lines(Path("safe.md"), """```bash
+DOCKER_CONTEXT=default python3 ci/container-engine.py docker run --cpus=1 --memory=1g fixture
+```""")))
 
 
 if __name__ == "__main__":

@@ -265,7 +265,7 @@ assert_cache_privilege_domain() {
     return 0
   fi
 
-  die "mkosi cache ${cache_dir} is owned by uid ${owner_uid}, but --native runs mkosi as uid ${builder_uid}: mkosi 26 refuses a foreign-owned cache, then cannot remove it, and the build dies in 'rm: cannot remove …: Permission denied'. Delete it from the domain that owns it first — 'sudo rm -rf ${cache_dir}', or from a throwaway privileged container: ${BUILD_MODE:-docker} run --rm --privileged -v ${PIPELINE_DIR}:/work ${MKOSI_BUILDER_IMAGE} rm -rf -- /work/${CERALIVE_REL_MKOSI_CACHE_ROOT}"
+  die "mkosi cache ${cache_dir} is owned by uid ${owner_uid}, but --native runs mkosi as uid ${builder_uid}: mkosi 26 refuses a foreign-owned cache, then cannot remove it, and the build dies in 'rm: cannot remove …: Permission denied'. Have its owner or an authorized administrator remove that cache directory (rm -rf -- ${cache_dir}) before switching modes."
 }
 
 # ---------------------------------------------------------------------------

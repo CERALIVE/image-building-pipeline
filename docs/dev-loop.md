@@ -47,12 +47,9 @@ never auto-built; it **must** bake `mkosi 26`:
 MKOSI_BUILDER_IMAGE=myregistry/ceralive-mkosi:26 ./build <board>
 ```
 
-Rebuild the canonical image by hand if needed:
-
-```bash
-docker build -t ceralive-mkosi-builder:26 -f ci/Dockerfile ci
-# or: podman build -t ceralive-mkosi-builder:26 -f ci/Dockerfile ci
-```
+On a workstation, use a prebuilt image and select the system engine with
+`DOCKER_CONTEXT=default`. BuildKit image creation belongs on authorized build
+runners. See [local container policy](host-support.md#local-container-engine).
 
 ### Debug image (`CERALIVE_DEBUG_IMAGE=1`) — bench ONLY, adds the tooling delta
 
@@ -255,31 +252,20 @@ sudo systemctl restart systemd-binfmt
 > *Documented, not CI-verified* — same kernel-feature surface as Ubuntu/Arch, but
 > no Fedora runner exists. The SELinux caveat is the one thing to watch.
 
-**Arch Linux — Docker/Podman path.**
+**Arch Linux — system Docker path.**
 ```bash
-sudo pacman -S docker                               # or: podman
+sudo pacman -S docker
 sudo pacman -S qemu-user-static qemu-user-static-binfmt
 sudo systemctl restart systemd-binfmt
 grep flags /proc/sys/fs/binfmt_misc/qemu-aarch64    # must contain 'F'
-./build rock-5b-plus
+DOCKER_CONTEXT=default MKOSI_BUILDER_IMAGE=myregistry/ceralive-mkosi:26 ./build rock-5b-plus
 ```
 > *Documented, not CI-verified* — assembly primitives were live-tested here in T16
 > (loop-free, privileged **and** unprivileged), but no Arch runner gates pushes.
 > Ensure the binfmt handler carries the **F** flag or it won't fire in-container.
 
-**macOS Apple Silicon — Docker Desktop required, container-only.** Per T16, the
-Stage-4 disk-assembly is **loop-free and rootless** (`systemd-repart --offline`,
-`mkfs.ext4 -d`, `mcopy`, `dd`), so the well-known *"Docker Desktop doesn't expose
-`/dev/loopNpX`"* limitation **does not block CeraLive assembly**. arm64 is the
-*native* VM arch, so the default board builds run with **no qemu emulation**.
-```bash
-# Docker Desktop ≥ 4.x, VirtioFS on, repo's parent in shared paths, ≥4 GB/≥20 GB VM.
-./build rock-5b-plus
-```
-> *Documented, not CI-verified* — **no macOS host in the dev/CI environment.**
-> Expected to work (native arm64 + loop-free assembly) but **not reproduced on
-> hardware**; treat as container-only and verify the sidecar digest by hand.
-> There is **no `--native` path** (macOS is not Linux). See the macOS section of
+**macOS Apple Silicon — no local build.** Use an authorized Linux build runner.
+Docker Desktop is refused, and native mkosi requires Linux. See the macOS section of
 > [`host-support.md`](host-support.md).
 
 **WSL2 — container path works; kernel requirement.** Per T16, the WSL2 kernel
