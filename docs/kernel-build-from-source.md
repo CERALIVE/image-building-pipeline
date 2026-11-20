@@ -468,10 +468,13 @@ The kernel epoch comes from the pinned kernel commit's **committer** time in
 the verified clone, before patches are applied, for image and kernel-only
 builds alike. It does not use image-repository HEAD or an ambient epoch override.
 Debian packaging timestamps, including its changelog, use that same pinned epoch.
-The production source pin is `7.2.0-ceralive8`, adding nftables reject for
-NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; revisions 1 to 4 must never be
-reissued with changed bytes.
+The production source pin is `7.2.0-ceralive9`, disabling the RK3588 family's
+excluded discrete GPU, Intel integrated GPU, datacenter NIC and Intel IPU drivers.
+Every symbol from `HARDWARE_EXCLUDED_KCONFIG` is explicitly off in the fragment
+and independently forbidden by the production config gate. All 18 names exist
+in upstream v7.2; the source and kernel-patches PR #28 pins are unchanged.
+Bluetooth drivers and firmware roots are unchanged. Revisions 1 to 8 must never
+be reissued with changed bytes.
 The family fingerprint excludes DTB paths and local container image IDs, but
 includes Dockerfile bytes, base digest, sorted package/version/architecture
 closure, compiler version, kernel scripts, config fragments and closure gates.
@@ -483,8 +486,9 @@ and `/usr/lib/ceralive/kernel-firmware-rules.{sh,txt}` as the scratch gate.
 It calls the image's `bluetooth_firmware_prepare` implementation: the same
 Bluetooth/UHID module selection, recursive dependency traversal, manifest parser,
 static references, runtime roots and exactly two reviewed hardware gaps.
-Other modules' firmware is **not gated**, just as in shipped images. Neither
-input tree is changed. Exit 0 means satisfied, exit 1 prints
+Other modules' firmware is **not gated by this kernel-only check**. Full image
+builds additionally enforce [final-rootfs firmware closure](firmware-closure.md)
+after the size gate. Neither input tree is changed. Exit 0 means satisfied, exit 1 prints
 `missing: <relative-path-or-glob>` for an unmet reference, and exit 2
 means invalid usage, identity or unprovable module metadata. The device caller
 checks the target slot's existing firmware, never upgrades it.
@@ -495,15 +499,25 @@ firmware root, including non-first symlinks. The manifest and its two exact
 module/path-bound exceptions remain the reviewed image policy, not a new
 all-module compatibility allowlist.
 
-`tests/fixtures/kernel-firmware-v7.2.json` contains all 990 real module metadata
-records, built-in dependencies, and the pinned archive's 7,653 file/link names
-and targets, not payload blobs. Its revision-1 archive provenance is preserved;
-the regression checks the current source, patch and firmware pins and explicitly
-binds the packaging-only revision-2 transition. It reconstructs
-that namespace, checks the image-equivalent closure and removes required
+`tests/fixtures/kernel-firmware-v7.2.json` records real module metadata,
+built-in dependencies, and the pinned archive's 7,653 file/link names and
+targets, not payload blobs. Its module provenance must match the current source,
+patch, kernel release and package revision exactly. The regression also rejects
+excluded module paths and any remaining `nvidia/` consumer. It reconstructs
+the namespace, checks the image-equivalent closure and removes required
 Bluetooth payloads to prove the gate still rejects them.
 The build-inventory checksum includes both source-tree module paths and
 `bindeb-pkg` staging copies; those copies are not additional drivers.
+
+Refresh the fixture only from a successful local kernel-only build. Extract its
+named `.deb` with `dpkg-deb -x` into private scratch, collect sorted module paths
+with `modinfo -F depends` and `modinfo -F firmware`, and copy that package's
+`modules.builtin`. Record the actual package SHA-256 and `built-modules.txt`
+SHA-256 with the resolved source/patch/version pins. Retain the firmware namespace
+only when its package, version and archive SHA-256 still match
+`manifests/armbian-firmware-content.json`; otherwise recapture the authenticated
+archive's names and link targets. Never remove fixture rows by policy alone.
+Run `bash tests/kernel-only-build.test.sh` against the refreshed fixture.
 
 ## 3. The build backend — and what it is not
 
@@ -879,9 +893,8 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The production source pin is `7.2.0-ceralive8`, adding nftables reject for
-NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; publication remains owner-gated.
+See the [kernel release runbook](kernel-release.md) for the production source
+pin and signed APT availability requirements. Publication remains owner-gated.
 
 Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
 `lib/kernel/released.sh` entrypoint, selected by the orchestration layer.
