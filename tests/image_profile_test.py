@@ -9,17 +9,22 @@ import errno
 import fcntl
 import io
 import inspect
+from itertools import product
 import json
 import hashlib
 import os
 import pathlib
+import pty
 import runpy
+import select
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -96,6 +101,11 @@ def fixture_signal_mask():
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
+def named(path) -> pathlib.Path:
+    """Resolve a launcher path that passes through a held /proc/self/fd directory."""
+    return pathlib.Path(os.path.realpath(path))
+
+
 def signal_status(path: pathlib.Path) -> tuple[int, int, int]:
     fields = dict(line.split(":", 1) for line in path.read_text().splitlines() if ":" in line)
     return tuple(int(fields[key], 16) for key in ("SigBlk", "SigIgn", "SigCgt"))
@@ -110,7 +120,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     read_bytes = pathlib.Path.read_bytes
     fsync = os.fsync
     unlink = pathlib.Path.unlink
-    temporary_file = tempfile.TemporaryFile
+    open_image_overlay = image_lifecycle.open_image_overlay
+    returned_json = image_vm.returned_json
     directory = root / "returns/fixture/build"
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
@@ -215,9 +226,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return status
 
     def fixture_read_bytes(path):
-        if mode == "unreadable-exit" and path == directory / "exit.json":
+        if mode == "unreadable-exit" and named(path) == directory / "exit.json":
             raise OSError(errno.EIO, "fixture final receipt readback")
-        if path == directory.parent / "exit.json" and trace_terminal:
+        if named(path) == directory.parent / "exit.json" and trace_terminal:
             inject_terminal("readback:before")
             result = read_bytes(path)
             inject_terminal("readback:after")
@@ -236,7 +247,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def inject_step(action, transaction):
         nonlocal during
-        final = transaction.path == directory / "exit.json"
+        final = named(transaction.path) == directory / "exit.json"
         if final:
             with (root / "steps").open("a") as log:
                 print(action.__name__, file=log)
@@ -324,6 +335,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def publish(source, destination) -> None:
         nonlocal during, fail_sync
+        destination = named(destination)
         if pair:
             with (root / "sequence").open("a") as log:
                 print(destination.relative_to(root / "returns"), file=log)
@@ -338,7 +350,16 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             else:
                 held = set(json.loads(owned.read_text()))
                 assert held, "started fake QEMU has no inherited descriptor inventory"
-            held.add(str(root / "capsule"))
+            if destination.name == "teardown.json":
+                # The validated input owner remains for a subsequent verifier.
+                pins = {str(root / "capsule"), str(directory.parent / "verifier-input.tar")}
+                held -= pins
+                for pin in pins:
+                    assert sum(1 for fd in pathlib.Path("/proc/self/fd").iterdir()
+                               if fd.exists() and os.readlink(fd) == pin) <= 1
+            else:
+                held.update((str(root / "capsule"), str(root / "base"),
+                             str(directory.parent / "verifier-input.tar")))
             held.update(str(file) for file in directory.glob("*.partial"))
             (root / "leaks").write_text(json.dumps(sorted(live & held)))
             assert not live & held, sorted(live & held)
@@ -400,6 +421,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             (root / "final-sync").touch()
 
     def remove(path, *args, **kwargs):
+        path = named(path)
         if path == directory / "stream.partial":
             fault_at("stream-unlink")
         if path == root / "returns/active.json":
@@ -408,7 +430,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def overlay(*args, **kwargs):
         fault_at("overlay-create")
-        file = temporary_file(*args, **kwargs)
+        file = open_image_overlay(*args, **kwargs)
 
         class Overlay:
             def fileno(self):
@@ -421,9 +443,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return Overlay()
 
     def read_result(path, *args, **kwargs):
-        if mode == "validation" and path == directory / "artifacts/verification.json":
+        if mode == "validation" and named(path) == directory / "artifacts/verification.json":
             cancel()
-        return read_text(path, *args, **kwargs)
+        return returned_json(path, *args, **kwargs)
 
     def poller():
         epoll = poll_type()
@@ -435,6 +457,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             def poll(self, *args):
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
+                        and not mode.startswith(("stderr-flood:", "probe-invalid:"))
+                        and mode != "priority-failure"
                         and mode not in SUCCESS_GUEST_MODES and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
@@ -448,10 +472,75 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return Poll()
 
     validate_return = image_vm.validate_return
+    capture = ImageJob.capture
+
+    def fixture_capture(job, process, seconds):
+        if mode.startswith("stderr-flood:"):
+            assert process.stderr is None, "launcher received a guest stderr read end"
+            children = pathlib.Path("/proc/thread-self/children").read_text().split()
+            assert children == [str(process.pid)], ("children at capture entry", children)
+            read = os.read
+            received = 0
+            interrupted = False
+            stream_fd = process.stdout.fileno()
+
+            def read_capture(fd, size):
+                nonlocal received, interrupted
+                if fd == stream_fd and received and not interrupted:
+                    interrupted = True
+                    raise OSError(errno.EIO, "fixture live frame read")
+                chunk = read(fd, size)
+                if fd == stream_fd:
+                    received += len(chunk)
+                return chunk
+
+            with patch.object(os, "read", read_capture):
+                capture(job, process, seconds)
+            assert interrupted and received == 787_274
+            return
+        return capture(job, process, seconds)
+
+    def capture_priority(pid, cancellation):
+        if mode == "priority-failure":
+            deadline = time.monotonic() + 2
+            while not (root / "ready").exists():
+                assert time.monotonic() < deadline, "fixture guest never reached live priority check"
+                time.sleep(0.005)
+            assert pathlib.Path("/proc/thread-self/children").read_text().split() == [str(pid)]
+            (root / "priority-failed").touch()
+            with patch.object(image_resources._LIBC, "syscall", return_value=-1), \
+                    patch.object(image_resources.ctypes, "get_errno", return_value=errno.EPERM):
+                return image_resources.process_priority(pid, cancellation)
+        if mode.startswith("stderr-flood:"):
+            children = pathlib.Path("/proc/thread-self/children").read_text().split()
+            assert children == [str(pid)], ("children during capture", children)
+            (root / "sole-child").touch()
+        return image_resources.process_priority(pid, cancellation) if inherited else FIXTURE_PRIORITY
+
+    if mode.startswith("stderr-flood:"):
+        def audit_capture_spawns(event, args):
+            if event not in {"subprocess.Popen", "os.fork", "os.posix_spawn"}:
+                return
+            assert not (directory / "started.json").exists(), ("extra child during capture", event)
+            assert event == "subprocess.Popen", event
+            argv = args[1]
+            name = pathlib.Path(argv[0]).name
+            if name == "setpriv":
+                assert "qemu-system-x86_64" in argv
+                name = "qemu-system-x86_64"
+            if name == "qemu-system-x86_64":
+                assert not pathlib.Path("/proc/thread-self/children").read_text().split()
+            with (root / "launches").open("a") as log:
+                print(" ".join((name, argv[1])) if name == "qemu-img" else name, file=log)
+
+        sys.addaudithook(audit_capture_spawns)
 
     def fixture_return(job, verifier):
         # Only the production build's multi-GiB artifact set is substituted.
         if not pair or verifier:
+            if mode.startswith("stderr-flood:"):
+                assert (job.directory / "stream.partial").read_bytes() == (root / "probe.frame").read_bytes()
+                assert not (job.directory / "diagnostic.partial").exists()
             return validate_return(job, verifier)
         job.cancellation.check()
         target = job.directory / "artifacts"
@@ -499,7 +588,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     writer = image_lifecycle.receipt
     if mode == "audit-mutation":
         namespace = image_lifecycle.__dict__.copy()
-        source = inspect.getsource(writer) + "\n    transaction.path.stat()\n    os.statvfs(transaction.path.parent)\n"
+        tail = "    return transaction.entry\n"
+        source = inspect.getsource(writer)
+        assert source.count(tail) == 1 and source.endswith(tail)
+        source = source.replace(tail, "    transaction.path.stat()\n    os.statvfs(transaction.path.parent)\n" + tail)
         exec(compile(source, image_lifecycle.__file__, "exec"), namespace)
         writer = namespace["receipt"]
         writer.__globals__["RECEIPT_STEPS"] = table
@@ -529,19 +621,21 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(signal, "pthread_sigmask", mask),
             patch.object(os, "fsync", sync),
             patch.object(pathlib.Path, "unlink", remove),
-            patch.object(tempfile, "TemporaryFile", overlay),
-            patch.object(pathlib.Path, "read_text", read_result),
+            patch.object(image_lifecycle, "open_image_overlay", overlay),
+            patch.object(image_vm, "returned_json", read_result),
             patch.object(pathlib.Path, "read_bytes", fixture_read_bytes),
+            patch.object(ImageJob, "capture", fixture_capture),
             patch.object(image_vm, "validate_return", fixture_return),
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
             patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
             patch.object(image_lifecycle, "disk_headroom"),
-            patch.object(image_lifecycle, "process_priority",
-                         side_effect=image_resources.process_priority if inherited else None,
-                         return_value=FIXTURE_PRIORITY),
+            patch.object(image_lifecycle, "process_priority", capture_priority),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
             patch.object(image_resources, "cgroup_limits", return_value=FIXTURE_PRIORITY["cpu_weight"]),
+            # Keep priority observations independent of the runner's inherited I/O class.
+            patch.object(image_resources._LIBC, "syscall",
+                         return_value=(2 << image_resources.IOPRIO_CLASS_SHIFT) | 7),
         ):
             patches.enter_context(patcher)
         runpy.run_path(sys.argv[0], run_name="__main__")
@@ -571,10 +665,22 @@ def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
         base.write_bytes(b"public base")
         base.chmod(0o444)
         identity = replace(IDENTITY, input_sha256=hashlib.sha256(capsule.read_bytes()).hexdigest())
-        with (root / "probe.frame").open("wb") as output:
-            encode(output, [("verification.json", json.dumps({
-                "schema": 1, "identity": asdict(identity), "network_denied": True,
-            }).encode())], identity)
+        result = {"schema": 1, "identity": asdict(identity), "network_denied": True}
+        if mode.startswith("probe-invalid:"):
+            field, encoded = mode.split(":", 2)[1:]
+            target = result["identity"] if field.startswith("identity.") else result
+            target[field.rsplit(".", 1)[-1]] = json.loads(encoded)
+        payload = json.dumps(result).encode()
+        frame = io.BytesIO()
+        encode(frame, [("verification.json", payload)], identity)
+        if mode.startswith("stderr-flood:"):
+            padding = 0
+            for _ in range(3):
+                padding += 787_274 - frame.tell()
+                frame = io.BytesIO()
+                encode(frame, [("verification.json", payload + b" " * padding)], identity)
+            assert frame.tell() == 787_274
+        (root / "probe.frame").write_bytes(frame.getvalue())
         qemu_img = root / "qemu-img"
         qemu_img.write_text(f"""#!{sys.executable}
 import json, os, pathlib, signal, sys, time
@@ -630,15 +736,36 @@ def term(_signum, _frame):
         sys.exit(0)
 if mode != "slow":
     signal.signal(signal.SIGTERM, term)
-fds = {{1, 2}} | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
+fds = ({{1, 2}} if mode.startswith("pair:") else {{1}}) | {{int(arg.split("/proc/self/fd/")[1].split(",")[0])
                    for arg in sys.argv if "/proc/self/fd/" in arg}}
+if not mode.startswith("pair:"):
+    assert os.readlink("/proc/self/fd/2") == "/dev/null"
 (root / "owned-fds").write_text(json.dumps([os.readlink(f"/proc/self/fd/{{fd}}") for fd in fds]))
 (root / "pid").write_text(str(os.getpid()))
 with (root / "children").open("a") as logged:
     print(os.getpid(), file=logged)
 (root / "ready").touch()
+if mode == "priority-failure":
+    while not (root / "priority-failed").exists():
+        time.sleep(0.005)
+    os.write(1, (root / "probe.frame").read_bytes())
+    sys.exit(0)
 if mode.startswith("startup:") and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0):
     (root / "startup-ready").touch()
+if mode.startswith(("stderr-flood:", "probe-invalid:")):
+    assert os.readlink("/proc/self/fd/2") == "/dev/null"
+    if mode.startswith("stderr-flood:"):
+        count = int(mode.split(":")[1]) * 1024**2
+        block = b"x" * 65536
+        for _ in range(count // len(block)):
+            assert os.write(2, block) == len(block)
+        (root / "flood-completed").write_text(str(count))
+    with (root / "probe.frame").open("rb") as frame:
+        while chunk := frame.read(65536):
+            remaining = memoryview(chunk)
+            while remaining:
+                remaining = remaining[os.write(1, remaining):]
+    sys.exit(0)
 if mode in ("startup:success", "startup:failure", "startup:signal"):
     os.write(1, (root / "probe.frame").read_bytes())
     if mode == "startup:signal":
@@ -650,7 +777,9 @@ if mode.startswith("pair:"):
         sys.path.insert(0, {str(ROOT / 'ci/kernel-runner')!r})
         from image_stream import Identity, encode
         result = {{"schema": 1, "verified": True, "build_identity": payload["build_identity"],
-                  "artifacts": payload["artifacts"], "slots": [{{"slot": "rootfs_a"}}, {{"slot": "rootfs_b"}}]}}
+                  "artifacts": payload["artifacts"], "slots": [
+                      {{"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
+                        "nvidia_references": ["nvidia/nouveau.ko"]}} for slot in ("rootfs_a", "rootfs_b")]}}
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
@@ -731,6 +860,41 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
+        if mode == "priority-failure":
+            terminal = directory / "exit.json"
+            assert terminal.is_file(), stderr
+            marker = json.loads(terminal.read_text())
+            pid = (root / "pid").read_text()
+            assert (root / "priority-failed").exists()
+            assert marker["qemu"].split(":")[0] == pid and marker["qemu_reaped"] is True
+            assert not pathlib.Path(f"/proc/{pid}").exists()
+            assert launcher.returncode == marker["launcher_exit"] == 1, (stderr, marker)
+            assert marker["stop_reason"] == "IOPriorityError"
+            assert marker["input_descriptor_closed"] and marker["overlay_descriptor_closed"]
+            assert not (directory / "transport-validation.json").exists()
+            assert not (root / "returns/active.json").exists(), (mode, entry_setup, stderr.decode())
+            return
+        if mode.startswith(("stderr-flood:", "probe-invalid:")):
+            terminal = directory / "exit.json"
+            assert terminal.exists(), stderr.decode(errors="replace")
+            marker = json.loads(terminal.read_text())
+            assert marker["qemu_exit"] == 0 and marker["qemu_reaped"] is True
+            if mode.startswith("stderr-flood:"):
+                assert launcher.returncode == marker["launcher_exit"] == 0, stderr
+                assert (root / "sole-child").exists()
+                assert (root / "launches").read_text().splitlines() == [
+                    "qemu-img info", "qemu-img create", "qemu-system-x86_64"]
+                assert (root / "flood-completed").read_text() == str(int(mode.split(":")[1]) * 1024**2)
+                assert not (directory / "diagnostic.partial").exists()
+                assert marker["stream_bytes"] == 787_274
+                assert marker["identity"] == asdict(identity)
+                assert marker["input_descriptor_closed"] and marker["overlay_descriptor_closed"]
+                assert not (root / "returns/active.json").exists()
+            else:
+                assert (directory / "transport-validation.json").is_file(), (mode, stderr, marker)
+                assert launcher.returncode == marker["launcher_exit"] == 1, (mode, stderr)
+                assert not (directory.parent / "acceptance.json").exists()
+            return
         if mode.startswith("startup-reject:"):
             baseline = mode.removeprefix("startup-reject:")
             assert launcher.returncode == vm_startup.STARTUP_ERROR, stderr.decode()
@@ -770,7 +934,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
             return
         if mode == "unreadable-exit":
             assert json.loads((directory / "exit.json").read_text())["launcher_exit"] == 0
-            assert launcher.returncode == 1 and b"fixture final receipt readback" in stderr
+            assert launcher.returncode == 0 and b"fixture final receipt readback" in stderr
             assert json.loads((root / "leaks").read_text()) == []
             return
         if mode == "audit-mutation":
@@ -852,12 +1016,16 @@ os.execvp(sys.argv[1], sys.argv[1:])
         if mode.startswith("fault:"):
             action, boundary = mode.split(":")[1:]
             assert (root / "injected").is_file(), (mode, stderr)
-            assert launcher.returncode == 1, (mode, stderr)
+            committed = boundary == "journal-unlink"
+            assert launcher.returncode == (0 if committed else 1), (mode, stderr)
             marker = directory / "exit.json"
-            assert marker.exists() == (action == "term" and boundary != "parent-sync"), mode
+            assert marker.exists() == (committed or action == "term" and boundary != "parent-sync"), mode
             if marker.exists():
                 row = json.loads(marker.read_text())
-                assert row["launcher_exit"] == launcher.returncode and row["stop_reason"] == "cancelled", mode
+                assert row["launcher_exit"] == launcher.returncode
+                assert row["stop_reason"] == ("guest exited; transport validated" if committed else "cancelled"), mode
+            if committed:
+                assert (root / "returns/active.json").exists() == (action == "fail")
             assert not (directory.parent / "acceptance.json").exists(), mode
             assert not list(root.rglob(".receipt-*")), mode
             assert not list(root.glob("job-*")), mode
@@ -916,7 +1084,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
             if ignored:
                 assert entry_ignored & (1 << (signal.SIGTERM - 1))
                 assert b"replaced inherited ignored stop signals: SIGTERM" in stderr
-            for child in ("info", "create", "qemu", "ionice"):
+            assert not (root / "status-ionice").exists()
+            for child in ("info", "create", "qemu"):
                 mask, ignored_bits, caught = signal_status(root / f"status-{child}")
                 assert mask == 0, (child, blocked, mask)
                 assert ignored_bits & stop_bits == 0, (child, ignored, ignored_bits)
@@ -955,30 +1124,28 @@ def test_startup_verification_failure_refuses_before_spawning() -> None:
 def test_echild_cannot_be_reported_as_guest_or_helper_success() -> None:
     popen = subprocess.Popen
 
-    def fake_qemu(_args, **kwargs):
+    def lose_status_at_spawn(_args, **kwargs):
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
         return popen([sys.executable, "-c", 'print("CERALIVE_JOB_DONE=0"); raise SystemExit(37)'], **kwargs)
 
-    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
-    try:
-        def boot_fake():
-            with patch.object(subprocess, "Popen", fake_qemu):
-                vm.boot(pathlib.Path("/unused"), b"", "check", 2)
-
-        for operation in (
-            lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
-                        cancellation=Cancellation(), capture_output=True),
-            lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
-                        cancellation=Cancellation()),
-            boot_fake,
-        ):
-            try:
+    for operation in (
+        lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
+                    cancellation=Cancellation(), capture_output=True),
+        lambda: run([sys.executable, "-c", "raise SystemExit(37)"], timeout=2,
+                    cancellation=Cancellation()),
+        lambda: vm.boot(pathlib.Path("/unused"), b"", "check", 2),
+    ):
+        previous = signal.getsignal(signal.SIGCHLD)
+        try:
+            with patch.object(subprocess, "Popen", lose_status_at_spawn):
                 operation()
-            except vm_process.ChildStatusError as error:
-                assert "exit status unavailable for owned child PID" in str(error)
-            else:
-                raise AssertionError("ECHILD turned a known failure into success")
-    finally:
-        signal.signal(signal.SIGCHLD, previous)
+        except vm_process.ChildStatusError as error:
+            assert "exit status unavailable for owned child PID" in str(error)
+            assert error.__cause__.errno == errno.ECHILD
+        else:
+            raise AssertionError("ECHILD turned a known failure into success")
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
 
 
 def test_no_qemu_or_helper_spawn_under_terminal_mask() -> None:
@@ -1213,8 +1380,8 @@ def test_probe_cleanup_and_artifact_publication_failures_never_publish_success()
 
 def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
     real_open, real_read, real_unlink = os.open, pathlib.Path.read_text, pathlib.Path.unlink
-    for step in ("capsule-create", "capsule-copy", "verifier-result", "capsule-unlink", "success"):
-        for action in (("success",) if step == "success" else ("fail", "term")):
+    for step in ("capsule-create", "capsule-copy", "verifier-result", "capsule-unlink", "success", "replace"):
+        for action in ((step,) if step in ("success", "replace") else ("fail", "term")):
             with tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
                 base, input_file, store = root / "base", root / "input.tar", root / "returns"
@@ -1247,7 +1414,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     os.kill(os.getpid(), signal.SIGTERM)
 
                 def open_file(path, *options, **kwargs):
-                    if path == capsule:
+                    if named(path) == capsule:
                         inject("capsule-create")
                     return real_open(path, *options, **kwargs)
 
@@ -1256,13 +1423,26 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                         inject("capsule-copy")
                     return real_addfile(archive, header, file)
 
-                def read_text(path, *options, **kwargs):
-                    if path == verification:
+                read_record = image_vm.returned_json
+                pack = image_vm.verification_capsule
+                written = []
+
+                def pack_capsule(*args):
+                    inventory = pack(*args)
+                    if action == "replace":
+                        written.append((capsule.stat().st_ino, hashlib.sha256(capsule.read_bytes()).hexdigest()))
+                        capsule.rename(capsule.with_suffix(".original"))
+                        capsule.write_bytes(b"independent fixture")
+                        capsule.chmod(0o600)
+                    return inventory
+
+                def read_result(path, **kwargs):
+                    if named(path) == verification:
                         inject("verifier-result")
-                    return real_read(path, *options, **kwargs)
+                    return read_record(path, **kwargs)
 
                 def unlink(path, *options, **kwargs):
-                    if path == capsule:
+                    if named(path) == capsule:
                         inject("capsule-unlink")
                     return real_unlink(path, *options, **kwargs)
 
@@ -1276,11 +1456,16 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     if payload["operation"] == "measure":
                         (artifacts / "fixture").write_bytes(b"public artifact")
                     else:
-                        assert request["capsule"] == capsule and capsule.is_file()
+                        assert os.path.samefile(request["capsule"], capsule)
+                        if action == "replace":
+                            assert [(os.fstat(request["capsule_fd"]).st_ino, payload["identity"]["input_sha256"])] == written
                         verification.write_text(json.dumps({
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
-                            "slots": [{"slot": "rootfs_a"}, {"slot": "rootfs_b"}],
+                            "slots": [
+                                {"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
+                                 "nvidia_references": ["nvidia/nouveau.ko"]} for slot in ("rootfs_a", "rootfs_b")
+                            ],
                         }))
                     return artifacts
 
@@ -1291,7 +1476,8 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                                         load_policy=lambda *_args: FixturePolicy(), execute=execute), \
                             patch.object(image_resources.ImageCaps, "qemu_limit"), \
                             patch.object(os, "open", open_file), patch.object(tarfile.TarFile, "addfile", addfile), \
-                            patch.object(pathlib.Path, "read_text", read_text), \
+                            patch.object(image_vm, "returned_json", read_result), \
+                            patch.object(image_vm, "verification_capsule", pack_capsule), \
                             patch.object(pathlib.Path, "unlink", unlink):
                         with fixture_signal_mask():
                             status = image_vm.run_image(args, None, cancellation)
@@ -1299,7 +1485,9 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     signal.signal(signal.SIGTERM, previous)
                 marker = attempt / "exit.json"
                 successful = action == "success"
-                assert injected != successful, (step, action)
+                assert injected == (action in ("fail", "term")), (step, action)
+                if action == "replace":
+                    assert written and capsule.read_bytes() == b"independent fixture"
                 assert status == int(not successful), (step, action)
                 assert marker.exists() == (action != "fail"), (step, action)
                 if marker.exists():
@@ -1375,9 +1563,16 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
     envelope = io.BytesIO()
     encode(envelope, [("verification.json", b"{}")], IDENTITY)
     observed = []
+    artifact_fd = -1
+    injected = False
+    native_read = os.read
 
     def child(args, **options):
+        nonlocal artifact_fd
         observed.append(args)
+        assert args[:6] == ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c"]
+        assert args[6] == 'test "$PPID" = "$1" || exit 125; shift; exec "$@"'
+        assert args[7:10] == ["runner-child", str(os.getpid()), "qemu-system-x86_64"]
         assert args[args.index("-smp") + 1] == "4"
         assert args[args.index("-m") + 1] == "20480"
         assert args[args.index("-nic") + 1] == "none"
@@ -1390,10 +1585,26 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         assert capsule.startswith("file=/proc/self/fd/")
         assert set(options["env"]) == {"PATH", "LANG"}
         assert options["stdin"] == subprocess.DEVNULL
-        assert options["preexec_fn"].func is vm.die_with_parent
-        assert options["preexec_fn"].args == (os.getpid(),)
-        return real_popen([sys.executable, "-c",
-                          f"import os; os.write(1, {envelope.getvalue()!r})"], **options)
+        assert options["preexec_fn"] is None and options["stderr"] == subprocess.DEVNULL
+        assert options["start_new_session"] is True
+        guest = ("import ctypes, os, signal\n"
+                 "death = ctypes.c_int()\n"
+                 "assert ctypes.CDLL(None).prctl(2, ctypes.byref(death), 0, 0, 0) == 0\n"
+                 "assert death.value == signal.SIGKILL\n"
+                 "assert os.getsid(0) == os.getpid()\n"
+                 "os.write(2, b'x' * (2 * 1024**2))\n"
+                 f"os.write(1, {envelope.getvalue()!r})")
+        process = real_popen([*args[:9], sys.executable, "-c",
+                              guest], **options)
+        artifact_fd = process.stdout.fileno()
+        return process
+
+    def read(fd, length):
+        nonlocal injected
+        if fd == artifact_fd and not injected:
+            injected = True
+            raise OSError(errno.EIO, "fixture live artifact read")
+        return native_read(fd, length)
 
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
@@ -1401,10 +1612,11 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         directory.mkdir(parents=True)
         capsule = root / "capsule"
         capsule.write_bytes(b"not a credential")
-        with tempfile.TemporaryFile(dir=root) as overlay, ImageJob(directory, IDENTITY, capsule) as job:
+        with tempfile.TemporaryFile(dir=root) as overlay, ImageJob(directory, IDENTITY, capsule, probe=True) as job:
             job.state.update(overlay_directory=str(root), retained_bytes=0)
             job.overlay_created(overlay.fileno())
             with patch.object(vm.subprocess, "Popen", child), patch.object(image_lifecycle, "disk_headroom"), \
+                    patch.object(image_lifecycle.os, "read", read), \
                     patch.object(image_lifecycle, "process_priority", return_value=FIXTURE_PRIORITY):
                 vm.boot(pathlib.Path(f"/proc/self/fd/{overlay.fileno()}"), b"{}", "image", 5,
                         disk_fd=overlay.fileno(), image_job=job)
@@ -1412,7 +1624,8 @@ def test_image_has_no_nic_shares_registration_or_credential_environment() -> Non
         exit_record = json.loads((directory / "teardown.json").read_text())
         assert exit_record["input_descriptor_closed"] is True
         assert (directory / "stream.partial").read_bytes() == envelope.getvalue()
-    assert len(observed) == 1
+        assert not (directory / "diagnostic.partial").exists()
+    assert len(observed) == 1 and injected
 
 
 def test_kernel_check_keeps_its_existing_cpu_ram_and_network_defaults() -> None:
@@ -1497,7 +1710,12 @@ def test_image_admission_requires_effective_cgroup_caps() -> None:
         snapshot = files.copy()
         if field:
             snapshot["/sys/fs/cgroup/image/" + field] = invalid
-        with patch.object(pathlib.Path, "read_text", lambda path: snapshot[str(path)]), \
+        def read_text(path):
+            if str(path) not in snapshot:
+                raise FileNotFoundError(errno.ENOENT, "fixture missing control", str(path))
+            return snapshot[str(path)]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
                 patch.object(pathlib.Path, "is_file", lambda path: str(path) in snapshot), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
                 patch.object(image_resources.os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
@@ -1526,7 +1744,13 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
                                     (9, "memory.swap.max", False)):
         snapshot = {path: value for path, value in files.items()
                     if pathlib.Path(path).name != missing}
-        with patch.object(pathlib.Path, "read_text", lambda path: snapshot[str(path)]), \
+
+        def read_text(path):
+            if str(path) not in snapshot:
+                raise FileNotFoundError(errno.ENOENT, "fixture missing control", str(path))
+            return snapshot[str(path)]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
                 patch.object(pathlib.Path, "is_file", lambda path: str(path) in snapshot), \
                 patch.object(image_resources.os, "sched_getscheduler", return_value=os.SCHED_OTHER), \
                 patch.object(image_resources.os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
@@ -1542,11 +1766,8 @@ def test_nice_nine_requires_low_cpu_weight_and_all_hard_caps() -> None:
 def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
-        # Keep the inode linked through reconciliation so unrelated CI logs cannot reuse it.
-        with (root / "overlay").open("w+b") as owned:
-            inode = os.fstat(owned.fileno())
-            (root / "active.json").write_text(json.dumps({
-                "attempt": "interrupted", "overlay_inode": [inode.st_dev, inode.st_ino]}))
+        with leased_fixture(root) as owned:
+            fcntl.flock(owned, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 reconcile(root)
             except image_resources.AdmissionError:
@@ -1559,6 +1780,19 @@ def test_reconciliation_holds_admission_until_owned_overlay_descriptors_close() 
         assert record["overlay_descriptors_closed"] is True
         assert record["stop_reason"] == "previous launcher interrupted; guest cleanup unknown"
 
+
+def leased_fixture(store: pathlib.Path):
+    build = store / "interrupted/build"
+    build.mkdir(parents=True, mode=0o700)
+    build.parent.chmod(0o700)
+    overlay = build / "overlay.qcow2"
+    file = open(overlay, "x+b", opener=lambda name, flags: os.open(name, flags, 0o600))
+    info = os.fstat(file.fileno())
+    active = store / "active.json"
+    active.write_text(json.dumps({"attempt": "interrupted", "overlay_lease": 1, "overlay_job": "build",
+                                  "overlay_inode": [info.st_dev, info.st_ino]}))
+    active.chmod(0o600)
+    return file
 
 def test_image_base_rejects_backing_and_nested_external_data_files() -> None:
     with tempfile.TemporaryDirectory() as temporary:
@@ -1575,11 +1809,570 @@ def test_image_base_rejects_backing_and_nested_external_data_files() -> None:
             result = subprocess.CompletedProcess([], 0, json.dumps(valid | changes).encode())
             with patch("image_vm.run", return_value=result):
                 try:
-                    validate_base(base, digest)
+                    os.close(validate_base(base, digest))
                 except image_resources.AdmissionError:
                     assert changes
                 else:
                     assert not changes
+
+
+def test_image_base_never_admits_unchecked_or_replaced_path() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        base = root / "base"
+        target = root / "target"
+        target.write_bytes(b"fixture")
+        target.chmod(0o444)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        base.symlink_to(target)
+        real_lstat = pathlib.Path.lstat
+        for role, error in product(("base", "capsule"), (errno.EIO, errno.EINTR, errno.EAGAIN, errno.EPERM)):
+            seen = []
+
+            def lookup(path):
+                if path == base:
+                    seen.append(path)
+                    if len(seen) == 1:
+                        raise OSError(error, "fixture lstat failure")
+                return real_lstat(path)
+
+            info = subprocess.CompletedProcess([], 0, b'{"format":"qcow2","virtual-size":137438953472}')
+            with patch.object(pathlib.Path, "lstat", lookup), patch.object(image_vm, "run", return_value=info) as tool:
+                try:
+                    if role == "base":
+                        os.close(validate_base(base, digest))
+                    else:
+                        os.close(image_vm.checked_digest(base, digest, Cancellation()))
+                except (OSError, StreamError, image_resources.AdmissionError):
+                    pass
+                else:
+                    raise AssertionError(("input link admitted after metadata fault", role, error))
+            tool.assert_not_called()
+            assert len(seen) == (1 if error == errno.EPERM else 2)
+
+
+def test_host_inputs_restart_transient_metadata_and_refuse_replaced_inodes() -> None:
+    from image_policy import load_policy
+    from image_stream import checked_open
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        policy = {"schema": 1, "root_der_sha256": "c" * 64, "repositories": {
+            name: {"origin": origin, "keyring": "a" * 64, "fingerprints": ["B" * 40], "suite": "stable",
+                   "component": "main", "arch": "arm64", "index_path": "Packages", "max_age_seconds": 3600}
+            for name, origin in (("firstparty", "https://apt.ceralive.tv"), ("bsp", "https://apt.armbian.com"),
+                                 ("debian-source", "https://deb.debian.org/debian"))},
+            "kernel_metadata": dict.fromkeys(("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"),
+                                             "d" * 64),
+            "builder_images": [{"object": "e" * 64, "tag": "fixture:v1",
+                                "image_id": "sha256:" + "f" * 64, "arch": "arm64"}]}
+        data = json.dumps(policy).encode()
+        digest = hashlib.sha256(data).hexdigest()
+        info = subprocess.CompletedProcess([], 0, b'{"format":"qcow2","virtual-size":137438953472}')
+        lstat, native_open, fstat = pathlib.Path.lstat, os.open, os.fstat
+        transient = (errno.EIO, errno.EINTR, errno.EAGAIN)
+        for role, site, code in product(("base", "capsule", "policy", "store", "receipt"),
+                                        ("lstat", "open", "fstat"), (*transient, errno.EPERM, errno.EACCES,
+                                        errno.ENOENT, errno.ESTALE, errno.EBUSY, errno.ELOOP, errno.ENOTDIR, 0)):
+            path = root / "input"
+            if role == "store":
+                path.mkdir(mode=0o700)
+            else:
+                path.write_bytes(data)
+                path.chmod(0o400 if role == "base" else 0o600)
+            identity = lstat(path)
+            hits = []
+            stages = []
+
+            def observe(stage):
+                stages.append(stage)
+                if stage == site and not hits:
+                    hits.append(stage)
+                    if code:
+                        raise OSError(code, f"fixture {stage}", path)
+                    # The replacement has identical content, ownership and mode.
+                    path.rename(root / "old")
+                    if role == "store":
+                        path.mkdir(mode=0o700)
+                    else:
+                        path.write_bytes(data)
+                        path.chmod(stat.S_IMODE(identity.st_mode))
+
+            def lookup(candidate):
+                result = lstat(candidate)
+                if candidate == path:
+                    observe("lstat")
+                return result
+
+            def open_input(candidate, flags, *args, **kwargs):
+                if candidate == path:
+                    assert flags & os.O_NOFOLLOW
+                    observe("open")
+                return native_open(candidate, flags, *args, **kwargs)
+
+            def stat_input(fd):
+                result = fstat(fd)
+                if os.path.samestat(identity, result):
+                    observe("fstat")
+                return result
+
+            def admit():
+                match role:
+                    case "base":
+                        os.close(validate_base(path, digest))
+                    case "capsule":
+                        os.close(image_vm.checked_digest(path, digest, Cancellation()))
+                    case "policy":
+                        assert load_policy(path).root_der_sha256 == "c" * 64
+                    case "store":
+                        os.close(checked_open(path, directory=True, private=True))
+                    case "receipt":
+                        assert image_vm.returned_json(path, private=True) == policy
+
+            def backing_tool(args, **kwargs):
+                base_fd, = kwargs["pass_fds"]
+                assert args[-1] == f"/proc/self/fd/{base_fd}"
+                assert os.path.samestat(identity, fstat(base_fd))
+                return info
+
+            pinned = not code and site == "fstat"
+            with patch.object(pathlib.Path, "lstat", lookup), patch.object(os, "open", open_input), \
+                    patch.object(os, "fstat", stat_input), patch.object(image_vm, "run", side_effect=backing_tool) as tool:
+                try:
+                    admit()
+                except (OSError, StreamError, image_resources.AdmissionError):
+                    assert code not in transient and not pinned, (role, site, code, stages)
+                    tool.assert_not_called()
+                else:
+                    assert code in transient or pinned, (role, site, code, stages)
+                    if not pinned:
+                        assert stages.count("lstat") >= 2, (role, site, code, stages)
+                assert hits == [site]
+            for target in (path, root / "old"):
+                if target.exists():
+                    target.rmdir() if role == "store" else target.unlink()
+
+
+def test_overlay_handoff_after_pid_listing_cannot_retire_journal() -> None:
+    forward = """
+import os, pathlib, subprocess, sys
+fd = int(sys.argv[1])
+print('ready', flush=True)
+sys.stdin.readline()
+code = 'import os,sys; fd=int(sys.argv[1]); s=os.fstat(fd); print(f\"{s.st_dev}:{s.st_ino}\",flush=True); sys.stdin.read()'
+with subprocess.Popen([sys.executable, '-c', code, str(fd)], stdin=subprocess.PIPE,
+                      stdout=subprocess.PIPE, pass_fds=(fd,)) as child:
+    os.close(fd)
+    print(child.pid, flush=True)
+    print(child.stdout.readline().decode().strip(), flush=True)
+    sys.stdin.readline()
+    child.stdin.close()
+    assert child.wait(timeout=2) == 0
+"""
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        build = store / "interrupted/build"
+        build.mkdir(parents=True, mode=0o700)
+        build.parent.chmod(0o700)
+        overlay = build / "overlay.qcow2"
+        with open(overlay, "x+b", opener=lambda name, flags: os.open(name, flags, 0o600)) as locked:
+            fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = os.fstat(locked.fileno())
+            parent = subprocess.Popen([sys.executable, "-c", forward, str(locked.fileno())],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(locked.fileno(),))
+        with parent:
+            try:
+                assert select.select([parent.stdout], [], [], 2)[0] and parent.stdout.readline() == b"ready\n"
+                active = store / "active.json"
+                row = {"attempt": "interrupted", "overlay_inode": [info.st_dev, info.st_ino],
+                       "overlay_lease": 1, "overlay_job": "build"}
+                active.write_text(json.dumps(row))
+                active.chmod(0o600)
+                record = store / "interrupted.reconciled.json"
+                listing = fixture_process_inventory({str(parent.pid)})
+                pids = []
+
+                def handoff():
+                    if not pids:
+                        parent.stdin.write(b"handoff\n")
+                        parent.stdin.flush()
+                        assert select.select([parent.stdout], [], [], 2)[0]
+                        pids.append(int(parent.stdout.readline()))
+                        assert parent.stdout.readline().decode().strip() == f"{info.st_dev}:{info.st_ino}"
+
+                def scan(path, **kwargs):
+                    rows = listing(path, **kwargs)
+                    if path == pathlib.Path("/proc"):
+                        handoff()
+                    return rows
+
+                flock = fcntl.flock
+
+                def lock(fd, operation):
+                    handoff()
+                    return flock(fd, operation)
+
+                with patch.object(image_lifecycle, "list_directory", scan), patch.object(fcntl, "flock", lock):
+                    try:
+                        reconcile(store)
+                    except image_resources.AdmissionError:
+                        pass
+                    else:
+                        raise AssertionError("reconciliation retired a journal during live descriptor handoff")
+                assert pids and active.is_file() and not record.exists() and overlay.is_file()
+                parent.stdin.close()
+                assert parent.wait(timeout=2) == 0
+                reconcile(store)
+                assert not active.exists() and not overlay.exists()
+                assert json.loads(record.read_text())["overlay_descriptors_closed"] is True
+            finally:
+                if parent.poll() is None:
+                    if parent.stdin and not parent.stdin.closed:
+                        parent.stdin.close()
+                    parent.wait(timeout=3)
+
+
+def fixture_process_inventory(pids: set[str]):
+    """Limit fixtures to their own real processes without masking their descriptor reads."""
+    from image_stream import list_directory
+
+    def inventory(path, **kwargs):
+        entries = list_directory(path, **kwargs)
+        return [entry for entry in entries if entry in pids] if path == pathlib.Path("/proc") else entries
+
+    return inventory
+
+
+def test_reconciliation_checks_descriptors_of_a_second_real_process() -> None:
+    code = """
+import os, sys
+fd = int(sys.argv[1])
+def inode():
+    info = os.fstat(fd)
+    print(f'{info.st_dev}:{info.st_ino}', flush=True)
+inode()
+for request in sys.stdin:
+    inode()
+"""
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        with leased_fixture(store) as overlay:
+            inode = os.fstat(overlay.fileno())
+            fcntl.flock(overlay, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            number = str(overlay.fileno())
+            child = subprocess.Popen([sys.executable, "-c", code, number],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     pass_fds=(overlay.fileno(),))
+        with child:
+            try:
+                expected = f"{inode.st_dev}:{inode.st_ino}\n".encode()
+                assert select.select([child.stdout], [], [], 2)[0] and child.stdout.readline() == expected
+                journal = store / "active.json"
+                row = json.loads(journal.read_text()) | {"launcher": f"{child.pid}:0"}
+                journal.write_text(json.dumps(row))
+                record = store / "interrupted.reconciled.json"
+                proc = pathlib.Path("/proc")
+                child_status = proc / str(child.pid) / "stat"
+                launcher_status = proc / str(os.getpid()) / "stat"
+                fd_root = child_status.with_name("fd")
+                descriptor = fd_root / number
+                inventory = fixture_process_inventory({str(child.pid)})
+                stat_path, lstat_path, read_text = pathlib.Path.stat, pathlib.Path.lstat, pathlib.Path.read_text
+                native_fdopen, journal_inode = os.fdopen, journal.lstat().st_ino
+                journal_read = store / "journal-read"
+                cases = [(descriptor, errno.EACCES, 1), (descriptor, errno.ENOENT, 1), (None, None, 0)]
+                cases += list(product((store, journal, journal_read, proc, launcher_status, child_status, fd_root, descriptor),
+                                      (errno.EACCES, errno.EPERM, errno.EIO, errno.EBUSY, errno.ESRCH,
+                                       errno.ENOENT, errno.EINTR), (1, 3)))
+                for site, error, count in cases:
+                    attempts = []
+                    faults = []
+
+                    def observe(path):
+                        if path == site and len(faults) < count:
+                            faults.append(path)
+                            raise OSError(error, "fixture incomplete process observation", path)
+
+                    def scan(path, **kwargs):
+                        if named(path) == store:
+                            attempts.append(path)
+                        observe(path)
+                        return inventory(path, **kwargs)
+
+                    def descriptor_stat(path, **kwargs):
+                        if path == descriptor:
+                            observe(path)
+                        return stat_path(path, **kwargs)
+
+                    def journal_stat(path):
+                        if path == journal:
+                            observe(path)
+                        return lstat_path(path)
+
+                    def process_read(path):
+                        if path in (child_status, launcher_status):
+                            observe(path)
+                        return read_text(path)
+
+                    def open_read(fd, flags, *args, **kwargs):
+                        stream = native_fdopen(fd, flags, *args, **kwargs)
+                        if os.fstat(fd).st_ino == journal_inode:
+                            read = stream.read
+
+                            def injected_read(size):
+                                observe(journal_read)
+                                return read(size)
+
+                            stream.read = injected_read
+                        return stream
+
+                    with patch.object(image_lifecycle, "list_directory", scan, create=True), \
+                            patch.object(pathlib.Path, "stat", descriptor_stat), \
+                            patch.object(pathlib.Path, "lstat", journal_stat), \
+                            patch.object(os, "fdopen", open_read), \
+                            patch.object(pathlib.Path, "read_text", process_read):
+                        try:
+                            reconcile(store)
+                        except image_resources.AdmissionError as exc:
+                            assert "still held" in str(exc) or "cannot establish previous overlay closure" in str(exc)
+                        else:
+                            raise AssertionError(("a second process still held the owned overlay", site, error))
+                    retries = 3 if error in (errno.EIO, errno.EINTR, errno.EAGAIN) else 1
+                    assert len(attempts) == (min(count + 1, retries) if site == store else 1)
+                    if site not in (store, journal, journal_read):
+                        assert not faults, "reconciliation used the superseded proc scan"
+                    else:
+                        expected_reads = min(count, retries)
+                        assert len(faults) == expected_reads
+                    assert json.loads(journal.read_text()) == row and not record.exists()
+                    child.stdin.write(b"check\n")
+                    child.stdin.flush()
+                    assert select.select([child.stdout], [], [], 2)[0] and child.stdout.readline() == expected
+                with patch.object(image_lifecycle, "list_directory", inventory, create=True), \
+                        patch.object(pathlib.Path, "stat", side_effect=AssertionError("journal existence must use inventory")):
+                    journal.write_text(json.dumps(row | {"launcher": image_lifecycle.process_identity(child.pid)}))
+                    try:
+                        reconcile(store)
+                    except image_resources.AdmissionError as exc:
+                        assert "previous image overlay is still held" in str(exc)
+                    else:
+                        raise AssertionError("live recorded launcher was missed")
+                assert journal.exists() and not record.exists()
+                child.stdin.close()
+                assert child.wait(timeout=2) == 0
+                with patch.object(image_lifecycle, "list_directory", inventory, create=True):
+                    reconcile(store)
+                assert not journal.exists()
+                assert json.loads(record.read_text())["overlay_descriptors_closed"] is True
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+
+
+def test_startup_inventory_keeps_a_real_inherited_fd_despite_a_failed_presence_probe() -> None:
+    with tempfile.TemporaryFile() as owned:
+        target = f"/proc/self/fd/{owned.fileno()}"
+        lexists = os.path.lexists
+        with patch.object(os.path, "lexists", side_effect=lambda path: path != target and lexists(path)):
+            assert owned.fileno() in vm_startup.fd_table()
+
+
+def test_reconciliation_restarts_after_a_real_process_disappears() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        path = store / "active.json"
+        with leased_fixture(store) as overlay:
+            fcntl.flock(overlay, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                     stdin=subprocess.PIPE, pass_fds=(overlay.fileno(),))
+        with child:
+            flock = fcntl.flock
+
+            def lock(fd, flags):
+                child.stdin.close()
+                assert child.wait(timeout=2) == 0
+                return flock(fd, flags)
+
+            with patch.object(fcntl, "flock", lock):
+                reconcile(store)
+        assert not path.exists()
+        assert json.loads((store / "interrupted.reconciled.json").read_text())["overlay_descriptors_closed"] is True
+
+
+def test_overlay_lease_faults_preserve_active_ownership_until_proven() -> None:
+    from image_stream import list_directory
+
+    # The recovery decision no longer reads /proc PID or descriptor inventories.
+    cases = ("list", "journal-lstat", "journal-open", "journal-fstat",
+             "attempt-lstat", "job-lstat", "overlay-lstat", "overlay-open",
+             "overlay-fstat", "lease", "publish", "overlay-unlink", "active-unlink")
+    transient = (errno.EIO, errno.EINTR, errno.EAGAIN)
+    failures = (*transient, errno.ENOENT, errno.EACCES, errno.EPERM, errno.EBUSY, errno.ESTALE, errno.ENOSPC)
+    lstat, native_open, fstat, flock, publish, unlink = (
+        pathlib.Path.lstat, os.open, os.fstat, fcntl.flock, image_lifecycle.receipt, pathlib.Path.unlink)
+    for site, code in product(cases, failures):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as hooks:
+            store = pathlib.Path(temporary)
+            with leased_fixture(store) as created:
+                disk_inode = os.fstat(created.fileno()).st_ino
+            active = store / "active.json"
+            journal_inode = active.lstat().st_ino
+            record = store / "interrupted.reconciled.json"
+            hits = []
+
+            def fault(step, path):
+                if site == step and not hits:
+                    hits.append(step)
+                    raise OSError(code, "fixture lease observation", path)
+
+            def scan(path, **kwargs):
+                fault("list", path)
+                return list_directory(path, **kwargs)
+
+            def lookup(path):
+                if what := {"active.json": "journal", "interrupted": "attempt", "build": "job",
+                            "overlay.qcow2": "overlay"}.get(path.name):
+                    fault(what + "-lstat", path)
+                return lstat(path)
+
+            def open_input(path, options, *args, **kwargs):
+                if what := {"active.json": "journal", "overlay.qcow2": "overlay"}.get(pathlib.Path(path).name):
+                    fault(what + "-open", path)
+                return native_open(path, options, *args, **kwargs)
+
+            def stat_input(fd):
+                result = fstat(fd)
+                if what := {journal_inode: "journal", disk_inode: "overlay"}.get(result.st_ino):
+                    fault(what + "-fstat", fd)
+                return result
+
+            def lease(fd, flags):
+                fault("lease", fd)
+                return flock(fd, flags)
+
+            def write_record(path, row):
+                fault("publish", path)
+                return publish(path, row)
+
+            def remove(path, **kwargs):
+                if what := {"active.json": "active", "overlay.qcow2": "overlay"}.get(path.name):
+                    fault(what + "-unlink", path)
+                return unlink(path, **kwargs)
+
+            for owner, name, replacement in (
+                (image_lifecycle, "list_directory", scan), (pathlib.Path, "lstat", lookup),
+                (os, "open", open_input), (os, "fstat", stat_input), (fcntl, "flock", lease),
+                (image_lifecycle, "receipt", write_record), (pathlib.Path, "unlink", remove),
+            ):
+                hooks.enter_context(patch.object(owner, name, replacement))
+            retries = site not in ("publish", "overlay-unlink", "active-unlink")
+            expected = (retries and code in transient and not (site == "lease" and code == errno.EAGAIN))
+            try:
+                reconcile(store)
+            except (image_resources.AdmissionError, OSError, StreamError):
+                assert not expected, (site, code)
+            else:
+                assert expected, (site, code)
+            assert hits == [site], (site, code)
+            assert active.exists() != expected, (site, code)
+            assert record.exists() == (expected or site in ("overlay-unlink", "active-unlink")), (site, code)
+
+
+def test_overlay_recovery_requires_exact_contention_errno() -> None:
+    flags = fcntl.LOCK_EX | fcntl.LOCK_NB
+    native_lock = fcntl.flock
+    contention = (errno.EAGAIN, errno.EWOULDBLOCK)
+    errors = (*contention, errno.EINPROGRESS, errno.EALREADY, errno.EINTR, errno.EACCES,
+              errno.EBADF, errno.EIO, errno.ENOLCK)
+    for phase, code in product(("acquire", "probe"), errors):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as held:
+            store = pathlib.Path(temporary)
+            with leased_fixture(store):
+                pass
+            overlay = store / "interrupted/build/overlay.qcow2"
+            journal = store / "active.json"
+            recovery = store / "interrupted.reconciled.json"
+            if phase == "acquire":
+                holder = held.enter_context(overlay.open("r+b"))
+                native_lock(holder, flags)
+            original = journal.read_bytes()
+            attempts = 0
+
+            def observe(fd, operations):
+                nonlocal attempts
+                try:
+                    native_lock(fd, operations)
+                except OSError as error:
+                    # The independent description is really contending in both cases.
+                    assert error.errno in contention
+                    attempts += 1
+                    raise OSError(code, "fixture lock errno") from error
+
+            retires = phase == "probe" and code in contention
+            with patch.object(fcntl, "flock", observe):
+                try:
+                    reconcile(store)
+                except image_resources.AdmissionError as error:
+                    assert not retires, (phase, code, error)
+                    assert str(error).startswith("previous image overlay is still held:") == (
+                        phase == "acquire" and code in contention), (phase, code, error)
+                    assert error.__cause__.errno == code, (phase, code, error)
+                else:
+                    assert retires, (phase, code, "retired without proven contention")
+            assert attempts == (3 if code in (errno.EINTR, errno.EIO) else 1), (phase, code, attempts)
+            if retires:
+                assert not journal.exists() and not overlay.exists()
+                assert json.loads(recovery.read_text())["overlay_descriptors_closed"] is True
+            else:
+                assert journal.read_bytes() == original and overlay.is_file() and not recovery.exists()
+
+
+def test_legacy_overlay_never_uses_a_process_scan_to_certify_closure() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        journal = store / "active.json"
+        journal.write_text(json.dumps({"attempt": "interrupted", "overlay_inode": [0, 0]}))
+        journal.chmod(0o600)
+        try:
+            reconcile(store)
+        except image_resources.AdmissionError as error:
+            assert "manual recovery" in str(error)
+        else:
+            raise AssertionError("legacy anonymous overlay retired without proof")
+        assert journal.is_file() and not (store / "interrupted.reconciled.json").exists()
+
+
+def test_overlay_or_journal_replacement_during_lease_keeps_journal() -> None:
+    for name in ("overlay", "journal"):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = pathlib.Path(temporary)
+            with leased_fixture(store):
+                pass
+            active = store / "active.json"
+            overlay = store / "interrupted/build/overlay.qcow2"
+            selected = overlay if name == "overlay" else active
+            payload = selected.read_bytes()
+            holder = selected.with_suffix(".original")
+            native_lock = fcntl.flock
+
+            def replace_then_lock(fd, flags):
+                # One replacement; the contention probe also calls flock.
+                if not holder.exists():
+                    selected.rename(holder)
+                    selected.write_bytes(payload)
+                    selected.chmod(0o600)
+                return native_lock(fd, flags)
+
+            with patch.object(fcntl, "flock", replace_then_lock):
+                try:
+                    reconcile(store)
+                except image_resources.AdmissionError:
+                    pass
+                else:
+                    raise AssertionError(f"reconciliation accepted a replaced {name}")
+            assert active.exists() and overlay.exists() and holder.exists()
+            assert not (store / "interrupted.reconciled.json").exists()
 
 
 def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
@@ -1607,7 +2400,546 @@ def test_quarantined_outputs_do_not_reduce_future_pair_disk_admission() -> None:
             "identity": json.loads(candidate.read_text())["identity"],
             "acceptance_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
         }))
+        for receipt_path in (candidate, candidate.parent / "exit.json"):
+            receipt_path.chmod(0o600)
         assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == allocated
+        for name in ("active.json", "previous.reconciled.json"):
+            interrupted = store / name
+            interrupted.write_text(json.dumps({"attempt": "previous"}))
+            interrupted.chmod(0o600)
+            assert image_vm.completed_acceptance(candidate) is None
+            assert retained_outputs(store, IDENTITY, ("c" * 64, "d" * 64)) == 0
+            interrupted.unlink()
+
+
+def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        store = root / "returns"
+        prior = store / "previous"
+        prior.mkdir(parents=True, mode=0o700)
+        store.chmod(0o700)
+        (store / "unfinished").mkdir()
+        base, capsule = root / "base", root / "input"
+        base.write_bytes(b"base")
+        capsule.write_bytes(b"capsule")
+        digest = hashlib.sha256(b"capsule").hexdigest()
+        args = SimpleNamespace(image_mode="probe", base=base, input_capsule=capsule, input_sha256=digest,
+                               base_sha256="c" * 64, trust_policy=root / "policy", output_dir=store,
+                               attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                               source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None, group_id=None)
+        identity = asdict(replace(IDENTITY, attempt="previous", input_sha256=digest))
+        acceptance = json.dumps({"schema": 1, "identity": identity, "content_verified": True,
+                                 "base_sha256": "c" * 64, "public_root_der_sha256": "d" * 64}).encode()
+        (prior / "acceptance.json").write_bytes(acceptance)
+        (prior / "exit.json").write_text(json.dumps({"schema": 1, "launcher_exit": 0, "pair_complete": True,
+                                                    "identity": identity,
+                                                    "acceptance_sha256": hashlib.sha256(acceptance).hexdigest()}))
+        for receipt_path in (prior / "exit.json", prior / "acceptance.json"):
+            receipt_path.chmod(0o600)
+        listdir = os.listdir
+
+        for error in (errno.EIO, errno.EINTR, errno.EAGAIN, errno.EPERM, errno.ENOENT):
+            for failures in (1, 3):
+                scans = 0
+                injected = 0
+                diagnostics = []
+
+                def scan(path):
+                    nonlocal scans, injected
+                    if named(path) == store:
+                        scans += 1
+                        return ["unfinished", "previous"]
+                    if named(path) == store / "unfinished" and injected < failures:
+                        injected += 1
+                        raise OSError(error, "fixture scan failure")
+                    return listdir(path)
+
+                with patch.object(image_vm, "list_directory", scan), \
+                        patch.object(image_vm, "require_host_lock"), patch.object(image_vm, "cgroup_admission"), \
+                        patch.object(image_vm, "load_policy", return_value=SimpleNamespace()) as policy, \
+                        patch.object(image_vm, "asdict", side_effect=lambda value: {"root_der_sha256": "d" * 64}
+                                     if value is policy.return_value else asdict(value)), \
+                        patch.object(image_vm, "report_error", side_effect=diagnostics.append), \
+                        patch.object(image_vm, "run") as launch, patch.object(image_vm, "execute") as execute:
+                    assert image_vm.run_image(args, None, vm.Cancellation()) == 1
+                launch.assert_not_called()
+                execute.assert_not_called()
+                recovered = error in (errno.EIO, errno.EINTR, errno.EAGAIN) and failures == 1
+                assert scans == (2 if recovered else 3 if error in (errno.EIO, errno.EINTR, errno.EAGAIN) else 1)
+                assert len(diagnostics) == 1
+                assert ("already contains this board" if recovered else "cannot complete") in str(diagnostics[0])
+                assert not (store / IDENTITY.attempt).exists()
+
+
+def probe_fixture_args(root):
+    base = root / "base"
+    capsule = root / "capsule"
+    base.write_bytes(b"fixture base")
+    base.chmod(0o444)
+    capsule.write_bytes(b"fixture capsule")
+    return SimpleNamespace(base=base, input_capsule=capsule,
+                           input_sha256=hashlib.sha256(capsule.read_bytes()).hexdigest(),
+                           base_sha256=hashlib.sha256(base.read_bytes()).hexdigest(),
+                           trust_policy=root / "policy", output_dir=root / "store",
+                           attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                           source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None,
+                           group_id=None, image_mode="probe")
+
+
+def test_fresh_store_requires_policy_before_backing_tool_with_one_retry_budget() -> None:
+    for code, attempts in ((errno.EIO, 3), (errno.EINTR, 3), (errno.EAGAIN, 3), (errno.EPERM, 1)):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = probe_fixture_args(pathlib.Path(temporary))
+            calls = []
+            native_lstat = pathlib.Path.lstat
+
+            def lstat(path):
+                if path == args.trust_policy:
+                    calls.append("policy lstat")
+                    raise OSError(code, "fixture policy observation")
+                return native_lstat(path)
+
+            def backing(args, **kwargs):
+                calls.append("qemu-img")
+                return subprocess.CompletedProcess(args, 0, b'{"format":"qcow2","virtual-size":137438953472}')
+
+            with patch.object(pathlib.Path, "lstat", lstat), patch.multiple(
+                    image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                    run=backing, disk_admission=lambda *_: None), \
+                    patch.object(image_vm, "execute") as execute, patch.object(image_vm, "report_error"):
+                assert image_vm.run_image(args, None, Cancellation()) == 1
+            execute.assert_not_called()
+            assert calls == ["policy lstat"] * attempts, calls
+            assert not args.output_dir.exists()
+
+
+def test_attempt_stays_in_admitted_directory_after_its_name_changes() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        args = probe_fixture_args(root)
+        args.output_dir.mkdir(mode=0o700)
+        admitted = root / "admitted"
+        used = []
+        real_mkdir = os.mkdir
+
+        def mkdir(path, mode=0o777, *, dir_fd=None):
+            if pathlib.Path(path).name == IDENTITY.attempt:
+                args.output_dir.rename(admitted)
+                real_mkdir(args.output_dir, 0o755)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+
+        def execute(_base, directory, request, _cancel, jobs):
+            used.append(directory.parents[1].stat().st_ino)
+            artifacts = directory / "artifacts"
+            artifacts.mkdir(parents=True)
+            identity = request["payload"]["identity"]
+            (artifacts / "verification.json").write_text(json.dumps({
+                "schema": 1, "identity": identity, "network_denied": True}))
+            jobs.append(SimpleNamespace(directory=directory, state={"identity": identity,
+                                         "stop_reason": "guest exited; transport validated"}))
+            return artifacts
+
+        with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                            load_policy=lambda *_: FixturePolicy(), validate_base=lambda *_: None,
+                            disk_admission=lambda *_: None, execute=execute), \
+                patch.object(image_resources.ImageCaps, "qemu_limit"), patch.object(os, "mkdir", mkdir):
+            with fixture_signal_mask():
+                assert image_vm.run_image(args, None, Cancellation()) == 0
+        assert used == [admitted.stat().st_ino]
+        assert (admitted / IDENTITY.attempt / "build/exit.json").is_file()
+        assert list(args.output_dir.iterdir()) == []
+
+
+def test_reconcile_refuses_a_filesystem_that_ignores_lease_contention() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = pathlib.Path(temporary)
+        with leased_fixture(store):
+            pass
+        # A successful return from flock is insufficient on this backend.
+        with patch.object(fcntl, "flock", return_value=None):
+            try:
+                reconcile(store)
+            except image_resources.AdmissionError as error:
+                assert "does not enforce overlay flock contention" in str(error)
+            else:
+                raise AssertionError("recovery relied on a no-op flock")
+        assert (store / "active.json").is_file()
+        assert (store / "interrupted/build/overlay.qcow2").is_file()
+        assert not (store / "interrupted.reconciled.json").exists()
+
+
+def test_late_disk_error_restarts_store_admission_before_execution() -> None:
+    for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            store = root / "store"
+            store.mkdir(mode=0o700)
+            base, capsule = root / "base", root / "capsule"
+            base.touch()
+            capsule.write_bytes(b"fixture capsule")
+            args = SimpleNamespace(base=base, input_capsule=capsule,
+                                   input_sha256=hashlib.sha256(capsule.read_bytes()).hexdigest(),
+                                   base_sha256="a" * 64, trust_policy=root / "trust", output_dir=store,
+                                   attempt=IDENTITY.attempt, board=IDENTITY.board, source_commit=IDENTITY.commit,
+                                   source_epoch=IDENTITY.epoch, source_bundle=None, check_script=None,
+                                   group_id=None, image_mode="probe")
+            steps = []
+            inventory = image_vm.list_directory
+
+            def policy(_path):
+                steps.append("policy")
+                return FixturePolicy()
+
+            def scan(path):
+                if named(path) == store:
+                    steps.append("store")
+                return inventory(path)
+
+            def disk(*_args):
+                steps.append("disk")
+                if steps.count("disk") <= failures:
+                    raise OSError(error, "fixture late disk observation")
+
+            def execute(_base, directory, request, *_args):
+                steps.append("execute")
+                artifacts = directory / "artifacts"
+                artifacts.mkdir(parents=True)
+                (artifacts / "verification.json").write_text(json.dumps({
+                    "schema": 1, "identity": request["payload"]["identity"], "network_denied": True}))
+                return artifacts
+
+            success = failures == 1 and error != errno.EPERM
+            with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
+                                validate_base=lambda *_: None, load_policy=policy, list_directory=scan,
+                                disk_admission=disk, execute=execute), \
+                    patch.object(image_resources.ImageCaps, "qemu_limit"):
+                try:
+                    image_vm.measure_image(args, None, Cancellation(), [])
+                except image_resources.AdmissionError as exc:
+                    assert not success and exc.__cause__.errno == error, (error, failures, exc)
+                else:
+                    assert success, (error, failures)
+            tries = 1 if error == errno.EPERM else min(failures + 1, 3)
+            assert steps == ["policy", "store", "disk"] * tries + (["execute"] if success else []), steps
+            assert (store / IDENTITY.attempt).exists() == success
+
+
+def test_guest_poweroff_does_not_depend_on_image_completion_marker() -> None:
+    body = json.dumps({"schema": 1, "identity": asdict(IDENTITY), "network_denied": True}).encode()
+    frame = io.BytesIO()
+    encode(frame, [("verification.json", body)], IDENTITY)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "image").mkdir()
+        (root / "image/raw").touch()
+        wire, returned = root / "wire", root / "returned"
+        wire.write_bytes(frame.getvalue())
+        helper = root / "image_guest.py"
+        helper.write_text(f"import pathlib, sys\npathlib.Path({str(returned)!r}).write_bytes("
+                          f"pathlib.Path({str(wire)!r}).read_bytes())\n"
+                          "print('late stdout', flush=True)\nprint('late stderr', file=sys.stderr, flush=True)\n"
+                          "raise SystemExit(int(sys.argv[1]))\n")
+        observed = root / "poweroff"
+        for tool, command in (
+            ("modprobe", "exit 0"),
+            ("systemctl", f'[[ $* = poweroff ]] && cmp -s "{wire}" "{returned}" && : >"{observed}"'),
+        ):
+            stub = root / tool
+            stub.write_text(f"#!/bin/bash\n{command}\n")
+            stub.chmod(0o700)
+        wrapper = (ROOT / "ci/kernel-runner/guest-job.sh").read_text()
+        wrapper = wrapper.replace("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive", str(root))
+        wrapper = wrapper.replace("/usr/local/lib/ceralive-kernel-runner/image_guest.py", f'"{helper}" "$1"')
+        master, slave = pty.openpty()
+        failures = []
+        try:
+            with ExitStack() as pipes:
+                writers = []
+                for _ in range(2):
+                    reader, writer = os.pipe()
+                    pipes.callback(os.close, reader)
+                    pipes.callback(os.close, writer)
+                    capacity = fcntl.fcntl(writer, fcntl.F_GETPIPE_SZ)
+                    assert os.write(writer, b"x" * capacity) == capacity
+                    writers.append(writer)
+                termios.tcflow(slave, termios.TCOOFF)
+                for status, sink in product((0, 1, 37), (str(root / "serial"), os.ttyname(slave), "/dev/full")):
+                    observed.unlink(missing_ok=True)
+                    returned.unlink(missing_ok=True)
+                    with subprocess.Popen(
+                        ["/bin/bash", "-c", wrapper.replace("/dev/ttyS0", sink), "fixture", str(status)],
+                        env={"PATH": f"{root}:/usr/bin:/bin"}, start_new_session=True,
+                        stdout=writers[0], stderr=writers[1],
+                    ) as guest:
+                        try:
+                            guest.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(guest.pid, signal.SIGKILL)
+                            guest.wait()
+                            failures.append((sink, status, "shutdown exceeded two seconds"))
+                        else:
+                            if not observed.is_file() or guest.returncode != status:
+                                failures.append((sink, status, observed.is_file(), guest.returncode))
+                    assert returned.read_bytes() == frame.getvalue()
+                    if sink == str(root / "serial"):
+                        assert pathlib.Path(sink).read_bytes() == f"\nCERALIVE_JOB_DONE={status}\n".encode()
+        finally:
+            os.close(slave)
+            os.close(master)
+        assert not failures, failures
+
+
+def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
+    with patch.object(image_resources, "require_process_priority", return_value=9), \
+            patch.object(image_resources, "cgroup_limits", return_value=10), \
+            patch.object(subprocess, "Popen") as spawn:
+        for value, error in ((0, None), ((2 << 13) | 7, None), (1 << 13, None),
+                             (4 << 13, None), (-1, errno.ENOSYS), (-1, errno.EPERM)):
+            with patch.object(image_resources._LIBC, "syscall", return_value=value), \
+                    patch.object(image_resources.ctypes, "get_errno", return_value=error):
+                if value in (0, (2 << 13) | 7):
+                    row = image_resources.process_priority(os.getpid(), Cancellation())
+                    assert row["ionice"] == ("none: prio 0" if value == 0 else "best-effort: prio 7")
+                else:
+                    try:
+                        image_resources.process_priority(os.getpid(), Cancellation())
+                    except image_resources.AdmissionError:
+                        pass
+                    else:
+                        raise AssertionError((value, error))
+        spawn.assert_not_called()
+
+
+def test_priority_syscall_error_restarts_the_whole_observation() -> None:
+    for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
+        steps = []
+
+        def cpu(_pid):
+            steps.append("cpu")
+            return 9
+
+        def cgroup(_pid):
+            steps.append("cgroup")
+            return 10
+
+        def ioprio(*_args):
+            steps.append("ioprio")
+            return -1 if steps.count("ioprio") <= failures else 0
+
+        with patch.object(image_resources, "require_process_priority", cpu), \
+                patch.object(image_resources, "cgroup_limits", cgroup), \
+                patch.object(image_resources._LIBC, "syscall", ioprio), \
+                patch.object(image_resources.ctypes, "get_errno", return_value=error):
+            try:
+                assert image_resources.process_priority(os.getpid(), Cancellation())["ionice"] == "none: prio 0"
+            except image_resources.IOPriorityError:
+                assert failures == 3 or error == errno.EPERM
+        assert steps == ["cpu", "cgroup", "ioprio"] * (1 if error == errno.EPERM else min(failures + 1, 3))
+
+
+def test_cgroup_sample_retries_whole_observation_or_refuses() -> None:
+    child, parent = "/sys/fs/cgroup/parent/child", "/sys/fs/cgroup/parent"
+    membership = "/proc/123/cgroup"
+    caps = {"memory.max": str(24 * image_resources.GIB), "memory.swap.max": "0",
+            "cpu.max": "400000 100000", "io.weight": "default 10\n"}
+    files = {f"{level}/{name}": value for level in (child, parent) for name, value in caps.items()}
+    files.update({membership: "0::/parent/child\n", f"{child}/cpu.weight": "10"})
+    transient = (errno.EIO, errno.EINTR, errno.EAGAIN)
+    for path, code in product(files, (*transient, errno.EPERM, errno.ENOENT)):
+        seen = []
+
+        def read_text(file):
+            name = str(file)
+            if name == path and name not in seen:
+                seen.append(name)
+                raise OSError(code, "fixture cgroup read", name)
+            seen.append(name)
+            if name not in files:
+                raise FileNotFoundError(errno.ENOENT, "controller file absent", name)
+            return files[name]
+
+        with patch.object(pathlib.Path, "read_text", read_text), \
+                patch.object(pathlib.Path, "is_file", lambda p: str(p) in files):
+            if code in transient:
+                assert image_resources.retry_check(image_resources.cgroup_limits, 123) == 10
+                assert seen.count(membership) == 2 and seen.count(path) == 2, (path, code, seen)
+            else:
+                try:
+                    image_resources.retry_check(image_resources.cgroup_limits, 123)
+                except (OSError, image_resources.AdmissionError):
+                    assert path in seen, (path, code)
+                else:
+                    raise AssertionError((path, code, "inconclusive sample accepted"))
+
+    files[f"{child}/memory.max"] = str(8 * image_resources.GIB)
+    for failure in ("metadata", "malformed"):
+        def read_text(file):
+            if str(file) not in files:
+                raise FileNotFoundError(errno.ENOENT, "controller file absent", str(file))
+            return "invalid" if failure == "malformed" and str(file) == f"{child}/memory.max" else files[str(file)]
+
+        def is_file(file):
+            return str(file) in files and not (failure == "metadata" and str(file) == f"{child}/memory.max")
+
+        with patch.object(pathlib.Path, "read_text", read_text), patch.object(pathlib.Path, "is_file", is_file):
+            try:
+                image_resources.retry_check(image_resources.cgroup_limits, 123)
+            except image_resources.AdmissionError:
+                pass
+            else:
+                raise AssertionError(f"accepted child limit after {failure}")
+
+    for code in transient:
+        reads = []
+
+        def failed_read(path):
+            name = str(path)
+            reads.append(name)
+            if name == f"{child}/memory.max":
+                raise OSError(code, "persistent fixture cgroup read", name)
+            return files[name]
+
+        with patch.object(pathlib.Path, "read_text", failed_read):
+            try:
+                image_resources.retry_check(image_resources.cgroup_limits, 123)
+            except OSError as error:
+                assert error.errno == code
+                assert reads == [membership, f"{child}/memory.max"] * 3
+            else:
+                raise AssertionError("persistent cgroup error accepted")
+
+
+def test_admission_and_live_sampling_enforce_all_device_io_weights() -> None:
+    child, parent = "/sys/fs/cgroup/parent/child", "/sys/fs/cgroup/parent"
+    caps = {"memory.max": str(24 * image_resources.GIB), "memory.swap.max": "0",
+            "cpu.max": "400000 100000"}
+    files = {f"{level}/{name}": value for level in (child, parent) for name, value in caps.items()}
+    files.update({"/proc/self/cgroup": "0::/parent/child\n", "/proc/123/cgroup": "0::/parent/child\n",
+                  f"{child}/cpu.weight": "10", "/proc/meminfo": "MemAvailable: 33554432 kB\n"})
+    cases = (
+        ("default 10\n", "default 100\n", None),
+        ("default 100\n", "default 100\n", "IOWeight"),
+        ("default 10\n8:0 100\n", "default 100\n", "IOWeight"),
+        ("default 10\n8:0 10\n", "default 100\n", None),
+        ("default 10\n8:0 9\n", "default 100\n", None),
+        ("default 10\n8:0 10\n8:1 1\n", "default 100\n", None),
+        ("default 10\n8:0 10\n8:1 11\n", "default 100\n", "IOWeight"),
+        ("default 10\n253:17 11\n", "default 100\n8:0 10\n", "IOWeight"),
+        ("default 100\n", "default 10\n253:17 11\n", "IOWeight"),
+        ("default 10\n8:0 100\n", "default 100\n8:0 9\n", None),
+        ("default 10\n8:0 wrong\n", "default 100\n", "invalid cgroup limit"),
+        ("default 10\n8 9\n", "default 100\n", "invalid cgroup limit"),
+        ("default 10\n8:0 0\n", "default 100\n", "invalid cgroup limit"),
+        ("default 10\n8:0 9\n8:0 10\n", "default 100\n", "invalid cgroup limit"),
+    )
+    def read_text(path):
+        if str(path) not in files:
+            raise FileNotFoundError(errno.ENOENT, "fixture absent control", str(path))
+        return files[str(path)]
+
+    with patch.object(pathlib.Path, "read_text", read_text), \
+            patch.object(image_resources, "require_process_priority", return_value=9), \
+            patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
+            patch.object(image_resources._LIBC, "syscall", return_value=0):
+        for child_weights, parent_weights, expected in cases:
+            files[f"{child}/io.weight"] = child_weights
+            files[f"{parent}/io.weight"] = parent_weights
+            for observe in (image_resources.cgroup_admission,
+                            lambda: image_resources.process_priority(123, Cancellation())):
+                try:
+                    observe()
+                except image_resources.AdmissionError as error:
+                    assert expected and expected in str(error), (child_weights, parent_weights, observe, error)
+                else:
+                    assert expected is None, (child_weights, parent_weights, observe, "invalid device weight accepted")
+
+
+def test_admission_and_live_sampling_require_conclusive_bfq_weights() -> None:
+    child, parent = "/sys/fs/cgroup/parent/child", "/sys/fs/cgroup/parent"
+    caps = {"memory.max": str(24 * image_resources.GIB), "memory.swap.max": "0",
+            "cpu.max": "400000 100000", "io.weight": "default 7\n"}
+    baseline = {f"{level}/{name}": value for level in (child, parent) for name, value in caps.items()}
+    baseline.update({"/proc/self/cgroup": "0::/parent/child\n", "/proc/123/cgroup": "0::/parent/child\n",
+                     f"{child}/cpu.weight": "10", "/proc/meminfo": "MemAvailable: 33554432 kB\n"})
+    high = "default 100\n"
+    cases = (
+        (None, None, None, 0, True, 1),
+        (high, high, None, 0, False, 1),
+        ("default 11\n", high, None, 0, False, 1),
+        ("default 10\n", high, None, 0, True, 1),
+        ("default 7\n", high, None, 0, True, 1),
+        ("default 7\n8:1 100\n", high, None, 0, False, 1),
+        ("default 7\n8:1 10\n253:17 9\n", high, None, 0, True, 1),
+        ("default 7\n8:1 9\n253:17 11\n", high, None, 0, False, 1),
+        ("default 7\n8:1 100\n", "default 11\n8:1 9\n", None, 0, True, 1),
+        (high, "default 10\n253:17 11\n", None, 0, False, 1),
+        ("default 7\n", None, None, 0, False, 3),
+        (None, "default 7\n", None, 0, False, 3),
+        ("default 7\n", "default 7\n8:1 malformed\n", None, 0, False, 3),
+        ("default 7\n8:1 8\n8:1 9\n", high, None, 0, False, 3),
+    )
+    for child_text, parent_text, code, failures, accept, observations in (
+        *cases,
+        *((("default 7\n", high, error, count, count == 1, count + (count == 1)))
+          for error, count in product((errno.EIO, errno.EINTR, errno.EAGAIN, errno.EACCES, errno.ENOENT), (1, 3))),
+    ):
+        files = baseline.copy()
+        for level, text in ((child, child_text), (parent, parent_text)):
+            if text is not None:
+                files[f"{level}/io.bfq.weight"] = text
+        for pid, observe in (("self", image_resources.cgroup_admission),
+                             ("123", lambda: image_resources.process_priority(123, Cancellation()))):
+            reads = []
+            fault = f"{parent}/io.bfq.weight"
+
+            def read_text(path):
+                name = str(path)
+                reads.append(name)
+                if name == fault and code is not None and reads.count(name) <= failures:
+                    raise OSError(code, "fixture BFQ read")
+                if name not in files:
+                    raise FileNotFoundError(errno.ENOENT, "fixture absent control")
+                return files[name]
+
+            def lstat(path):
+                if str(path) not in files:
+                    raise FileNotFoundError(errno.ENOENT, "fixture absent control")
+                return os.stat_result((0,) * 10)
+
+            with patch.object(pathlib.Path, "read_text", read_text), patch.object(pathlib.Path, "lstat", lstat), \
+                    patch.object(image_resources, "require_process_priority", return_value=9), \
+                    patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}), \
+                    patch.object(image_resources._LIBC, "syscall", return_value=0):
+                try:
+                    observe()
+                except (image_resources.AdmissionError, OSError) as exc:
+                    assert not accept and ("bfq" in str(exc) or "BFQ" in str(exc)), (pid, reads, exc)
+                else:
+                    assert accept, (pid, child_text, parent_text, code, reads)
+            assert reads.count(f"/proc/{pid}/cgroup") == observations, (pid, reads)
+            assert reads.count(f"{child}/memory.max") == observations, (pid, reads)
+
+
+def test_full_launcher_probe_stderr_flood() -> None:
+    for mib in (3, 8):
+        cancelled_fixture(f"stderr-flood:{mib}")
+
+
+def test_launcher_refuses_and_reaps_after_failed_live_priority_sample() -> None:
+    cancelled_fixture("priority-failure")
+
+
+def test_probe_exact_result_types_never_commit_success() -> None:
+    for field, values in {
+        "schema": (True, 1.0, "1", None),
+        "network_denied": (1, "true", 0, 1.0, None, False),
+        "identity": ([], None),
+        "identity.attempt": (1,), "identity.board": (False,), "identity.commit": (None,),
+        "identity.input_sha256": (False,), "identity.epoch": (float(IDENTITY.epoch), "123", None),
+    }.items():
+        for value in values:
+            cancelled_fixture(f"probe-invalid:{field}:{json.dumps(value)}")
 
 
 if __name__ == "__main__":

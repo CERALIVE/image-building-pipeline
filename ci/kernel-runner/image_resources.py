@@ -2,21 +2,47 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import errno
 import os
 from pathlib import Path
+import re
 import resource
 from typing import Final, TypedDict
 
-from vm_process import Cancellation, run
+from image_stream import retry_check
+from vm_process import Cancellation
 
 GIB: Final = 1024**3
 MIN_NICE: Final = 9
 MAX_CPU_WEIGHT: Final = 10
+MAX_IO_WEIGHT: Final = 10
+
+SYS_IOPRIO_GET: Final = 252
+IOPRIO_WHO_PROCESS: Final = 1
+IOPRIO_CLASS_SHIFT: Final = 13
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.syscall.restype = ctypes.c_long
 
 
 class AdmissionError(Exception):
     """An image attempt cannot fit its approved resource envelope."""
+
+
+class IOPriorityError(AdmissionError):
+    """The live guest's I/O class could not be verified."""
+
+
+class IOPrioritySyscallError(OSError):
+    """A native sampling error whose errno must reach the observation retry."""
+
+
+class BFQObservationError(OSError):
+    """An incomplete BFQ observation must restart the cgroup sample."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(errno.EIO, reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,40 +88,91 @@ def cgroup_limits(pid: int | str) -> int:
     membership = Path(f"/proc/{pid}/cgroup").read_text().strip()
     if not membership.startswith("0::/"):
         raise AdmissionError("image profile requires unified cgroup v2")
-    group = Path("/sys/fs/cgroup") / membership[4:].lstrip("/")
-    ancestors = (group, *group.parents)
-    roots = [path for path in ancestors if path.is_relative_to("/sys/fs/cgroup")]
+    root = Path("/sys/fs/cgroup")
+    relative = Path(membership[4:])
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise AdmissionError("image profile requires a dedicated non-root cgroup")
+    group = root / relative
     memory = []
     quotas = []
     swaps = []
-    weights = []
-    for path in roots:
-        for field, values in (("memory.max", memory), ("memory.swap.max", swaps)):
-            file = path / field
-            if file.is_file():
-                value = file.read_text().strip()
+    weights: list[dict[str, int]] = []
+    bfq_weights: list[dict[str, int]] = []
+
+    def read(path: Path, field: str) -> str:
+        try:
+            return (path / field).read_text().strip()
+        except FileNotFoundError as error:
+            raise AdmissionError(f"missing required cgroup control {path / field}") from error
+
+    def number(value: str) -> int:
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError("expected an unsigned decimal integer")
+        return int(value)
+
+    def parse_weights(text: str) -> dict[str, int]:
+        by_device: dict[str, int] = {}
+        for line in text.strip().splitlines():
+            selector, value = line.split()
+            weight = number(value)
+            if (selector in by_device or not 1 <= weight <= 10000 or
+                    (selector != "default" and not re.fullmatch(r"[0-9]+:[0-9]+", selector))):
+                raise ValueError("invalid I/O weight")
+            by_device[selector] = weight
+        if "default" not in by_device:
+            raise ValueError("expected one default I/O weight")
+        return by_device
+
+    # Controllers expose these controls on non-root cgroups. A missing
+    # workload or ancestor control cannot be filled in from another sample.
+    try:
+        for path in (group, *group.parents):
+            if path == root:
+                break
+            for field, values in (("memory.max", memory), ("memory.swap.max", swaps)):
+                value = read(path, field)
                 if value != "max":
-                    values.append(int(value))
-        cpu = path / "cpu.max"
-        if cpu.is_file():
-            quota, period = cpu.read_text().split()
+                    values.append(number(value))
+            quota, period = read(path, "cpu.max").split()
+            period = number(period)
+            if period == 0:
+                raise ValueError("CPU period is zero")
             if quota != "max":
-                quotas.append(int(quota) / int(period))
-        io = path / "io.weight"
-        if io.is_file():
-            for line in io.read_text().splitlines():
-                if line.startswith("default "):
-                    weights.append(int(line.split()[1]))
+                cpu_quota = number(quota)
+                if cpu_quota == 0:
+                    raise ValueError("CPU quota is zero")
+                quotas.append(cpu_quota / period)
+            weights.append(parse_weights(read(path, "io.weight")))
+            bfq = path / "io.bfq.weight"
+            try:
+                try:
+                    text = bfq.read_text()
+                except FileNotFoundError:
+                    try:
+                        bfq.lstat()
+                    except FileNotFoundError:
+                        continue
+                    raise
+                bfq_weights.append(parse_weights(text))
+            except (OSError, ValueError) as error:
+                raise BFQObservationError(f"cannot sample {bfq}: {error}") from error
+        weight = number(read(group, "cpu.weight"))
+    except ValueError as error:
+        raise AdmissionError(f"invalid cgroup limit: {error}") from error
     if not memory or min(memory) != CAPS.memory_max:
         raise AdmissionError("image profile needs effective MemoryMax = 24 GiB")
     if not quotas or min(quotas) > CAPS.cpus:
         raise AdmissionError("image profile needs effective CPUQuota <= 400%")
     if not swaps or min(swaps) != 0:
         raise AdmissionError("image profile needs effective MemorySwapMax=0")
-    if not weights or min(weights) > 10:
-        raise AdmissionError("image profile needs effective IOWeight <= 10")
-    cpu_weight = group / "cpu.weight"
-    if not cpu_weight.is_file() or not 1 <= (weight := int(cpu_weight.read_text())) <= MAX_CPU_WEIGHT:
+    if bfq_weights and len(bfq_weights) != len(weights):
+        raise BFQObservationError("io.bfq.weight is missing on part of the cgroup hierarchy")
+    for field, hierarchy in (("io.weight", weights), ("io.bfq.weight", bfq_weights)):
+        # A device override replaces the default only at its own level.
+        if any(min(level.get(device, level["default"]) for level in hierarchy) > MAX_IO_WEIGHT
+               for device in set().union(*hierarchy)):
+            raise AdmissionError(f"image profile needs effective IOWeight <= {MAX_IO_WEIGHT} for {field}")
+    if not 1 <= weight <= MAX_CPU_WEIGHT:
         raise AdmissionError(f"image profile needs CPUWeight <= {MAX_CPU_WEIGHT} on its cgroup")
     return weight
 
@@ -117,18 +194,36 @@ class PriorityObservation(TypedDict):
 
 def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
     """Observe the owned QEMU process, including containment after exec."""
+    try:
+        return retry_check(_process_priority, pid, cancellation)
+    except IOPrioritySyscallError as error:
+        raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
+
+
+def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
+    cancellation.check()
+    if cancellation.finalizing:
+        raise RuntimeError("cannot sample a child during terminal finalization")
     nice = require_process_priority(pid)
     cpu_weight = cgroup_limits(pid)
-    ionice = run(["ionice", "-p", str(pid)], cancellation=cancellation,
-                 capture_output=True, timeout=1).stdout.decode().strip()
-    if ionice.startswith("realtime"):
+    if os.uname().machine != "x86_64" or ctypes.sizeof(ctypes.c_void_p) != 8:
+        raise IOPriorityError(os.strerror(errno.ENOSYS))
+    value = _LIBC.syscall(ctypes.c_long(SYS_IOPRIO_GET), IOPRIO_WHO_PROCESS, pid)
+    if value == -1:
+        error = ctypes.get_errno()
+        raise IOPrioritySyscallError(error, os.strerror(error))
+    policy, level = divmod(value, 1 << IOPRIO_CLASS_SHIFT)
+    if policy == 1:
         raise AdmissionError("image profile forbids realtime I/O priority")
+    if policy not in (0, 2, 3):
+        raise IOPriorityError(f"unrecognized I/O priority class {policy}")
+    ionice = f"{('none', 'realtime', 'best-effort', 'idle')[policy]}: prio {level}"
     return {"nice": nice, "ionice": ionice, "cpu_weight": cpu_weight}
 
 
 def cgroup_admission() -> None:
     """Check the launcher before any image preparation or guest is started."""
-    cgroup_limits("self")
+    retry_check(cgroup_limits, "self")
     require_process_priority(0)
     if len(os.sched_getaffinity(0)) != CAPS.cpus:
         raise AdmissionError("image profile needs four selected CPUs")
