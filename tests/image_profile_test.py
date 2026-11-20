@@ -2732,6 +2732,9 @@ early = threading.Thread(target=threading.Event().wait, daemon=True)
 early.start()
 if sys.argv[1:] and sys.argv[1].startswith("exit:"):
     sys.exit(int(sys.argv[1][5:]))
+if sys.argv[1:] == ["hold"]:
+    import signal
+    signal.pause()
 print("ready", flush=True)
 line = sys.stdin.readline()
 if line.startswith("exit"):
@@ -2755,8 +2758,11 @@ def qemu_standin(directory: pathlib.Path) -> pathlib.Path:
 
 
 def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_error=None,
-                  policy=os.SCHED_OTHER, comm=None, clock=None, exit_code=None):
-    """Sample a stand-in through the production wrapper with a modelled unprivileged nice."""
+                  policy=os.SCHED_OTHER, comm=None, cost=None, guest=None, interval=None, exit_code=None):
+    """Sample a stand-in through the production wrapper with a modelled unprivileged nice.
+
+    Time moves only by the settle's pauses and by each verification sample's cost.
+    """
     real_get, real_set, real_policy = os.getpriority, os.setpriority, os.sched_getscheduler
     read_text = pathlib.Path.read_text
     with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
@@ -2764,7 +2770,9 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
             stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
         assert child.stdout.readline() == b"ready\n"
         assert pathlib.Path(f"/proc/{child.pid}/comm").read_text() == "qemu-system-x86\n"
-        state = {"nice": initial, "reads": 0, "writes": [], "undo": undo}
+        now = [0.0]
+        costs = list(cost or ())
+        state = {"nice": initial, "reads": 0, "writes": [], "write_times": [], "pauses": [], "undo": undo}
 
         def exited():
             return os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
@@ -2784,6 +2792,7 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
 
         def put(which, who, value):
             state["writes"].append((who, value))
+            state["write_times"].append(now[0])
             if who != child.pid:
                 return real_set(which, who, value)
             if race is not None:
@@ -2811,16 +2820,30 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
                 return value
             return read_text(path, *args, **kwargs)
 
-        ticks = iter(clock) if clock is not None else (n / 10 for n in count())
-        options = {"settle": image_resources.Settle(exited, clock=lambda: next(ticks), pause=lambda _seconds: None)
+        def pause(seconds):
+            state["pauses"].append(round(seconds, 9))
+            now[0] += seconds
+
+        verify = image_resources.process_priority
+
+        def timed(pid, cancellation, **options):
+            assert not options
+            now[0] += costs.pop(0) if costs else 0.0
+            return verify(pid, cancellation)
+
+        options = {"settle": image_resources.Settle(exited, guest_deadline=guest, clock=lambda: now[0], pause=pause)
                    } if settle else {}
         try:
-            with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
-                    patch.object(os, "sched_getscheduler", scheduler), \
-                    patch.object(pathlib.Path, "read_text", proc_text), \
-                    patch.object(image_resources, "cgroup_limits", return_value=10):
-                return image_resources.process_priority(child.pid, Cancellation(), **options), state, child
-        except (image_resources.AdmissionError, OSError) as error:
+            with ExitStack() as hooks:
+                for owner, name, value in ((os, "getpriority", get), (os, "setpriority", put),
+                                           (os, "sched_getscheduler", scheduler), (pathlib.Path, "read_text", proc_text),
+                                           (image_resources, "process_priority", timed)):
+                    hooks.enter_context(patch.object(owner, name, value))
+                hooks.enter_context(patch.object(image_resources, "cgroup_limits", return_value=10))
+                if interval is not None:
+                    hooks.enter_context(patch.object(image_resources, "PRIORITY_SETTLE_INTERVAL", interval))
+                return verify(child.pid, Cancellation(), **options), state, child
+        except (image_resources.AdmissionError, image_resources.GuestDeadline, OSError) as error:
             return error, state, child
         finally:
             with suppress(BrokenPipeError):
@@ -2855,10 +2878,11 @@ def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> N
     error, state, _ = settle_sample(5, policy=OSError(errno.EIO, "fixture policy"))
     assert isinstance(error, OSError) and error.errno == errno.EIO and state["writes"] == [], (error, state)
     # One monotonic bound, checked before a sample is accepted.
-    row, _, _ = settle_sample(12, clock=[0.0, 4.9])
+    row, _, _ = settle_sample(12, cost=[4.9])
     assert type(row) is dict and row["nice"] == 12, row
-    error, _, _ = settle_sample(12, clock=[0.0, 5.1])
-    assert str(error) == "QEMU priority conformed after 5.100 s, beyond the 5.0 s settle bound", error
+    for seconds in (5.0, 5.1):
+        error, _, _ = settle_sample(12, cost=[seconds])
+        assert str(error) == f"QEMU priority conformed after {seconds:.3f} s, not within the 5.0 s settle bound", error
     # Only QEMU's own name proves the wrapper handed over; empty or unreadable names keep waiting.
     row, _, _ = settle_sample(12, comm=["", PermissionError(errno.EACCES, "fixture"), "sh", "setpriv", "qemu-system-x86\n"])
     assert type(row) is dict and row["nice"] == 12, row
@@ -2915,6 +2939,121 @@ def test_settle_raises_every_qemu_thread_and_later_threads_inherit_it() -> None:
     assert row["nice"] == 10 and nice == dict.fromkeys(tids, 10), (row, nice)
     # A thread created after the settle inherits its creator's raised niceness.
     assert min(report.values()) >= image_resources.MIN_NICE, report
+
+
+def test_settle_never_outlasts_the_guest_deadline() -> None:
+    # Guest time runs out during a pause: no pause or write past it, and the guest times out.
+    error, state, _ = settle_sample(-4, undo=100, guest=1.0, interval=0.4)
+    assert type(error) is image_resources.GuestDeadline, error
+    assert state["pauses"] == [0.4, 0.4, 0.2] and max(state["write_times"]) < 1.0, state
+    # An inconclusive sample completing at exactly the 5.0 s bound: refuse, with no further pause or write.
+    error, state, _ = settle_sample(-4, undo=100, interval=4.9, cost=[0.0, 0.1])
+    assert isinstance(error, image_resources.PriorityRefusal), error
+    assert state["pauses"] == [4.9] and max(state["write_times"]) < 5.0, state
+    # A conforming sample completing exactly at the guest deadline is a guest timeout.
+    error, _, _ = settle_sample(12, guest=1.0, cost=[1.0])
+    assert type(error) is image_resources.GuestDeadline, error
+
+
+def test_settle_converges_on_threads_created_during_the_raise() -> None:
+    real_get, real_set, real_list = os.getpriority, os.setpriority, image_resources.list_directory
+
+    def settle(creations, *, workers=0, guest=None, write_cost=0.0):
+        """Model every thread; a not-yet-raised thread clones a worker right after a listing."""
+        with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
+                vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+            assert child.stdout.readline() == b"ready\n"
+            nice = {child.pid: -4} | {10**7 + n: -4 for n in range(workers)}
+            now, writes, listings = [0.0], [], [0]
+            task = pathlib.Path(f"/proc/{child.pid}/task")
+
+            def listing(path, **kwargs):
+                if path != task:
+                    return real_list(path, **kwargs)
+                listings[0] += 1
+                names = [str(tid) for tid in nice]
+                if listings[0] <= creations:
+                    nice[2 * 10**7 + listings[0]] = 5  # Inherits its unraised creator's nice.
+                return names
+
+            def get(which, who):
+                return nice[who] if who in nice else real_get(which, who)
+
+            def put(which, who, value):
+                if who not in nice:
+                    return real_set(which, who, value)
+                writes.append(now[0])
+                nice[who] = value
+                now[0] += write_cost
+
+            exited = lambda: os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+            rule = image_resources.Settle(exited, guest_deadline=guest, clock=lambda: now[0],
+                                          pause=lambda seconds: now.__setitem__(0, now[0] + seconds))
+            try:
+                with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
+                        patch.object(image_resources, "list_directory", listing), \
+                        patch.object(image_resources, "cgroup_limits", return_value=10):
+                    result = image_resources.process_priority(child.pid, Cancellation(), settle=rule)
+            except (image_resources.AdmissionError, image_resources.GuestDeadline) as error:
+                result = error
+            finally:
+                child.stdin.close()
+            return result, nice, writes
+
+    # A worker cloned between the listing and the first raise, then one per pass for three passes.
+    for creations in (1, 3):
+        result, nice, _ = settle(creations)
+        assert type(result) is dict and len(nice) == 1 + creations, (result, nice)
+        assert min(nice.values()) >= image_resources.MIN_NICE, nice
+    # A process that never stops cloning low workers is never accepted.
+    result, nice, _ = settle(10**6)
+    assert isinstance(result, image_resources.PriorityRefusal) and "thread" in result.observed, result
+    # No priority write after the deadline: the second low thread is left once guest time is gone.
+    result, nice, writes = settle(0, workers=1, guest=1.0, write_cost=1.0)
+    assert type(result) is image_resources.GuestDeadline and writes == [0.0], (result, writes)
+
+
+def test_guest_deadline_during_priority_settle_times_out_the_guest() -> None:
+    real_popen, real_get, real_set = subprocess.Popen, os.getpriority, os.setpriority
+    now, owned = [0.0], {}
+    clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time,
+                            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        standin = qemu_standin(root)
+
+        def child(args, **options):
+            process = real_popen([*args[:9], str(standin), "hold"], **options)
+            owned["pid"] = process.pid
+            return process
+
+        # The host keeps the stand-in below the floor for the whole one-second guest budget.
+        def get(which, who):
+            return -4 if who == owned.get("pid") else real_get(which, who)
+
+        def put(which, who, value):
+            return None if who == owned.get("pid") else real_set(which, who, value)
+
+        directory = root / "fixture/build"
+        directory.mkdir(parents=True)
+        capsule = root / "capsule"
+        capsule.write_bytes(b"fixture")
+        try:
+            with tempfile.TemporaryFile(dir=root) as overlay, ImageJob(directory, IDENTITY, capsule, probe=True) as job:
+                job.state.update(overlay_directory=str(root), retained_bytes=0)
+                job.overlay_created(overlay.fileno())
+                with patch.object(vm.subprocess, "Popen", child), patch.object(image_lifecycle, "disk_headroom"), \
+                        patch.object(image_lifecycle, "time", clock), \
+                        patch.object(image_resources, "cgroup_limits", return_value=10), \
+                        patch.object(os, "getpriority", get), patch.object(os, "setpriority", put):
+                    vm.boot(pathlib.Path("/unused"), b"{}", "image", 1, disk_fd=overlay.fileno(), image_job=job)
+        except subprocess.TimeoutExpired as error:
+            assert error.cmd == "image guest" and error.timeout == 1, error
+        else:
+            raise AssertionError("guest deadline was not reported as a guest timeout")
+        record = json.loads((directory / "teardown.json").read_text())
+        assert record["qemu_reaped"] is True and "qemu_priority_refusal" not in record, record
 
 
 def test_guest_exit_during_priority_settle_reports_the_exit() -> None:
