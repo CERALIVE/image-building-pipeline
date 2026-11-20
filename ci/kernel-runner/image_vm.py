@@ -1,8 +1,14 @@
-"""Local image profile admission and independent artifact acceptance."""
+"""Local image profile admission and independent artifact acceptance.
+
+The output store, job directories, capsule and journal are private to the invoking user and
+written only by the launcher and its children. A same-user process that replaces files between
+a check and their use is outside this model, so later paths resolve through admitted descriptors.
+"""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import asdict
 from functools import partial
 import hashlib
@@ -15,10 +21,13 @@ import tarfile
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
-from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory
+from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory, unlink_observed
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
-from image_stream import Identity, StreamError, decode, verify_sidecar
+from image_stream import (
+    Identity, StreamError, checked_open, decode, exact_json, list_directory, listed_entry, retry_check,
+    unique_object, verify_sidecar,
+)
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -49,33 +58,65 @@ def image_arguments(job: ImageJob) -> list[str]:
     ]
 
 def validate_base(base: Path, expected_sha256: str,
-                  cancellation: Cancellation | None = None) -> None:
+                  cancellation: Cancellation | None = None) -> int:
     """Require the selected immutable base to reference no additional host file."""
     from vm import die_with_parent
     cancellation = cancellation or Cancellation()
-    if (base.is_symlink() or not base.is_file() or base.stat().st_mode & 0o222
-            or digest_file(base, cancellation.check) != expected_sha256):
-        raise AdmissionError("image base must be independently verified and read-only")
-    info = run(["qemu-img", "info", "--output=json", str(base.absolute())],
-               cancellation=cancellation, capture_output=True, timeout=30,
-               preexec_fn=partial(die_with_parent, os.getpid()))
-    row = json.loads(info.stdout)
-    specific = row.get("format-specific", {}).get("data", {})
-    if (row["format"] != "qcow2" or row["virtual-size"] != 128 * GIB
-            or row.get("backing-filename") or specific.get("data-file")
-            or specific.get("data-file-raw") or specific.get("corrupt")):
-        raise AdmissionError("image profile requires a dedicated unbacked 128 GiB base")
-
-def completed_acceptance(path: Path) -> dict | None:
-    """Validate the final marker before consuming a pair's acceptance candidate."""
+    fd = checked_digest(base, expected_sha256, cancellation, base=True)
     try:
-        marker = json.loads((path.parent / "exit.json").read_text())
-    except FileNotFoundError:
+        info = run(["qemu-img", "info", "--output=json", f"/proc/self/fd/{fd}"],
+                   cancellation=cancellation, capture_output=True, timeout=30,
+                   pass_fds=(fd,), preexec_fn=partial(die_with_parent, os.getpid()))
+        row = json.loads(info.stdout)
+        specific = row.get("format-specific", {}).get("data", {})
+        if (row["format"] != "qcow2" or row["virtual-size"] != 128 * GIB
+                or row.get("backing-filename") or specific.get("data-file")
+                or specific.get("data-file-raw") or specific.get("corrupt")):
+            raise AdmissionError("image profile requires a dedicated unbacked 128 GiB base")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def checked_digest(path: Path, expected_sha256: str, cancellation: Cancellation, *, base=False) -> int:
+    fd = checked_open(path, immutable=base, limit=None if base else INPUT_LIMIT)
+    try:
+        with os.fdopen(os.dup(fd), "rb") as source:
+            digest = hashlib.sha256()
+            while chunk := source.read(1024 * 1024):
+                cancellation.check()
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise AdmissionError("image input digest disagrees with selected identity")
+        os.lseek(fd, 0, os.SEEK_SET)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+def completed_acceptance(path: Path, *, entries: set[str] | None = None) -> dict | None:
+    """Validate the final marker before consuming a pair's acceptance candidate."""
+    if entries is None:
+        entries = set(retry_check(list_directory, path.parent))
+    if "exit.json" not in entries:
         return None
+    store = path.parent.parent
+    if listed_entry(store, path.parent.name + ".reconciled.json") is not None:
+        return None
+    active = store / "active.json"
+    active_info = listed_entry(store, active.name)
+    if active_info is not None:
+        if not stat.S_ISREG(active_info.st_mode):
+            raise AdmissionError("active journal is not a regular file")
+        if returned_json(active, private=True)["attempt"] == path.parent.name:
+            return None
+    marker_path = path.parent / "exit.json"
+    marker = returned_json(marker_path, private=True)
     if (marker["schema"] != 1 or type(marker["launcher_exit"]) is not int
             or marker["launcher_exit"] != 0 or marker.get("pair_complete") is not True):
         return None
-    raw = path.read_bytes()
+    raw = read_return_record(path, private=True)
     row = json.loads(raw)
     if (marker["acceptance_sha256"] != hashlib.sha256(raw).hexdigest()
             or marker["identity"] != row["identity"] or row["schema"] != 1
@@ -86,10 +127,25 @@ def completed_acceptance(path: Path) -> dict | None:
 
 def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
     """Only a verified other board reduces the remaining pair allocation."""
+    try:
+        return retry_check(scan_retained_outputs, store, identity, trust_identity)
+    except OSError as error:
+        raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
+
+
+def scan_retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str, str]) -> int:
     retained = 0
     boards = set()
-    for accepted in store.glob("*/acceptance.json"):
-        row = completed_acceptance(accepted)
+    for name in list_directory(store):
+        attempt = store / name
+        mode = attempt.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise AdmissionError("private output store contains a symbolic link")
+        if not stat.S_ISDIR(mode):
+            continue
+        names = set(list_directory(attempt))
+        accepted = attempt / "acceptance.json"
+        row = completed_acceptance(accepted, entries=names)
         if row is None:
             continue
         previous = Identity(**row["identity"])
@@ -99,11 +155,99 @@ def retained_outputs(store: Path, identity: Identity, trust_identity: tuple[str,
         if previous.board == identity.board or previous.board in boards:
             raise AdmissionError("private pair already contains this board; select a new reviewed store")
         boards.add(previous.board)
-        for file in (accepted.parent / "build/artifacts").iterdir():
-            if file.is_symlink() or not file.is_file():
+        artifacts = accepted.parent / "build/artifacts"
+        for name in list_directory(artifacts):
+            file = artifacts / name
+            info = file.lstat()
+            if not stat.S_ISREG(info.st_mode):
                 raise AdmissionError("retained pair contains an unexpected object")
-            retained += file.stat().st_blocks * 512
+            retained += info.st_blocks * 512
     return retained
+
+
+def admit_output_store(store: Path, identity: Identity, base: Path, base_sha256: str,
+                       trust_policy: Path) -> tuple[dict, int]:
+    """Recompute the store and capacity observation together on every attempt."""
+    trust = asdict(load_policy(trust_policy))
+    retained = scan_retained_outputs(store, identity, (base_sha256, trust["root_der_sha256"]))
+    disk_admission(store, store, retained)
+    return trust, retained
+
+def returned_json(path: Path, *, private: bool = False):
+    return json.loads(read_return_record(path, private=private), object_pairs_hook=unique_object)
+
+
+def read_return_record(path: Path, *, private: bool) -> bytes:
+    limit = 1024 * 1024
+    def read() -> bytes:
+        with os.fdopen(checked_open(path, private=private, limit=limit), "rb") as source:
+            data = source.read(limit + 1)
+        if len(data) > limit:
+            raise StreamError("image receipt exceeds its metadata limit")
+        return data
+
+    return retry_check(read)
+
+
+def measurement_stages(row, identity: Identity, public_root: str, members) -> dict:
+    stages = dict.fromkeys(("resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
+                           "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock",
+                           "parity", "raw-slots"), 0)
+    artifacts = {
+        member.id: {"sha256": member.sha256, "bytes": member.length} for member in members
+        if member.id in {"rootfs.tar", "packages.lock.json", "rootfs_a.ext4", "rootfs_b.ext4", "rootfs_a.reserve",
+                         "rootfs_b.reserve", "rootfs_a.header", "rootfs_b.header", "boot.scr", "boot.scr.sha256"}
+    }
+    if type(row) is not dict:
+        raise StreamError("invalid measurement receipt")
+    kernel = row.get("kernel_version")
+    metadata = row.get("metadata_validity")
+    if type(kernel) is not str or not kernel or type(metadata) is not dict:
+        raise StreamError("invalid measurement metadata")
+    repositories = metadata.get("repositories")
+    if (type(repositories) is not list or not repositories
+            or not exact_json(metadata, {"schema": 1, "purpose": "rootfs-measurement", "repositories": repositories})):
+        raise StreamError("invalid measurement repository metadata")
+    for repository in repositories:
+        if (type(repository) is not dict
+                or repository.keys() != {"repository", "release_date", "release_sha256", "freshness_checked", "freshness"}
+                or any(type(repository[key]) is not str
+                       for key in ("repository", "release_date", "release_sha256", "freshness"))
+                or type(repository["freshness_checked"]) is not bool
+                or repository["freshness"] != ("checked" if repository["freshness_checked"] else "NOT checked")):
+            raise StreamError("invalid measurement repository record")
+    expected = {
+        "schema": 1, "purpose": "rootfs-measurement", "build_mode": "production", "board": identity.board,
+        "source_commit": identity.commit, "source_date_epoch": identity.epoch, "input_sha256": identity.input_sha256,
+        "public_root_der_sha256": public_root, "kernel_version": kernel, "stages": stages,
+        "slot_only_additions": ["usr/lib/ceralive/boot/boot.scr", "usr/lib/ceralive/boot/boot.scr.sha256"],
+        "metadata_validity": metadata, "artifacts": artifacts, "signed_candidate": False,
+    }
+    if not exact_json(row, expected):
+        raise StreamError("measurement receipt identity, stage or artifact mismatch")
+    return stages
+
+
+def validate_verification(row, identity: Identity, inventory: dict) -> None:
+    if type(row) is not dict:
+        raise StreamError("invalid verifier receipt")
+    slots = row.get("slots")
+    if (type(slots) is not list or len(slots) != 2
+            or not exact_json(row, {"schema": 1, "verified": True, "build_identity": asdict(identity),
+                                    "artifacts": inventory, "slots": slots})):
+        raise StreamError("independent verifier disagrees with host-selected identity or inventory")
+    labels = set()
+    for slot in slots:
+        if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained", "nvidia_references"}
+                or type(slot["slot"]) is not str or slot["slot"] not in ("rootfs_a", "rootfs_b")
+                or type(slot["reserve"]) is not str or not slot["reserve"]
+                or any(type(slot[key]) is not list or not slot[key] or any(type(item) is not str for item in slot[key])
+                       for key in ("removed", "retained", "nvidia_references"))):
+            raise StreamError("invalid verifier slot record")
+        labels.add(slot["slot"])
+    if labels != {"rootfs_a", "rootfs_b"}:
+        raise StreamError("missing or duplicate verifier slot")
+
 
 def validate_return(job: ImageJob, verifier: bool) -> None:
     target = job.directory / "artifacts"
@@ -121,29 +265,12 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
     if {member.id for member in members} != expected:
         raise StreamError("returned artifact set is incomplete")
     if not verifier:
-        measurement = json.loads((target / "measurement.json").read_text())
-        stages = measurement["stages"]
-        if (measurement["schema"] != 1 or (measurement["purpose"], measurement["build_mode"], measurement["board"],
-             measurement["source_commit"], measurement["source_date_epoch"], measurement["input_sha256"])
-                != ("rootfs-measurement", "production", job.identity.board, job.identity.commit,
-                    job.identity.epoch, job.identity.input_sha256)
-                or measurement["public_root_der_sha256"] != job.state["public_root_der_sha256"]
-                or measurement["signed_candidate"] is not False
-                or not isinstance(stages, dict)
-                or set(stages) != {
-                    "resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
-                    "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock", "parity", "raw-slots"}
-                or any(type(code) is not int or code != 0 for code in stages.values())):
-            raise StreamError("measurement receipt identity or stage failure")
-        for member in members:
-            if member.id in measurement["artifacts"] and measurement["artifacts"][member.id] != {
-                "sha256": member.sha256, "bytes": member.length,
-            }:
-                raise StreamError("measurement artifact digest disagrees with host")
+        stages = measurement_stages(returned_json(target / "measurement.json"), job.identity,
+                                    job.state["public_root_der_sha256"], members)
         rootfs = next(member for member in members if member.id == "rootfs.tar")
         verify_sidecar(target / "rootfs.tar.sha256", rootfs)
         verify_sidecar(target / "boot.scr.sha256", next(member for member in members if member.id == "boot.scr"))
-        job.state["guest_claimed_stage_exits"] = measurement["stages"]
+        job.state["guest_claimed_stage_exits"] = stages
     sync_directory(target)
     receipt(job.directory / "transport-validation.json",
             {"schema": 1, "identity": asdict(job.identity),
@@ -157,11 +284,13 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
     from vm import boot, job_disk
     identity = Identity(**request["payload"]["identity"])
     create_directory(directory)
-    with ImageJob(directory, identity, request["capsule"], cancellation) as job:
+    with ImageJob(directory, identity, request["capsule"], cancellation,
+                  capsule_fd=request.get("capsule_fd"), base_fd=request.get("base_fd"),
+                  probe=request["payload"]["operation"] == "probe") as job:
         jobs.append(job)
         job.state.update(base_sha256=request["base_sha256"], base=str(base),
                          public_root_der_sha256=request["payload"]["trust"]["root_der_sha256"],
-                         overlay_directory=str(base.parent), retained_bytes=request["retained_bytes"],
+                         overlay_directory=str(directory), retained_bytes=request["retained_bytes"],
                          stream_budget=CAPS.stream_max if request["payload"]["operation"] == "measure" else 4 * 1024**2)
         with job_disk(base, job, cancellation) as (overlay, disk_fd):
             remaining = int(request["deadline"] - time.monotonic())
@@ -221,7 +350,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
             if not status:
                 row["acceptance_sha256"] = accepted_sha
         try:
-            # Rename commits the receipt that the CLI will read to determine its status.
+            # The successful rename latches the verdict before journal retirement.
             receipt(path, row, outcome=cancellation, diagnostic=error)
         except Cancelled as exc:
             error = exc
@@ -229,7 +358,7 @@ def run_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         except OSError as exc:
             report_error(exc)
             return 1
-        return row["launcher_exit"]
+        return cancellation.committed_exit if cancellation.committed_exit is not None else 1
 
 
 def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
@@ -242,56 +371,82 @@ def measure_image(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error("image profile accepts no runner, script or public-source-only override")
     acquired_at = time.time()
     build_deadline = time.monotonic() + CAPS.build_seconds
-    require_host_lock()
+    retry_check(require_host_lock)
     cgroup_admission()
     identity = Identity(args.attempt, args.board, args.source_commit, args.source_epoch,
                         args.input_sha256)
-    validate_base(args.base, args.base_sha256, cancellation)
-    base = args.base.resolve()
-    if (args.input_capsule.is_symlink() or not stat.S_ISREG(args.input_capsule.stat().st_mode)
-            or args.input_capsule.stat().st_size > INPUT_LIMIT
-            or digest_file(args.input_capsule, cancellation.check) != identity.input_sha256):
-        raise AdmissionError("input capsule transport identity mismatch")
-    store = args.output_dir.resolve()
-    create_directory(store, parents=True)
+    with ExitStack() as inputs:
+        capsule_fd = checked_digest(args.input_capsule, identity.input_sha256, cancellation)
+        inputs.callback(os.close, capsule_fd)
+        return measure_admitted(args, identity, cancellation, jobs, acquired_at, build_deadline, capsule_fd, inputs)
+
+
+def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_deadline, capsule_fd, inputs):
+    base = args.base.absolute()
+    store = args.output_dir.absolute()
+    base_fd = None
+    try:
+        store_fd = checked_open(store, directory=True, private=True)
+    except FileNotFoundError:
+        if listed_entry(Path(store.anchor), str(store.relative_to(store.anchor))) is not None:
+            raise AdmissionError("cannot establish private output store ownership")
+        load_policy(args.trust_policy)  # Refuse an unusable policy before running the backing tool.
+        base_fd = validate_base(base, args.base_sha256, cancellation)
+        if base_fd is not None:
+            inputs.callback(os.close, base_fd)
+        create_directory(store, parents=True)
+        store_fd = checked_open(store, directory=True, private=True)
+    # Every later path resolves through the admitted inode, so it stays open until the direct exit.
+    store = Path(f"/proc/self/fd/{store_fd}")
     cancellation.check()
-    if store.stat().st_uid != os.getuid() or store.stat().st_mode & 0o077:
-        raise AdmissionError("image return store must be owned by the launcher and mode 0700")
     reconcile(store)
-    trust = asdict(load_policy(args.trust_policy))
-    retained = retained_outputs(store, identity, (args.base_sha256, trust["root_der_sha256"]))
-    disk_admission(base.parent, store, retained)
+    try:
+        trust, retained = retry_check(admit_output_store, store, identity, base, args.base_sha256, args.trust_policy)
+    except OSError as error:
+        raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
+    if base_fd is None:
+        base_fd = validate_base(base, args.base_sha256, cancellation)
+        if base_fd is not None:
+            inputs.callback(os.close, base_fd)
+    info = retry_check(os.fstat, store_fd)
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise AdmissionError("image return store must be owned by the launcher and mode 0700")
     directory = store / identity.attempt
     create_directory(directory)
     CAPS.qemu_limit()
-    request = {"capsule": args.input_capsule, "base_sha256": args.base_sha256, "deadline": build_deadline,
+    request = {"capsule": args.input_capsule, "capsule_fd": capsule_fd, "base_fd": base_fd,
+               "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {
                    "schema": 1, "identity": asdict(identity), "operation": args.image_mode, "trust": trust}}
     artifacts = execute(base, directory / "build", request, cancellation, jobs)
     cancellation.check()
     if args.image_mode == "probe":
-        result = json.loads((artifacts / "verification.json").read_text())
-        if result != {"schema": 1, "identity": asdict(identity), "network_denied": True}:
+        result = returned_json(artifacts / "verification.json")
+        if (type(result) is not dict or result.get("network_denied") is not True
+                or not exact_json(result, {"schema": 1, "identity": asdict(identity), "network_denied": True})):
             raise StreamError("offline probe receipt mismatch")
         return None
     capsule = directory / "verifier-input.tar"
-    inventory = verification_capsule(args.input_capsule, artifacts, capsule, cancellation.check)
+    verifier_fd = os.open(capsule, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    inputs.callback(os.close, verifier_fd)
+    # The verifier receives this written inode; the name is used only for its removal.
+    with os.fdopen(os.dup(capsule_fd), "rb") as original, os.fdopen(os.dup(verifier_fd), "r+b") as output:
+        inventory = verification_capsule(original, artifacts, output, cancellation.check)
+        output.seek(0)
+        verification_digest = hashlib.file_digest(output, "sha256").hexdigest()
+    verifier_info = os.fstat(verifier_fd)
     verification = Identity(identity.attempt, identity.board, identity.commit, identity.epoch,
-                            digest_file(capsule, cancellation.check))
-    request = {"capsule": capsule, "base_sha256": args.base_sha256,
+                            verification_digest)
+    request = {"capsule": capsule, "capsule_fd": verifier_fd, "base_fd": base_fd, "base_sha256": args.base_sha256,
                "deadline": time.monotonic() + CAPS.verify_seconds,
-               "retained_bytes": retained + capsule.stat().st_blocks * 512
+               "retained_bytes": retained + os.fstat(verifier_fd).st_blocks * 512
                    + sum(file.stat().st_blocks * 512 for file in artifacts.iterdir()),
                "payload": {"schema": 1, "identity": asdict(verification), "operation": "verify",
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
-    result = json.loads((verified / "verification.json").read_text())
-    if (result["schema"] != 1 or result["verified"] is not True
-            or result["build_identity"] != asdict(identity) or result["artifacts"] != inventory
-            or {row["slot"] for row in result["slots"]} != {"rootfs_a", "rootfs_b"}):
-        raise StreamError("independent verifier disagrees with host-selected identity or inventory")
-    capsule.unlink()
+    validate_verification(returned_json(verified / "verification.json"), identity, inventory)
+    unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),
         "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,

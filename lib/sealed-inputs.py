@@ -7,6 +7,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import errno
 import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -15,8 +16,11 @@ import lzma
 import os
 from pathlib import Path
 import re
+import selectors
 import shlex
 import shutil
+import signal
+import stat
 import sys
 import subprocess
 import tempfile
@@ -25,8 +29,20 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_urls import InputURLError, canonical_url
+from vm_process import run as run_gate
 
 INDEX_LIMIT = 256 * 1024**2
+CONTROL_ATTEMPTS = 3
+CONTROL_RETRY = frozenset((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM, errno.ENOSYS))
+
+
+def retry_control(operation, *args):
+    for attempt in range(CONTROL_ATTEMPTS):
+        try:
+            return operation(*args)
+        except OSError as error:
+            if error.errno not in CONTROL_RETRY or attempt + 1 == CONTROL_ATTEMPTS:
+                raise
 
 
 class SealedError(Exception):
@@ -63,7 +79,7 @@ def object_path(directory: Path, digest: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise SealedError("invalid sealed object identity")
     path = directory / digest
-    if not path.is_file() or path.is_symlink():
+    if not stat.S_ISREG(path.lstat().st_mode):
         raise SealedError("missing sealed object")
     with path.open("rb") as source:
         if hashlib.file_digest(source, "sha256").hexdigest() != digest:
@@ -215,11 +231,11 @@ index_verify_digest "$9" "$expected" sealed-mirror
         with tempfile.TemporaryDirectory(prefix=".metadata-", dir=directory) as temporary:
             release = Path(temporary) / "Release"
             try:
-                subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(library),
+                run_gate(["bash", "-euo", "pipefail", "-c", script, "_", str(library),
                                 str(repo.keyring), str(repo.inrelease), str(release), repo.suite,
                                 repo.component, repo.arch, repo.index_path, str(repo.index),
                                 repo.codename, *repo.fingerprints],
-                               check=True, capture_output=True, text=True, timeout=60,
+                               capture_output=True, text=True, timeout=60,
                                env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "TMPDIR": temporary})
             except subprocess.SubprocessError as exc:
                 raise SealedError(f"sealed {name} signature/index/identity verification rejected") from exc
@@ -247,11 +263,14 @@ index_verify_digest "$9" "$expected" sealed-mirror
     return tuple(windows)
 
 
-def serve(directory: Path) -> None:
+def serve(directory: Path, *, managed: bool = False) -> None:
     """Finite guest-local mirror; no upstream client, CONNECT or credential endpoint."""
     validities = mirror_validities(directory)
     mapping = {}
     missing = False
+    request_complete = False
+    handler_error = False
+    started = served = 0
     for row in inventory(directory)["objects"]:
         for url in row["urls"]:
             url = canonical_url(url)
@@ -262,7 +281,9 @@ def serve(directory: Path) -> None:
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            nonlocal missing
+            nonlocal missing, request_complete, started, served
+            request_complete = False
+            started += 1
             now = datetime.now(timezone.utc)
             if any(row.deadline is not None and not row.date <= now <= row.deadline for row in validities):
                 missing = True
@@ -287,25 +308,75 @@ def serve(directory: Path) -> None:
                 self.send_error(status)
                 return
             self.send_response(200)
-            self.send_header("Content-Length", str(file.stat().st_size))
+            remaining = file.stat().st_size
+            self.send_header("Content-Length", str(remaining))
             self.end_headers()
             with file.open("rb") as source:
-                shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+                if not managed:
+                    shutil.copyfileobj(source, self.wfile, length=1024 * 1024)
+                    return
+                while remaining:
+                    chunk = source.read(min(remaining, 1024 * 1024))
+                    if not chunk or self.wfile.write(chunk) != len(chunk):
+                        raise SealedError("sealed mirror response did not complete")
+                    remaining -= len(chunk)
+                if source.read(1):
+                    raise SealedError("sealed mirror object exceeded advertised length")
+            served += 1
+            request_complete = True
 
         def log_message(self, _format: str, *args: str) -> None:
             # The complete request inventory is already recorded privately.
             return
 
-    with HTTPServer(("127.0.0.1", 3142), Handler) as server:
-        print("CERALIVE_SEALED_MIRROR_READY", flush=True)
-        while not missing:
-            server.handle_request()
+    class ManagedServer(HTTPServer):
+        def handle_error(self, request, client_address) -> None:
+            nonlocal handler_error
+            handler_error = True
+            super().handle_error(request, client_address)
+
+    def stop(_signal, _frame):
+        raise SystemExit(int(missing or managed))
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        server_type = ManagedServer if managed else HTTPServer
+        with server_type(("127.0.0.1", 3142), Handler) as server:
+            if managed:
+                control = sys.stdin.fileno()
+                with selectors.DefaultSelector() as events:
+                    events.register(control, selectors.EVENT_READ)
+                    events.register(server, selectors.EVENT_READ)
+                    print("CERALIVE_SEALED_MIRROR_READY", flush=True)
+                    while not missing:
+                        ready = retry_control(events.select)
+                        if not ready:
+                            continue
+                        if any(key.fileobj is server for key, _ in ready):
+                            request_complete = False
+                            server.handle_request()
+                            if missing or handler_error or not request_complete or served != started:
+                                raise SealedError("sealed mirror request did not complete")
+                        else:
+                            if retry_control(os.read, control, 1) != b"S":
+                                raise SealedError("invalid mirror shutdown request")
+                            break
+            else:
+                print("CERALIVE_SEALED_MIRROR_READY", flush=True)
+                while not missing:
+                    server.handle_request()
+        if managed and not missing and not handler_error and served == started:
+            print("CERALIVE_SEALED_MIRROR_STOPPED", flush=True)
+            return
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     raise SealedError("guest requested an object absent from the sealed inventory")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("copy", "repository", "valid-release", "decompress-index", "serve"))
+    parser.add_argument("operation", choices=("copy", "repository", "valid-release", "decompress-index", "serve",
+                                             "serve-managed"))
     parser.add_argument("values", nargs="*")
     args = parser.parse_args()
     directory = Path(os.environ["CERALIVE_SEALED_INPUTS"])
@@ -327,6 +398,8 @@ def main() -> None:
             decompress_index(Path(source), Path(destination), index_path)
         case "serve":
             serve(directory)
+        case "serve-managed":
+            serve(directory, managed=True)
 
 
 if __name__ == "__main__":

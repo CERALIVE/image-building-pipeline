@@ -15,7 +15,8 @@ import subprocess
 import tarfile
 
 from image_capsule import Capsule, digest_file
-from image_stream import Identity, StreamError
+from image_stream import Identity, StreamError, list_directory, listed_entry, retry_check
+from vm_process import reset_child_status, run as run_gate
 
 
 @contextmanager
@@ -36,6 +37,11 @@ def parent_fd(root: Path, name: str):
 
 
 def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
+    """Bind file bytes, ownership, modes, links and special-file identities."""
+    retry_check(_compare_slot, root, archive, boot)
+
+
+def _compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
     """Bind file bytes, ownership, modes, links and special-file identities."""
     expected = set()
     with tarfile.open(archive, "r:") as tar:
@@ -87,14 +93,23 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                 else:
                     raise StreamError("unsupported returned tar member")
     actual_names = set()
-    for directory, dirs, files in os.walk(root, followlinks=False):
-        for name in (*dirs, *files):
-            actual_names.add(str((Path(directory) / name).relative_to(root)))
+    directories = [root]
+    while directories:
+        directory = directories.pop()
+        for name in list_directory(directory):
+            path = directory / name
+            actual_names.add(str(path.relative_to(root)))
+            if len(actual_names) > 1_000_000 + len(boot) + 2:
+                raise StreamError("excessive slot directory inventory")
+            if stat.S_ISDIR(path.lstat().st_mode):
+                directories.append(path)
     additions = set(boot) | {"usr/lib/ceralive/boot", "lost+found"}
     if actual_names - expected - additions:
         raise StreamError("slot contains unexpected additions to emitted tar")
-    if (root / "lost+found").exists() and list((root / "lost+found").iterdir()):
-        raise StreamError("slot lost+found is not empty")
+    if "lost+found" in actual_names:
+        housekeeping = root / "lost+found"
+        if not stat.S_ISDIR(housekeeping.lstat().st_mode) or list_directory(housekeeping):
+            raise StreamError("slot lost+found is not an empty directory")
     for name, content in boot.items():
         with parent_fd(root, name) as (fd, leaf):
             actual = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
@@ -106,7 +121,15 @@ def compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                     raise StreamError("slot boot payload differs from trusted compilation")
 
 
+def check_firmware(firmware: Path, removed: tuple[str, ...], retained: tuple[str, ...]) -> None:
+    unexpected = any(listed_entry(firmware, name) is not None for name in removed)
+    if unexpected or not all((info := listed_entry(firmware, name)) is not None
+                             and stat.S_ISDIR(info.st_mode) for name in retained):
+        raise StreamError("ceralive8 removed/retained firmware inventory mismatch")
+
+
 def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
+    reset_child_status()
     from image_guest import HOME, resolve
     inputs = capsule.directory
     identity = Identity(**job["build_identity"])
@@ -117,10 +140,10 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     params = resolve(source, capsule.board, env)
     if json.loads(artifacts["resolved.json"].read_text()) != params:
         raise StreamError("returned resolver output differs from approved source")
-    subprocess.run(["bash", "-euo", "pipefail", "-c",
+    run_gate(["bash", "-euo", "pipefail", "-c",
         'source "$1"; rauc_public_root_resolve "$2" "$3"', "_",
         str(source / "lib/rauc-pki-contract.sh"), str(inputs / capsule.device_root),
-        job["trust"]["root_der_sha256"]], check=True, env=env, capture_output=True)
+        job["trust"]["root_der_sha256"]], env=env, capture_output=True)
     measurement = json.loads(artifacts["measurement.json"].read_text())
     if measurement["public_root_der_sha256"] != job["trust"]["root_der_sha256"]:
         raise StreamError("returned public device trust identity mismatch")
@@ -148,16 +171,16 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
         ("lib/verify-boot-artifacts.sh", [str(artifacts["rootfs.tar"]), "--dtb-name", params["DTB_NAME"]]),
         ("lib/check-firmware-closure.sh", [str(artifacts["rootfs.tar"])]),
     ):
-        subprocess.run(["bash", str(source / script), *args], check=True, env=env, timeout=600,
-                       stdout=subprocess.DEVNULL)
+        run_gate(["bash", str(source / script), *args], env=env, timeout=600,
+                 stdout=subprocess.DEVNULL)
     compiled = HOME / "compiled-boot"
     compiled.mkdir()
     boot_env = env | {"BOARD_ID": params["BOARD_ID"], "DTB_NAME": params["DTB_NAME"],
                       "SERIAL_CONSOLE": params["SERIAL_CONSOLE"],
                       "COMPATIBLE_STRING": "ceralive-" + params["BOARD_ID"],
                       "SINGLE_SLOT_FALLBACK": "false"}
-    subprocess.run(["bash", str(source / "mkosi/platform/boot/install-boot.sh"),
-                    "boot-payload", str(compiled)], check=True, env=boot_env, timeout=60)
+    run_gate(["bash", str(source / "mkosi/platform/boot/install-boot.sh"),
+                    "boot-payload", str(compiled)], env=boot_env, timeout=60)
     boot = {}
     for name in ("boot.scr", "boot.scr.sha256"):
         if digest_file(compiled / name) != digest_file(artifacts[name]):
@@ -166,35 +189,35 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     slots = []
     for label in ("rootfs_a", "rootfs_b"):
         image = artifacts[label + ".ext4"]
-        subprocess.run(["e2fsck", "-fn", str(image)], check=True, env=env, timeout=300,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        reserve = subprocess.run(["bash", "-euo", "pipefail", "-c",
+        run_gate(["e2fsck", "-fn", str(image)], env=env, timeout=300,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        reserve = run_gate(["bash", "-euo", "pipefail", "-c",
             'source "$1"; slot_reserve_assert_ext4 "$2" "$3"', "_",
             str(source / "lib/shared/slot-reserve.sh"), str(image), label],
-            check=True, env=env, capture_output=True, text=True, timeout=60).stdout
+            env=env, capture_output=True, text=True, timeout=60).stdout
         if reserve != artifacts[label + ".reserve"].read_text():
             raise StreamError("returned reserve evidence disagrees with actual slot")
-        header = subprocess.run(["dumpe2fs", "-h", str(image)], check=True, env=env,
-                                capture_output=True, text=True, timeout=60).stdout
+        header = run_gate(["dumpe2fs", "-h", str(image)], env=env,
+                          capture_output=True, text=True, timeout=60).stdout
         if header.rstrip("\n") + "\n" != artifacts[label + ".header"].read_text():
             raise StreamError("returned clean filesystem header disagrees with actual slot")
         fields = dict(line.split(":", 1) for line in header.splitlines() if ":" in line)
         if fields.get("Filesystem volume name", "").strip() != label:
             raise StreamError("slot filesystem label differs from frozen production label")
-        uuid = subprocess.run(["bash", "-euo", "pipefail", "-c",
+        uuid = run_gate(["bash", "-euo", "pipefail", "-c",
             'source "$1"; det_uuid "$2"', "_", str(source / "lib/disk/slot-image.sh"),
-            "ceralive-" + params["BOARD_ID"] + "-" + label], check=True, env=env,
+            "ceralive-" + params["BOARD_ID"] + "-" + label], env=env,
             capture_output=True, text=True, timeout=60).stdout
         if fields.get("Filesystem UUID", "").strip() != uuid:
             raise StreamError("slot filesystem UUID differs from existing writer contract")
         mount = HOME / label
         mount.mkdir()
-        subprocess.run(["mount", "-o", "loop,ro,noload,nodev,nosuid,noexec", str(image), str(mount)],
-                       check=True, env=env, timeout=60)
+        run_gate(["mount", "-o", "loop,ro,noload,nodev,nosuid,noexec", str(image), str(mount)],
+                 env=env, timeout=60)
         try:
             compare_slot(mount, artifacts["rootfs.tar"], boot)
-            subprocess.run(["bash", str(source / "lib/parity-check.sh"), str(mount)],
-                           check=True, env=env, timeout=300, stdout=subprocess.DEVNULL)
+            run_gate(["bash", str(source / "lib/parity-check.sh"), str(mount)],
+                     env=env, timeout=300, stdout=subprocess.DEVNULL)
             lock = json.loads(artifacts["packages.lock.json"].read_text())
             parser = runpy.run_path(str(source / "lib/packages-lock.py"))["installed_packages"]
             installed = parser(mount / "var/lib/dpkg/status")
@@ -212,13 +235,11 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             removed = ("amdgpu", "radeon", "i915", "xe", "mellanox", "netronome", "intel/ipu", "intel/vsc")
             retained = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "mrvl", "mrvl/prestera", "nvidia")
             firmware = mount / "usr/lib/firmware"
-            if any((firmware / name).exists() for name in removed) or not all(
-                    (firmware / name).is_dir() for name in retained):
-                raise StreamError("ceralive8 removed/retained firmware inventory mismatch")
-            references = subprocess.run(["bash", "-euo", "pipefail", "-c",
+            retry_check(check_firmware, firmware, removed, retained)
+            references = run_gate(["bash", "-euo", "pipefail", "-c",
                 'source "$1"; firmware_sweep_module_refs "$2"', "_",
                 str(source / "mkosi/customize/firmware-sweep.sh"), str(mount)],
-                check=True, env=env, capture_output=True, text=True, timeout=300).stdout
+                env=env, capture_output=True, text=True, timeout=300).stdout
             nouveau = [line for line in references.splitlines()
                        if line.startswith("nvidia/") and "nouveau.ko" in line]
             if not nouveau:
@@ -226,7 +247,7 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             slots.append({"slot": label, "reserve": reserve.strip(), "removed": list(removed),
                           "retained": list(retained), "nvidia_references": nouveau})
         finally:
-            subprocess.run(["umount", str(mount)], check=True, env=env, timeout=60)
+            run_gate(["umount", str(mount)], env=env, timeout=60)
     result = HOME / "verification.json"
     result.write_text(json.dumps({"schema": 1, "verified": True, "build_identity": asdict(identity),
                                   "artifacts": job["artifacts"], "slots": slots}) + "\n")

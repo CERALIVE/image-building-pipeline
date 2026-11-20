@@ -19,10 +19,10 @@ import threading
 import time
 
 import yaml
-from image_lifecycle import job_disk, report_error
+from image_lifecycle import job_disk, report_error, sync_directory, unlink_observed
 from vm_process import (
     CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
-    child_pipes, read_check_script, run, terminate, wait,
+    child_pipes, poll_owned, read_check_script, run, spawn_gate, terminate, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -60,10 +60,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
             "-m", "20480" if image_job or image_base else "16384", "-display", "none", "-monitor", "none",
             "-serial", f"file:/proc/self/fd/{image_job.console_write}" if image_job else "stdio",
             "-no-reboot",
-            "-drive", f"file={disk},format=qcow2,if=none,id=system",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
             "-fw_cfg", f"name=opt/ceralive/{kind},file=/proc/self/fd/{fd}",
         ]
+        base_fd = image_job.base_fd if image_job else None
+        if base_fd is not None:
+            args += [
+                "-add-fd", f"fd={base_fd},set=1", "-add-fd", f"fd={disk_fd},set=2",
+                "-blockdev", "driver=file,node-name=base-file,read-only=on,filename=/dev/fdset/1",
+                "-blockdev", "driver=qcow2,node-name=base-image,read-only=on,file=base-file",
+                "-blockdev", "driver=qcow2,node-name=system,file.driver=file,file.filename=/dev/fdset/2,backing=base-image",
+            ]
+        else:
+            args += ["-drive", f"file={disk},format=qcow2,if=none,id=system"]
         if image_job:
             from image_vm import image_arguments
             args += image_arguments(image_job)
@@ -78,14 +87,23 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         descriptors = (fd,) if disk_fd is None else (fd, disk_fd)
         if image_job:
             descriptors += (image_job.capsule_fd, image_job.console_write)
+        if base_fd is not None:
+            descriptors += (base_fd,)
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         check_spawn_signals(cancellation)
-        process = subprocess.Popen(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
-                                   preexec_fn=partial(die_with_parent, os.getpid()),
+        parent = os.getpid()
+        if image_job:
+            # Both execs keep the same PID. Check the race before setpriv armed parent death.
+            args = ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
+                    'test "$PPID" = "$1" || exit 125; shift; exec "$@"', "runner-child", str(parent), *args]
+        process = spawn_gate(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
+                                   preexec_fn=None if image_job else partial(die_with_parent, parent),
+                                   start_new_session=image_job is not None,
                                    stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE if image_job else subprocess.STDOUT,
+                                   stderr=(subprocess.DEVNULL if image_job and image_job.probe else
+                                           subprocess.PIPE if image_job else subprocess.STDOUT),
                                    restore_signals=True)
         with child_pipes(process):
             lines: list[bytes] = []
@@ -109,18 +127,19 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
                 terminate(process)
                 if reader:
                     reader.join()
+                code = poll_owned(process)
                 if image_job:
-                    image_job.state.update(qemu_reaped=True, qemu_exit=process.returncode)
+                    image_job.state.update(qemu_reaped=True, qemu_exit=code)
         cancellation.check()
         if image_job:
-            if process.returncode:
-                raise RuntimeError(f"image guest exited ({process.returncode})")
+            if code != 0:
+                raise RuntimeError(f"image guest exited ({code})")
             return
         # Never relay runner logs: an untrusted job could print the JIT credential.
         expected = b"CERALIVE_BASE_READY" if seed else b"CERALIVE_JOB_DONE=0"
         output = b"".join(lines)
-        if process.returncode or expected not in output.splitlines():
-            raise RuntimeError(f"guest failed or timed out ({process.returncode})")
+        if code != 0 or expected not in output.splitlines():
+            raise RuntimeError(f"guest failed or timed out ({code})")
         print(expected.decode())
     finally:
         os.close(fd)
@@ -164,7 +183,7 @@ def main(cancellation: Cancellation) -> int:
     die_with_parent(parent)
     cancellation.check()
     child_setup = partial(die_with_parent, os.getpid())
-    base = args.base.resolve()
+    base = args.base.absolute() if args.operation == "image" else args.base.resolve()
     if "," in str(base):
         parser.error("commas are not supported in VM disk paths")
     if args.operation == "image":
@@ -208,7 +227,13 @@ def main(cancellation: Cancellation) -> int:
                 files.append({"path": destination, "permissions": "0755", "encoding": "b64",
                               "content": base64.b64encode((HERE / source).read_bytes()).decode()})
             if args.profile == "image":
-                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py"):
+                # The installed mirror sources these helpers relative to itself.
+                for source in ("sealed-inputs.py", "fetch-debs-auth.sh", "fetch/index.sh"):
+                    files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
+                                  "permissions": "0755", "encoding": "b64",
+                                  "content": base64.b64encode((HERE.parents[1] / "lib" / source).read_bytes()).decode()})
+                for source in ("image_guest.py", "image_verify.py", "image_stream.py", "image_capsule.py", "image_urls.py",
+                               "vm_process.py"):
                     files.append({"path": "/usr/local/lib/ceralive-kernel-runner/" + source,
                                   "permissions": "0755", "encoding": "b64",
                                   "content": base64.b64encode((HERE / source).read_bytes()).decode()})
@@ -294,13 +319,17 @@ def exit_launcher() -> None:
     finally:
         try:
             if cancellation.exit_receipt is not None:
-                status = 1
+                status = 1 if cancellation.committed_exit is None else cancellation.committed_exit
                 # Final receipt publication keeps signals blocked through this exit.
                 try:
+                    if cancellation.committed_exit is not None and cancellation.safe_journal is not None:
+                        unlink_observed(*cancellation.safe_journal)
+                except BaseException as exc:
+                    report_error(exc)
+                try:
                     published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
-                    if type(published) is not int or published not in (0, 1):
-                        raise ValueError("invalid launcher_exit in image receipt")
-                    status = published
+                    if type(published) is not int or published != cancellation.committed_exit:
+                        raise ValueError("image receipt disagrees with committed launcher_exit")
                 except BaseException as exc:
                     report_error(exc)
             else:
