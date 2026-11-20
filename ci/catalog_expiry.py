@@ -63,6 +63,10 @@ def main() -> int:
         report = expiry_report(parse_warning_catalog(args.catalog.read_text(encoding="utf-8")), now)
     except (OSError, ValueError, TypeError, OverflowError) as error:
         detail = " ".join(str(error).splitlines())
+        if isinstance(error, FileNotFoundError):
+            detail = f"catalog file is missing: {detail}"
+        elif isinstance(error, OSError):
+            detail = f"catalog file is unreadable: {detail}"
         print(f"Cannot check release catalog: {detail}", file=sys.stderr)
         return 2
     print(report)

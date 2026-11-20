@@ -70,19 +70,19 @@ class CatalogExpiryTest(unittest.TestCase):
     def test_command_rejects_invalid_catalog_without_workflow_outputs(self) -> None:
         now = "2026-11-20T00:00:00+00:00"
         invalid_timestamps = (
-            ("null", None, "checked_at must be a non-empty string"),
-            ("number", 123, "checked_at must be a non-empty string"),
-            ("empty timestamp", "", "checked_at must be a non-empty string"),
-            ("malformed timestamp", "tomorrow", "checked_at is not an ISO 8601 timestamp"),
-            ("timezone missing", "2026-11-19T18:14:00", "checked_at must include timezone"),
+            ("null", None, "catalog checked_at must be a non-empty string"),
+            ("number", 123, "catalog checked_at must be a non-empty string"),
+            ("empty timestamp", "", "catalog checked_at must be a non-empty string"),
+            ("malformed timestamp", "tomorrow", "catalog checked_at is not an ISO 8601 timestamp"),
+            ("timezone missing", "2026-11-19T18:14:00", "catalog checked_at must include timezone"),
         )
         cases = (
-            ("missing", None, "No such file or directory"),
-            ("unreadable", None, "Is a directory"),
+            ("missing", None, "catalog file is missing"),
+            ("unreadable", None, "catalog file is unreadable"),
             ("empty file", "", "invalid JSON"),
             ("invalid JSON", '{"checked_at":', "invalid JSON"),
             ("non-object", "[]", "invalid release catalog schema"),
-            ("missing checked_at", '{"schema_version":1,"releases":[]}', "checked_at must be a non-empty string"),
+            ("missing checked_at", '{"schema_version":1,"releases":[]}', "catalog checked_at must be a non-empty string"),
             *((label, json.dumps({"schema_version": 1, "releases": [], "checked_at": value}), diagnostic)
               for label, value, diagnostic in invalid_timestamps),
         )
@@ -90,7 +90,7 @@ class CatalogExpiryTest(unittest.TestCase):
         data["checked_at"] = "2026-11-20T00:00:01+00:00"
         for release in data["releases"]:
             release["published_at"] = "2026-11-19T00:00:00+00:00"
-        cases += (("future", json.dumps(data), "checked_at is in the future"),)
+        cases += (("future", json.dumps(data), "release catalog checked_at is in the future"),)
         for label, content, diagnostic in cases:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 catalog = Path(directory) / "catalog.json"
@@ -105,8 +105,8 @@ class CatalogExpiryTest(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(outputs, "")
                 self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
-                self.assertTrue(result.stderr.startswith("Cannot check release catalog: "), result.stderr)
-                self.assertIn(diagnostic, result.stderr)
+                # The remaining detail may be supplied by Python or the OS.
+                self.assertTrue(result.stderr.startswith(f"Cannot check release catalog: {diagnostic}"), result.stderr)
 
     def test_command_publishes_exact_outputs_at_one_second_boundaries(self) -> None:
         data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
@@ -135,21 +135,30 @@ class CatalogExpiryTest(unittest.TestCase):
 
 
 class GateCatalogDiagnosticTest(unittest.TestCase):
+    @staticmethod
+    def runtime_catalog_diagnostic(content: str) -> bytes:
+        """Get the runtime-owned suffix directly from Python's parsers."""
+        try:
+            timestamp = json.loads(content)["checked_at"]
+        except json.JSONDecodeError as error:
+            return str(error).encode("utf-8")
+        try:
+            datetime.fromisoformat(timestamp)
+        except (TypeError, ValueError) as error:
+            return str(error).encode("utf-8")
+        raise AssertionError("expected the fixture to fail in a Python parser")
+
     def test_invalid_catalog_preserves_master_exit_and_stderr(self) -> None:
-        # Captured from the unmodified master gate at 9d74a7dee0c9.
+        # Gate-owned strings come from master at 9d74a7dee0c9. Normalize only
+        # the Python exception suffix by obtaining it from this interpreter.
         cases = (
             ("missing checked_at", '{"schema_version":1,"releases":[]}',
              b"invalid release catalog schema"),
-            ("null", '{"schema_version":1,"releases":[],"checked_at":null}',
-             b"fromisoformat: argument must be str"),
-            ("number", '{"schema_version":1,"releases":[],"checked_at":123}',
-             b"fromisoformat: argument must be str"),
-            ("empty", '{"schema_version":1,"releases":[],"checked_at":""}',
-             b"Invalid isoformat string: ''"),
-            ("malformed timestamp", '{"schema_version":1,"releases":[],"checked_at":"tomorrow"}',
-             b"Invalid isoformat string: 'tomorrow'"),
-            ("invalid JSON", '{"checked_at":',
-             b"Expecting value: line 1 column 15 (char 14)"),
+            ("null", '{"schema_version":1,"releases":[],"checked_at":null}', None),
+            ("number", '{"schema_version":1,"releases":[],"checked_at":123}', None),
+            ("empty", '{"schema_version":1,"releases":[],"checked_at":""}', None),
+            ("malformed timestamp", '{"schema_version":1,"releases":[],"checked_at":"tomorrow"}', None),
+            ("invalid JSON", '{"checked_at":', None),
             ("wrong schema", '{"schema_version":2,"releases":[],"checked_at":"2026-11-19T00:00:00+00:00"}',
              b"invalid release catalog schema"),
         )
@@ -164,6 +173,8 @@ class GateCatalogDiagnosticTest(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertEqual(result.stdout, b"")
+                    if diagnostic is None:
+                        diagnostic = self.runtime_catalog_diagnostic(content)
                     self.assertEqual(result.stderr, b"UNVERIFIABLE: " + diagnostic + b"\n")
 
 
