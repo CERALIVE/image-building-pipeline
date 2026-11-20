@@ -15,15 +15,16 @@ DRY_RUN=1 ./build <board>  # resolve + fetch + builder plan only (no build)
 
 **The build runs `mkosi` inside a pinned container by default — this is the
 canonical path.** You do **not** need `mkosi`, a Debian host, or the
-`debian-archive-keyring` installed: only a container runtime.
+`debian-archive-keyring` installed. Use system Docker Engine and a prebuilt
+builder image on a workstation.
 
 | Aspect | Behaviour |
 |---|---|
 | Default builder | Containerized — runs in a pinned **Debian trixie** image |
-| Container runtime | Auto-detected: **Docker**, else **Podman** (either works, same plan) |
+| Container runtime | **System Docker Engine** at `unix:///var/run/docker.sock`; select `DOCKER_CONTEXT=default`. Docker Desktop and standalone Podman are refused. |
 | Builder image | Baked from [`ci/Dockerfile`](../ci/Dockerfile): **mkosi 26** (`.mkosi-version`), installed from the verified upstream commit on trixie's **Python 3.13** with the hash-pinned [build wheels](../ci/mkosi-build-requirements.txt). The auto-built tag `ceralive-mkosi-builder:26-<12 hex>` hashes both the Dockerfile and the Python lock, so either change produces a new tag. `MKOSI_BUILDER_IMAGE=` is honoured verbatim and is never auto-built. |
 | Cross-arch | arm64 builds ride the host kernel's `qemu-user-static` binfmt (F-flag); the image bakes `qemu-user-static` + `binfmt-support`. |
-| No runtime present | Build stops with a clear, actionable error (install docker/podman, or use `--native`) — never a stack trace. |
+| No supported engine | Use an authorized lab build host or hosted CI, or see the Linux `--native` requirements below. |
 
 ### Native build (opt-in)
 
@@ -224,10 +225,10 @@ DRY_RUN=1 ./build rock-5b-plus 2>&1 \
 | Host | Build mode | CI-verified? | One-liner (after runtime + binfmt set up) |
 |---|---|---|---|
 | **Ubuntu/Debian** | container *(or `--native`)* | ✅ **yes** (CI runner) | `./build rock-5b-plus` |
-| **Fedora/RHEL** | container (Podman/Docker) | ⚠️ documented, **not CI-verified** | `./build rock-5b-plus` |
-| **Arch Linux** | container (Docker/Podman) | ⚠️ documented, **not CI-verified**¹ | `./build rock-5b-plus` |
-| **macOS Apple Silicon** | container only | ⚠️ documented, **not CI-verified** | `./build rock-5b-plus` |
-| **WSL2** | container *(native possible)* | ⚠️ documented, **not CI-verified** | `./build rock-5b-plus` |
+| **Fedora/RHEL** | system Docker + prebuilt image | ⚠️ documented, **not CI-verified** | [System engine setup](host-support.md#fedorarhel) or build on an authorized lab host / hosted CI |
+| **Arch Linux** | system Docker + prebuilt image | ⚠️ documented, **not CI-verified**¹ | See Arch example below |
+| **macOS Apple Silicon** | no local builder | — | Use an authorized Linux builder |
+| **WSL2** | system Docker inside the distro, or native where supported | ⚠️ documented, **not CI-verified** | See [WSL2 requirements](host-support.md#wsl2) |
 
 ¹ Arch was the **live spike host** for the loop-free assembly proof in T16
 (`host-support.md`), so its assembly primitives are exercised — but no CI runner
@@ -241,16 +242,10 @@ grep -A2 '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64  # confirm 'F' (fix-bi
 ./build rock-5b-plus
 ```
 
-**Fedora/RHEL — Podman path.** SELinux relabels the repo bind-mount; if you hit
-`Permission denied` on `/work`, see the SELinux workaround in the Fedora/RHEL
-section of [`host-support.md`](host-support.md).
-```bash
-sudo dnf install -y qemu-user-static podman   # qemu-user-static pulls binfmt
-sudo systemctl restart systemd-binfmt
-./build rock-5b-plus
-```
-> *Documented, not CI-verified* — same kernel-feature surface as Ubuntu/Arch, but
-> no Fedora runner exists. The SELinux caveat is the one thing to watch.
+**Fedora/RHEL:** Use [system Docker Engine or Moby](host-support.md#fedorarhel)
+and its system socket, not Desktop, standalone Podman, or the Podman Docker
+compatibility command. If local policy or SELinux prevents that setup, build on
+an authorized lab Linux host or use hosted CI.
 
 **Arch Linux — system Docker path.**
 ```bash

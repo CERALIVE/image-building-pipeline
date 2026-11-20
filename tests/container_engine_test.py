@@ -1,5 +1,6 @@
 """Check the workstation container boundary without a daemon."""
 
+import ast
 import json
 import os
 from collections.abc import Iterator
@@ -32,15 +33,23 @@ ENGINE_TEXT = r"(?:docker(?:-compose)?|podman(?:-compose|-docker)?|nerdctl|build
 INLINE_ENGINE = re.compile(
     rf"""(?:^|[\s"'`/(]){ENGINE_TEXT}["']?\s+(?:--?\S+\s+)*(?:{'|'.join(sorted(VERBS))})\b"""
 )
-PYTHON_ENGINE = re.compile(
-    rf"""\[\s*['"](?:/[\w./-]+/)?{ENGINE_TEXT}['"]\s*,\s*['"](?:{'|'.join(sorted(VERBS))})['"]"""
-)
+INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 
 
-def raw_engine(line: str) -> bool:
+def engine_verb(tokens: list[str], index: int) -> str:
+    j = index + 1
+    while j < len(tokens) and tokens[j].startswith("-") and tokens[j] != "--":
+        j += 2 if tokens[j] in GLOBAL_VALUE else 1
+    if tokens[j:j + 1] == ["--"]:
+        j += 1
+    return tokens[j] if j < len(tokens) else ""
+
+
+def raw_engine(line: str, aliases: set[str] | None = None, verbs: set[str] = VERBS) -> bool:
     """Recognize ordinary shell dispatch without running or expanding shell input."""
     lexer = shlex.shlex(line, posix=True, punctuation_chars="();|&<>`")
     lexer.whitespace_split = True
+    aliases = aliases if aliases is not None else set()
     try:
         tokens = list(lexer)
     except ValueError:
@@ -49,36 +58,57 @@ def raw_engine(line: str) -> bool:
                         "guarded_engine", line)
         return bool(INLINE_ENGINE.search(prefix))
     for index, token in enumerate(tokens):
+        assignment = re.fullmatch(r"(\w+)=(.+)", token)
+        if assignment and assignment[2].rsplit("/", 1)[-1] in ENGINES:
+            aliases.add(assignment[1])
         if " " in token:
             # Quoted command bodies (e.g. EXIT traps or a shell -c operand).
             if (index and tokens[index - 1] in {"trap", "-c", "command:"}) or "$(" in token:
-                if raw_engine(token):
+                if raw_engine(token, aliases, verbs):
                     return True
             continue
         if token.startswith('"') and token.endswith('",'):
-            if raw_engine(token[1:-2]):
+            if raw_engine(token[1:-2], aliases, verbs):
                 return True
             continue
         fallback = re.fullmatch(r"\$\{\w+:-([^}]+)\}", token)
         executable = fallback[1] if fallback else token
-        if executable.rsplit("/", 1)[-1] not in ENGINES and not ENGINE_VAR.fullmatch(token):
+        variable = re.fullmatch(r"\$\{?(\w+)\}?", token)
+        if (executable.rsplit("/", 1)[-1] not in ENGINES
+                and not ENGINE_VAR.fullmatch(token) and not (variable and variable[1] in aliases)):
             continue
         if index and tokens[index - 1].rsplit("/", 1)[-1] in {"container-engine.py", "container_engine"}:
             continue
-        j = index + 1
-        while j < len(tokens) and tokens[j].startswith("-") and tokens[j] != "--":
-            flag = tokens[j]
-            j += 2 if flag in GLOBAL_VALUE else 1
-        if tokens[j:j + 1] == ["--"]:
-            j += 1
-        if j < len(tokens) and tokens[j] in VERBS:
+        if engine_verb(tokens, index) in verbs:
             return True
     return False
 
 
+def python_engine_lines(text: str) -> Iterator[tuple[int, str]]:
+    """Inspect literal argv and command arguments without importing the scanned file."""
+    lines = text.splitlines()
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            args = [item.value if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                    else "" for item in node.elts]
+            suspect = bool(args and args[0].rsplit("/", 1)[-1] in ENGINES and engine_verb(args, 0) in VERBS)
+        elif isinstance(node, ast.Call) and node.args:
+            first = node.args[0]
+            suspect = (isinstance(first, ast.Constant) and isinstance(first.value, str)
+                       and raw_engine(first.value))
+        else:
+            continue
+        if suspect:
+            yield node.lineno, lines[node.lineno - 1]
+
+
 def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
     """Yield suspicious instructions from source and copyable examples."""
+    if path.suffix == ".py":
+        yield from python_engine_lines(text)
+        return
     fenced = False
+    aliases: set[str] = set()
     recipe = path.name.casefold() in {"makefile", "gnumakefile", "justfile"} or path.suffix == ".mk"
     shell = path.suffix in {".sh", ".bash", ".bats"} or recipe or text.startswith(
         ("#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env sh", "#!/usr/bin/env bash")
@@ -94,6 +124,13 @@ def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
                 fenced = not fenced
                 continue
             if not fenced:
+                # In prose, flag copyable actions, not mentions such as `docker build`.
+                for span in INLINE_CODE.finditer(stripped):
+                    code = span[2]
+                    if raw_engine(code, verbs={"run", "exec", "create", "start", "compose", "buildx",
+                                               "up", "down", "restart"}):
+                        yield index + 1, line
+                        break
                 continue
         payload = stripped.removeprefix("#").strip()
         if recipe:
@@ -106,12 +143,9 @@ def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
         while lines[end].endswith("\\") and end + 1 < len(lines):
             end += 1
             payload = payload.removesuffix("\\") + lines[end].strip()
-        if path.suffix == ".py":
-            suspect = not stripped.startswith("#") and bool(PYTHON_ENGINE.search(line))
-        else:
-            suspect = raw_engine(payload) if shell or markup or stripped.startswith("#") else False
-            if markup and not suspect and not ("container-engine.py" in payload or "container_engine " in payload):
-                suspect = bool(INLINE_ENGINE.search(payload))
+        suspect = raw_engine(payload, aliases) if shell or markup or stripped.startswith("#") else False
+        if markup and not suspect and not ("container-engine.py" in payload or "container_engine " in payload):
+            suspect = bool(INLINE_ENGINE.search(payload))
         if suspect:
             yield index + 1, line
 
@@ -376,6 +410,42 @@ ensure_rauc_builder_image "$2" fixture-base fixture-tag linux/amd64
         self.assertFalse(list(engine_lines(Path("safe.md"), """```bash
 DOCKER_CONTEXT=default python3 ci/container-engine.py docker run --cpus=1 --memory=1g fixture
 ```""")))
+
+    def test_static_scan_tracks_shell_assignments(self) -> None:
+        for probe in (
+            "engine=docker; $engine run fixture",
+            'engine=/usr/bin/docker\n"$engine" --context other run fixture',
+            'DOCKER=docker\n"$DOCKER" run fixture',
+            'export runner="podman"\n"${runner}" run fixture',
+            'runner=nerdctl\n"$runner" --namespace k8s.io run fixture',
+            'runner=docker-compose\n"$runner" -f compose.yml up',
+            '"${ENGINE:-docker}" run fixture',
+        ):
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path("probe.sh"), probe)), probe)
+
+    def test_static_scan_reads_python_launch_arguments(self) -> None:
+        for probe in (
+            'argv = ["docker", "--context", "desktop-linux", "run", "fixture"]',
+            'subprocess.run(["/usr/bin/docker", "--config", config, "run", image])',
+            'subprocess.run((\n "docker", "-H", address, "run", image,\n))',
+            'subprocess.run(shlex.split("docker --context desktop-linux run fixture"))',
+            'subprocess.run("sudo podman run fixture", shell=True)',
+        ):
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path("probe.py"), probe)), probe)
+        self.assertFalse(list(engine_lines(Path("safe.py"), 'status = "docker build is a cache operation"')))
+
+    def test_static_scan_reads_inline_and_fenced_markdown(self) -> None:
+        for probe in (
+            "To start the service, run `docker compose up -d`.",
+            "To start the service, run ``/usr/bin/docker --context other compose up``.",
+            "```sh\ndocker-compose -f compose.yml up -d\n```",
+        ):
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path("probe.md"), probe)), probe)
+        self.assertFalse(list(engine_lines(Path("safe.md"),
+            "Use `python3 ci/container-engine.py docker run --cpus=1 --memory=1g fixture`.")))
 
 
 if __name__ == "__main__":

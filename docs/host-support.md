@@ -63,7 +63,7 @@ network-denial/return/cancellation probe and board builds remain unrun.
 |---|---|---|---|---|
 | **Ubuntu/Debian (CI)** | ✅ Fully supported | container *(or native)* | by parity¹ | Canonical CI builder. |
 | **Arch Linux** | ✅ Fully supported | container *(or native)* | ✅ yes | The host this spike ran on. |
-| **Fedora/RHEL** | ✅ Supported, SELinux caveat | container *(Podman or Docker)* | no | Needs SELinux volume labels. |
+| **Fedora/RHEL** | ⚠️ Documented, not CI-verified | container via system Docker | no | Use a lab host or hosted CI if SELinux blocks the build. |
 | **macOS Apple Silicon** | ❌ Refused (Docker Desktop) | — | no (no macOS in env) | arm64 is native and the loop limit is moot, but the VM file share carries neither real uids nor ACLs/xattrs — the build refuses the daemon. |
 | **WSL2** | ⚠️ Container-only, caveated | container *(native possible)* | no (no Windows in env) | binfmt/WSLInterop collision needs handling. |
 
@@ -423,7 +423,7 @@ trixie builder; the host only provides the container runtime + kernel.
 
 | Requirement | Minimum | Why |
 |---|---|---|
-| Docker **or** Podman | Docker ≥ 20.10 / Podman ≥ 4.0 | runs the builder `--privileged` |
+| System Docker Engine | Docker 23+ for builder-image creation on authorized runners | runs the builder `--privileged` |
 | Kernel | any maintained 5.x+ | overlayfs + binfmt_misc |
 | `qemu-user-static` + `binfmt-support` | distro current | arm64 emulation (host-side, **F-flag**) |
 
@@ -448,7 +448,7 @@ unprivileged.
 **Exact requirements**
 
 ```bash
-sudo pacman -S docker            # or: podman
+sudo pacman -S docker
 # arm64 binfmt with the F-flag (one of):
 sudo pacman -S qemu-user-static qemu-user-static-binfmt   # extra/community
 sudo systemctl restart systemd-binfmt        # register the handlers
@@ -462,35 +462,17 @@ handler registered *without* F will not fire inside the build container.
 
 ---
 
-### Fedora/RHEL — ✅ supported, SELinux caveat
+### Fedora/RHEL
 
-Linux-native; the same trixie builder runs under Podman (Fedora default) or
-Docker. Not live-tested in this environment, but it is the same kernel-feature
-surface as Arch/Ubuntu.
+Install system Docker Engine or your distro's Moby packages where authorized.
+Use its system socket at `unix:///var/run/docker.sock`, select
+`DOCKER_CONTEXT=default`, and provision prebuilt builder images. Docker Desktop,
+standalone/rootless Podman, and its Docker CLI shim are not supported. For arm64
+builds, confirm `qemu-aarch64` is registered with the binfmt `F` flag.
 
-**Exact requirements**
-
-```bash
-sudo dnf install -y qemu-user-static podman   # qemu-user-static pulls binfmt
-systemctl restart systemd-binfmt
-```
-
-**Caveat — SELinux relabels the bind mount.** The build bind-mounts the repo
-into the container (`-v ${PIPELINE_DIR}:/work`). Under enforcing SELinux, Podman/Docker
-must be told to relabel or the container gets `Permission denied` on `/work`.
-
-*Workaround* (pick one):
-
-```bash
-# A) Podman handles this automatically for its own mounts, but the orchestrator
-#    passes a plain -v. If you hit denials, run the builder by hand with :z, or:
-sudo setsebool -P container_use_devices on        # for the --privileged devices
-# B) last resort for a throwaway dev box:
-#    add --security-opt label=disable to the run (edit run_mkosi_build locally).
-```
-
-Rootless Podman additionally needs `newuidmap`/`newgidmap` (the `shadow-utils`
-package) for the user-namespace mapping.
+This setup is not CI-verified on Fedora/RHEL. If system Docker is unavailable or
+SELinux denies the checkout bind mount, build on an authorized Linux lab host
+or use hosted CI rather than bypassing the launch guard or disabling SELinux.
 
 ---
 
@@ -508,7 +490,7 @@ package) for the user-namespace mapping.
 
 Docker Desktop runs containers inside a Linux VM (Virtualization.Framework /
 LinuxKit). There is **no native build path** — macOS is not Linux, so
-`--native` mkosi is impossible. Use the container build only.
+`--native` mkosi is impossible. Use an authorized Linux builder instead.
 
 **What's actually fine**
 
@@ -533,38 +515,23 @@ partitioned loop mount — today none do): scan + `mknod` the partition nodes by
 hand, or run `losetup` in a throwaway side-container; see
 `task-16-host-spikes.txt` references. **Not required for the current pipeline.**
 
-**Required versions / settings**
-
-| Requirement | Setting |
-|---|---|
-| Docker Desktop | ≥ 4.x with **VirtioFS** file sharing enabled (Settings → General) |
-| File sharing | the checkout's parent dir must be in Docker Desktop's shared paths |
-| Resources | ≥ 4 GB RAM / ≥ 20 GB disk to the VM (rootfs build + 8–16 GB image) |
-| Runtime | Docker (Podman Machine on macOS works the same, same caveats) |
-
-```bash
-# macOS Apple Silicon — container build (native arm64, no qemu):
-./build rock-5b-plus
-# If /work is denied: add the repo's parent to Docker Desktop shared folders.
-```
-
 **Bottom line:** refused. The target arch being native and assembly being
 loop-free are both true and both beside the point — the blocker is the VM file
 share, which cannot represent the root-owned, ACL/xattr-bearing Debian rootfs
 that mkosi builds. An M-series Mac needs a real Linux VM with a genuine
-filesystem (or a remote Linux daemon), not Docker Desktop's share.
+filesystem. Run the build on that Linux host, not against a remote Docker socket.
 
 ---
 
-### WSL2 — ⚠️ container-only (native possible), caveated
+### WSL2
 
 > **Not validated in this environment** (no Windows/WSL2 host reachable).
 > Derived from the WSL2 kernel feature set + the loop-free proof.
 
 WSL2 runs a **real Microsoft-built Linux kernel**, so it is much closer to a
-native Linux host than macOS is. You can run the container build (Docker Desktop
-WSL2 backend, or docker/podman inside a WSL distro) and, on a Debian/Ubuntu
-trixie WSL distro with mkosi ≥ 26, even the `--native` path.
+native Linux host than macOS is. For a container build use system Docker
+installed inside the WSL distro, not the Docker Desktop backend or Podman.
+The `--native` path requires a distro with mkosi ≥ 26.
 
 **What's fine**
 
@@ -598,17 +565,13 @@ sudo apt-get install -y qemu-user-static binfmt-support
 grep flags /proc/sys/fs/binfmt_misc/qemu-aarch64   # confirm 'F' after restart
 ```
 
-If you build on **Docker Desktop's WSL2 backend**, Docker Desktop ships its own
-multi-arch binfmt (`tonistiigi/binfmt`) and usually registers `qemu-aarch64`
-with F for you — verify with the `grep` above before a long build.
-
 **Required versions / settings**
 
 | Requirement | Setting |
 |---|---|
 | WSL | WSL 2 (`wsl --set-default-version 2`); kernel ≥ 5.15 |
 | Distro | for `--native`: Debian/Ubuntu **trixie+** with mkosi ≥ 26, Python ≥ 3.12 |
-| Runtime | Docker Desktop (WSL2 backend) or docker/podman inside the distro |
+| Runtime | System Docker inside the distro, using `unix:///var/run/docker.sock` and prebuilt builder images |
 | binfmt | `qemu-user-static` **with F flag**, surviving `systemd-binfmt` (above) |
 
 ```bash

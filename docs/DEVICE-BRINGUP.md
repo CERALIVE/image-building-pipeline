@@ -28,11 +28,11 @@ Public developer guide for building, flashing, and iterating on CeraLive devices
 ## 1. Prerequisites
 
 **The container build is canonical.** `./build <board>` builds inside a
-pinned `debian:trixie-slim` container (`ci/Dockerfile`, mkosi 26) via Docker
-or Podman. Everything below the "Required packages" heading is needed only if
-you opt into `--native` / `MKOSI_NATIVE=1` on a Debian trixie+ host — a plain
-container build needs nothing from your host beyond a working Docker or Podman
-install. See [`docs/host-support.md`](../docs/host-support.md) for the
+pinned `debian:trixie-slim` container (`ci/Dockerfile`, mkosi 26) via system
+Docker. Docker Desktop and standalone Podman are refused. Use a prebuilt
+builder image on a workstation. The native package requirements below apply
+only if you opt into `--native` / `MKOSI_NATIVE=1` on a Debian trixie+ host. See
+[`docs/host-support.md`](host-support.md) for the
 full per-distro matrix (Ubuntu/Debian, Arch, Fedora, macOS Apple Silicon,
 WSL2).
 
@@ -55,7 +55,7 @@ Filesystem      Size  Used Avail Use% Mounted on
 /dev/nvme0n1p2  1.3T  984G  214G  83% /mnt/development
 ```
 
-Both Docker and Podman are usable container runtimes for the canonical build.
+The historical version output above lists installed clients, not current support.
 `ccache` is not a hard requirement for the container path (the builder image
 carries its own persistent ccache volume across runs, see the CI/build cache
 notes in [`docs/agents/key-facts.md`](agents/key-facts.md)), but installing it locally speeds up a
@@ -1091,8 +1091,8 @@ follow the provisioning steps in [`docs/FIRST-BOOT.md`](FIRST-BOOT.md) §3.
 Starting from zero (no prior context, no board in hand), this is the path to a
 working build:
 
-- [ ] Install Docker or Podman. That is the only host requirement for the
-      canonical container build (§1).
+- [ ] Set up [system Docker](host-support.md#local-container-engine), select
+      `DOCKER_CONTEXT=default`, and provision the prebuilt builder images (§1).
 - [ ] `git clone https://github.com/ceralive/image-building-pipeline.git && cd image-building-pipeline`
 - [ ] `INSTALL_BOOT_BSP=0 DRY_RUN=1 ./build rock-5b-plus` — confirms manifest
       resolution, package pin listing, and the docker builder plan with **no**
