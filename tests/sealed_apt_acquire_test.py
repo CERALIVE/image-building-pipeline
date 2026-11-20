@@ -92,13 +92,18 @@ def render(work: Path, mode: str) -> tuple[str, str]:
         )
     subprocess.run(
         ["bash", "-ec", """
-            log() { :; }
-            source "$1"
+            # Redirect only the device writer's filesystem paths into the fixture.
+            postinst=$(head -n -1 "$SRCDIR/mkosi.images/runtime/mkosi.postinst.chroot")
+            apt_root=/etc/apt
+            mkdir -p "$3/apt.conf.d"
+            source <(printf '%s\\n' "${postinst//"$apt_root"/"$3"}")
+            configure_minimal_apt
             runtime_build_apt_scope
-            cp "${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list" "$2"
-            cp "${APT_CONFIG}" "$3"
-        """, "_", ROOT / "mkosi/runtime/build-apt-cache.sh", work / "sources", work / "config"],
-        env=env, check=True, timeout=10,
+            cp "${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list" "$1"
+            cp "${APT_CONFIG}" "$2"
+        """, "_", work / "sources", work / "config", work / "etc-apt"],
+        env=env | {"SRCDIR": str(ROOT / "mkosi"), "RELEASE": "trixie"},
+        check=True, timeout=10,
     )
     return (work / "sources").read_text(), (work / "config").read_text()
 
@@ -185,7 +190,7 @@ def run_case(work: Path, mode: str, case: str, keyring: Path,
         case "firmware":
             sources = sources.replace(" main\n", " main non-free-firmware\n")
         case "order":
-            config = config.replace('"gz xz"', '"xz gz"')
+            config = config.replace('"gz xz lz4"', '"xz gz lz4"')
         case "missing-index":
             del available["/debian/dists/trixie/" + TARGET + ".gz"]
         case "missing-release":
@@ -200,6 +205,7 @@ def run_case(work: Path, mode: str, case: str, keyring: Path,
         case _:
             raise AssertionError(case)
     config_path = work / "apt.conf"
+    parts = work / "etc-apt/apt.conf.d"
     src_path = work / "test.list"
     status = work / "status"
     status.touch()
@@ -219,7 +225,7 @@ def run_case(work: Path, mode: str, case: str, keyring: Path,
             "/usr/share/keyrings/debian-archive-keyring.gpg", str(keyring)
         ))
         config_path.write_text(config + f"""
-Dir::Etc::parts "/dev/null";
+Dir::Etc::parts "{parts if mode == 'runtime' else '/dev/null'}";
 Dir::Etc::main "/dev/null";
 Dir::Etc::sourcelist "{src_path}";
 Dir::Etc::sourceparts "/dev/null";
@@ -247,10 +253,12 @@ Acquire::Retries "0";
             for setting in (
                 'Acquire::Languages:: "none";',
                 'Acquire::http::AllowRedirect "false";',
-                'Acquire::IndexTargets::deb::Packages::CompressionTypes "gz xz";',
+                'Acquire::IndexTargets::deb::Packages::CompressionTypes "gz xz lz4";',
                 'APT::Update::Error-Mode "any";',
             ):
                 assert setting in dumped, setting
+            if mode == "runtime":
+                assert 'Acquire::GzipIndexes "true";' in dumped, dumped
         completed = subprocess.run([apt, "update"], env=env, capture_output=True, text=True, timeout=20)
         if case in ("warm", "pdiffs"):
             assert completed.returncode == 0, completed.stderr
@@ -266,6 +274,16 @@ Acquire::Retries "0";
         if case in ("valid", "missing-payload"):
             assert completed.returncode == 0, completed.stderr
             assert set(requested) == objects.keys() and not misses, requested
+            if mode == "runtime":
+                assert len(list((work / "lists").glob("*_Packages.lz4"))) == len(SUITES)
+                planned = subprocess.run(
+                    [apt, "--simulate", "install", "--no-install-recommends", "sealed-fixture=1"],
+                    env=env, capture_output=True, text=True, timeout=10,
+                )
+                assert planned.returncode == 0 and "Inst sealed-fixture (1 " in planned.stdout, (
+                    planned.stdout, planned.stderr,
+                )
+                assert set(requested) == objects.keys() and not misses, requested
             targets = subprocess.run(
                 [apt, "indextargets", "--no-release-info", "--format", "$(URI) $(ARCHITECTURE) $(IDENTIFIER)"],
                 env=env, capture_output=True, text=True, check=True, timeout=10,

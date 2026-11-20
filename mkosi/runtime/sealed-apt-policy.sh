@@ -17,9 +17,9 @@ sealed_apt_config() {
   cat <<'EOF'
 Acquire::Languages "none";
 Acquire::http::AllowRedirect "false";
-// The signed Releases advertise gzip for the base suite, but only xz
-// (of these two) for updates and security. The mirror fails on any miss.
-Acquire::IndexTargets::deb::Packages::CompressionTypes "gz xz";
+// Signed Releases limit remote choices to gzip or xz here. Keep lz4 last so
+// APT can reopen lists cached by the runtime's Acquire::GzipIndexes setting.
+Acquire::IndexTargets::deb::Packages::CompressionTypes "gz xz lz4";
 APT::Update::Error-Mode "any";
 EOF
 }

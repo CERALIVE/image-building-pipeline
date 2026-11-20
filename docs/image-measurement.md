@@ -712,17 +712,16 @@ sources, translations, by-hash, PDiffs, redirects, or detached Release fallback.
 The temporary build sources use `.list` syntax because APT 3.0.3 ignores
 `InRelease-Path` in deb822. The mkosi overlay also supplies `mkosi.sources` to
 suppress automatic source generation.
-The temporary build sources use `.list` syntax because APT 3.0.3 ignores
-`InRelease-Path` in deb822. The mkosi overlay also supplies `mkosi.sources` to
-suppress automatic source generation.
 The sandbox uses absolute HTTP requests through the guest-local proxy; the
 runtime uses the same mirror's `/HTTPS///` remap from its first APT update.
 There is no live CA probe or bootstrap in that mode. The regular package install
 retains `ca-certificates` and checks the local CA store afterwards.
 
-The shared `gz xz` order selects the capsule's `Packages.gz` for the base suite
-and `Packages.xz` for the two update suites (their signed Releases do not
-advertise gzip). This is an order, not a per-suite pin: a missing gzip object
+The shared `gz xz lz4` order selects the capsule's `Packages.gz` for the base
+suite and `Packages.xz` for updates and security. Those are the advertised
+remote compressions in that order; `lz4` lets APT reopen the runtime's local
+cached lists with the shipped `Acquire::GzipIndexes` setting.
+This is an order, not a per-suite pin: a missing gzip object
 cannot recover via xz because the mirror fails closed on the first miss. The
 local mkosi package repository, device APT files (including `non-free-firmware`),
 signed unstable RAUC source path, and six approved repositories are unchanged.
@@ -731,7 +730,10 @@ does not install them over APT.
 
 Run `tests/apt-lib.test.sh` for the offline shell contracts. Set `SEALED_APT_GET`,
 `SEALED_APT_CONFIG`, and `SEALED_APT_METHODS` to the APT executables and method
-directory to also run the signed loopback acquisition fixture. An optional
+directory to also run the signed loopback acquisition fixture; the shell suite
+prints `SKIP` if the real APT leg was not enabled. The fixture loads the runtime's
+actual generated `99ceralive` and checks that the install resolves from the
+stored lists. An optional
 `SEALED_APT_INVENTORY` points at the extracted public `inventory.json` for an
 exact URL-set comparison; the test does not read package payloads from it.
 
