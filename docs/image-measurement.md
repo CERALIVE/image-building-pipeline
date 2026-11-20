@@ -858,8 +858,9 @@ directory-sync failure leaves the file visible at runtime, but a crash may
 lose the rename.
 
 The CLI takes its exit status from the verdict recorded after a successful
-rename. If the rename is interrupted, the original temporary inode identifies
-the candidate at its old or new name. If neither name confirms the outcome, the
+rename. If the rename is interrupted, the original temporary inode at its old
+name proves it did not move. The new name must have both the original inode and
+the exact prepared bytes to confirm publication. Otherwise the
 launcher reports the original failure, exits nonzero and retains the active
 journal so pair admission refuses the attempt. It replaces the marker with a
 failure verdict if storage permits; otherwise even a visible success marker

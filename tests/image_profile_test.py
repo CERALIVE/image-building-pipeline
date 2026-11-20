@@ -390,6 +390,22 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             if not rename_interrupted:
                 if rename_fault != "before":
                     replace_file(source, destination)
+                if rename_fault in {"wrong-inode", "wrong-contents"}:
+                    prepared = destination.read_bytes()
+                    candidate = destination.stat()
+                    if rename_fault == "wrong-inode":
+                        replacement = destination.with_name("other-receipt")
+                        replacement.write_bytes(prepared)
+                        replacement.chmod(0o600)
+                        replace_file(replacement, destination)
+                        assert not os.path.samestat(candidate, destination.stat())
+                        assert destination.read_bytes() == prepared
+                    else:
+                        conflicting = prepared.replace(b'"launcher_exit": 0', b'"launcher_exit": 1')
+                        assert conflicting != prepared
+                        destination.write_bytes(conflicting)
+                        assert os.path.samestat(candidate, destination.stat())
+                        assert destination.read_bytes() == conflicting
                 rename_interrupted = True
                 (root / "injected").touch()
                 raise OSError(errno.EIO, f"fixture terminal rename {rename_fault}")
@@ -1002,6 +1018,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
                     "confirmed": (0, 0, True, False, True),
                     "unconfirmed": (1, 1, False, True, False),
                     "repair-denied": (1, 0, True, True, False),
+                    "wrong-inode": (1, 1, False, True, False),
+                    "wrong-contents": (1, 1, False, True, False),
                 }
                 assert actual == expected[fault], (mode, actual, stderr.decode())
                 assert f"fixture terminal rename {fault}".encode() in stderr, (mode, stderr)
@@ -1252,8 +1270,16 @@ def test_terminal_rename_failure_before_publication_leaves_pair_uncommitted() ->
     cancelled_fixture("pair:rename-before")
 
 
-def test_interrupted_terminal_rename_commits_only_with_inode_confirmation() -> None:
+def test_interrupted_terminal_rename_commits_the_prepared_receipt() -> None:
     cancelled_fixture("pair:rename-confirmed")
+
+
+def test_interrupted_terminal_rename_refuses_identical_bytes_on_another_inode() -> None:
+    cancelled_fixture("pair:rename-wrong-inode")
+
+
+def test_interrupted_terminal_rename_refuses_conflicting_bytes_on_the_same_inode() -> None:
+    cancelled_fixture("pair:rename-wrong-contents")
 
 
 def test_unconfirmed_terminal_rename_quarantines_pair_and_preserves_failure() -> None:

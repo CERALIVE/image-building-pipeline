@@ -7,6 +7,7 @@ from contextlib import ExitStack, contextmanager
 import errno
 import fcntl
 from functools import partial
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -109,6 +110,7 @@ class Receipt:
         self.file: TextIO | None = None
         self.entry: os.stat_result | None = None
         self.candidate: os.stat_result | None = None
+        self.prepared: bytes | None = None
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
@@ -122,8 +124,15 @@ class Receipt:
 
     def temp_write(self) -> None:
         assert self.file is not None
-        json.dump(self.row, self.file, sort_keys=True, indent=2)
-        self.file.write("\n")
+        if self.outcome is None:
+            json.dump(self.row, self.file, sort_keys=True, indent=2)
+            self.file.write("\n")
+        else:
+            with StringIO() as output:
+                json.dump(self.row, output, sort_keys=True, indent=2)
+                text = output.getvalue() + "\n"
+            self.prepared = text.encode("utf-8")
+            self.file.write(text)
 
     def temp_flush(self) -> None:
         assert self.file is not None
@@ -181,10 +190,20 @@ class Receipt:
         except (OSError, MemoryError):
             return False
 
+    def _matches_prepared_receipt(self) -> bool:
+        assert self.candidate is not None and self.prepared is not None
+        size = len(self.prepared)
+        try:
+            with os.fdopen(checked_open(self.path, private=True, limit=size), "rb") as source:
+                return (os.path.samestat(self.candidate, os.fstat(source.fileno()))
+                        and source.read(size + 1) == self.prepared)
+        except (OSError, MemoryError, StreamError):
+            return False
+
     def _resolve_terminal_rename(self, outcome: Cancellation, status: int) -> None:
         if self._matches_entry(self.temporary):
             return  # The candidate did not move.
-        if self._matches_entry(self.path):
+        if self._matches_prepared_receipt():
             outcome.committed_exit = status
             return
         # Leave the latch unset so the launcher retains the journal even if repair succeeds.
