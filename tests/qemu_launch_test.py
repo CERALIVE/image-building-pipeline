@@ -66,7 +66,9 @@ class QemuLaunchTest(TestCase):
                 self.assertTrue(options["start_new_session"])
                 self.assertFalse(set(SESSION) & options["env"].keys())
                 if job:
-                    self.assertEqual(argv[argv.index("-chardev") + 1], "stdio,id=artifacts,signal=off,mux=off")
+                    artifact_backends = [spec for flag, spec in zip(argv, argv[1:])
+                                         if flag == "-chardev" and "id=artifacts" in spec.split(",")]
+                    self.assertEqual(artifact_backends, ["file,id=artifacts,path=/proc/self/fd/1"])
 
     def test_refuses_pty_and_other_unowned_streams_before_spawning(self) -> None:
         from qemu_launch import spawn_qemu
