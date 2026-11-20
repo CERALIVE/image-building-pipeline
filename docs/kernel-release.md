@@ -12,14 +12,40 @@ version. The approved workflow adapter and ephemeral VM scripts are [EXISTS].
 APT publication is [PARTIAL]: GitHub settings, runner registration, approval and
 each publication are owner actions, not performed by implementation/tests.
 The two-board bench drill for `7.2.0-ceralive3` passed on 2026-11-02 and its report is attached to that kernel's Release. Kernels are published to the stable APT channel only: `7.2.0-ceralive3` reached only the beta APT, and its identical successor `7.2.0-ceralive4` was drilled on 2026-11-03 and is on stable.
-The production source pin is now `7.2.0-ceralive8`, adding nftables reject for
-NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin. Revision 8 carries revision 7's kernel, which is revision 6's kernel, which is revision 5's kernel,
+The production source pin is now `7.2.0-ceralive9`, excluding the RK3588 family's
+discrete GPU, Intel integrated GPU, datacenter NIC and Intel IPU drivers.
+Source and patch pins retain nftables reject and the Rock 5B+ sink-first Type-C
+default through kernel-patches PR #28. Revision 9 is preparation only: no tag,
+candidate, release, bench drill or APT publication is implied.
+The owner can merge the preparation PR once CI passes and independent review
+approves it. The Rock 5B+ and Orange Pi 5 Plus image measurements are post-merge,
+pre-release evidence and are not a prerequisite for merging the kernel PR.
+
+When ready, run the deferred revision-8 baseline measurements (todo 19) using
+the approved image-building-pipeline source commit
+`9d74a7dee0c92b01ec2af85614a04889874e6783` as the capsule's `source_commit`.
+That tree still resolves `7.2.0-ceralive8`, which the offline measurement route
+requires along with the shipping variant and both populated RK3588 slots.
+Follow the [offline measurement runbook](image-measurement.md), including
+its authorization and admission steps. Retain each board's `measurement.json`
+and verifier `acceptance.json` in the private output store. Record the verified
+sizes in `ci/size-baseline.rock-5b-plus.json`,
+`ci/size-baseline.orange-pi-5-plus.json`, and `manifests/size-budget.json`
+without raising the ceilings.
+
+New production RK3588 image builds from the merged tree require
+`linux-image-7.2.0-ceralive-rk3588=7.2.0-ceralive9` in the signed CeraLive APT
+index. If that exact version is unavailable, the build fails with
+`kernel_not_on_apt` without falling back to revision 8 or compiling from source.
+Kernel release and publication remain owner actions.
+
+Revision 8 carries revision 7's kernel, which is revision 6's kernel, which is revision 5's kernel,
 re-tagged each time (revision 5 was never published) on a master that includes the unattended-rollback `boot.scr` fix (PR #229).
 Revision 6 has an identity Release and was drilled on both boards (2026-11-05), but is not on APT: that drill showed the old
 `boot.scr` did not reset after a rejected kernel, so rollback needed manual resets and power-cycles. Revision 7 has a candidate and a
 tag, but its release run failed in the real Avahi hostname contract, whose 30 s wait was too tight for the allocator's own retry
-schedule; revision 8 gives that contract the production wait. Revisions 7 and 8 have not been published.
+schedule; revision 8 gives that contract the production wait. Revision 8 has a GitHub identity Release
+(published 2026-11-06); the revision-9 drill and publication remain pending owner steps.
 
 | Part | State | Contract |
 |---|---|---|
@@ -27,7 +53,7 @@ schedule; revision 8 gives that contract the production wait. Revisions 7 and 8 
 | Immutable per-version candidate | EXISTS | this page |
 | APT publication of a candidate | PARTIAL, owner-gated | this page, "Publish" |
 | Device staging into the inactive slot | EXISTS as a host contract; advertised by images that carry the stager (CeraUI >= 2026.10.1), first published as `2026.10.102`, then `2026.11.1`, on beta only | [`kernel-staging.md`](kernel-staging.md) |
-| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03, on stable APT); revision 6 was drilled (2026-11-05) but needed manual resets for the rollback leg; source revision 8 is pending | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
+| Two-board bench drill | passed for `7.2.0-ceralive3` (2026-11-02) and `7.2.0-ceralive4` (2026-11-03, on stable APT); revision 6 was drilled (2026-11-05) but needed manual resets for the rollback leg; source revision 9 is pending | [`ota-activation.md`](ota-activation.md#local-kernel-activation-and-recovery-partial) |
 
 Kernel compilation runs only inside a dedicated KVM guest on the owner's
 workstation, never on GitHub-hosted runners or a remote machine. Cheap lint

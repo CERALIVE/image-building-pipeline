@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# allow: SIZE_OK - one pipeline contract shares its staged root and real metadata fixture.
 # Offline real entrypoints; only compiler/fetch/modinfo boundaries are doubled.
 # shellcheck disable=SC2016
 set -uo pipefail
@@ -379,17 +380,23 @@ RECORDED="${WORK}/recorded"
 eval "$("${ROOT}/lib/resolve.sh" rock-5b-plus)"
 python3 - "${ROOT}/tests/fixtures/kernel-firmware-v7.2.json" "${RECORDED}" \
   "${KERNEL_SOURCE_COMMIT}" "${KERNEL_SOURCE_PATCHES_COMMIT}" "${KERNEL_SOURCE_KERNEL_RELEASE}" \
-  "${KERNEL_SOURCE_PACKAGE_VERSION}" "${ROOT}/manifests/armbian-firmware-content.json" <<'PY'
+  "${KERNEL_SOURCE_PACKAGE_VERSION}" "${ROOT}/manifests/armbian-firmware-content.json" \
+  "${HARDWARE_EXCLUDED_MODULE_GLOBS}" <<'PY'
+import fnmatch
 import hashlib
 import json
 import pathlib
 import sys
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
 provenance = data['provenance']
-# The revision-1 archive keeps its captured patch pin; revision 5 retires only a DT patch.
-assert sys.argv[6] == '7.2.0-ceralive8'
+# Module metadata must come from the current build, not an older packaging revision.
+assert sys.argv[6] == '7.2.0-ceralive9'
 assert sys.argv[4] == 'bc7e44fa35d3eded23567dd48e65f6dc799f4b34'
-assert [provenance[key] for key in ('kernel_source_commit', 'patches_commit', 'kernel_release', 'kernel_package_version')] == [sys.argv[3], '6996f96bc883f637ddac11f81871a256632f3f48', sys.argv[5], '7.2.0-ceralive1']
+assert [provenance[key] for key in ('kernel_source_commit', 'patches_commit', 'kernel_release', 'kernel_package_version')] == sys.argv[3:7]
+assert not [path for path, _, _ in data['modules']
+            if any(fnmatch.fnmatchcase(path, pattern) for pattern in sys.argv[8].split())]
+assert not [path for path, _, refs in data['modules']
+            if any(ref.startswith('nvidia/') for ref in refs)]
 firmware = json.loads(pathlib.Path(sys.argv[7]).read_text())
 assert [provenance[key] for key in ('firmware_package', 'firmware_version', 'firmware_archive_sha256')] == [firmware[key] for key in ('package', 'version', 'archive_sha256')]
 paths = [row[0].removeprefix('kernel/') for row in data['modules']]
@@ -414,7 +421,7 @@ for entry in data['firmware']:
     if len(entry) == 2:
         (fw / entry[0]).symlink_to(entry[1])
 PY
-if [[ $? == 0 ]]; then ok 'revision-1 metadata matches current source/firmware pins and the revision-2 transition'
+if [[ $? == 0 ]]; then ok 'current build metadata matches source/firmware pins with no excluded drivers or nvidia consumers'
 else bad 'stale real metadata fixture or unreviewed package revision'; exit 1; fi
 mkdir -p "${RECORDED}/root/usr/lib" "${RECORDED}/root/boot"
 cp -a "${ROOTFS}/usr/lib/ceralive" "${RECORDED}/root/usr/lib/"

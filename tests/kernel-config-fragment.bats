@@ -1058,3 +1058,32 @@ EOF
     done
   done
 }
+
+@test "hardware policy: every excluded class symbol is off in the fragment and forbidden" {
+  local HARDWARE_EXCLUDED_KCONFIG symbol
+  eval "$("$PIPELINE_DIR/lib/resolve.sh" rock-5b-plus)"
+  [ -n "$HARDWARE_EXCLUDED_KCONFIG" ]
+  for symbol in $HARDWARE_EXCLUDED_KCONFIG; do
+    grep -qxF "CONFIG_${symbol}=n" "$FRAGMENT" \
+      || { echo "excluded hardware must disable CONFIG_${symbol}"; return 1; }
+    grep -qxF "CONFIG_${symbol}" "$FORBIDDEN" \
+      || { echo "excluded hardware must forbid CONFIG_${symbol}"; return 1; }
+  done
+}
+
+@test "hardware policy: the production forbidden gate rejects every excluded driver as built-in or module" {
+  local HARDWARE_EXCLUDED_KCONFIG symbol value
+  eval "$("$PIPELINE_DIR/lib/resolve.sh" rock-5b-plus)"
+  [ -n "$HARDWARE_EXCLUDED_KCONFIG" ]
+  : >"$WORK/off"
+  run "$VERIFY" --config "$WORK/off" --forbidden "$FORBIDDEN"
+  [ "$status" -eq 0 ]
+  for symbol in $HARDWARE_EXCLUDED_KCONFIG; do
+    for value in y m; do
+      printf 'CONFIG_%s=%s\n' "$symbol" "$value" >"$WORK/enabled"
+      run "$VERIFY" --config "$WORK/enabled" --forbidden "$FORBIDDEN"
+      [ "$status" -eq 1 ]
+      [[ "$output" == *"CONFIG_${symbol}: FORBIDDEN"* ]]
+    done
+  done
+}
