@@ -66,9 +66,18 @@ class QemuLaunchTest(TestCase):
                 self.assertTrue(options["start_new_session"])
                 self.assertFalse(set(SESSION) & options["env"].keys())
                 if job:
+                    artifact_ports = [spec.split(",") for flag, spec in zip(argv, argv[1:])
+                                      if flag == "-device" and spec.startswith("virtserialport,")
+                                      and "name=ceralive-artifacts" in spec.split(",")]
+                    self.assertEqual(len(artifact_ports), 1)
+                    refs = [option.removeprefix("chardev=") for option in artifact_ports[0]
+                            if option.startswith("chardev=")]
+                    self.assertEqual(len(refs), 1)
                     artifact_backends = [spec for flag, spec in zip(argv, argv[1:])
-                                         if flag == "-chardev" and "id=artifacts" in spec.split(",")]
-                    self.assertEqual(artifact_backends, ["file,id=artifacts,path=/proc/self/fd/1"])
+                                         if flag == "-chardev" and f"id={refs[0]}" in spec.split(",")]
+                    self.assertEqual(artifact_backends, ["file,id=artifacts,path=/proc/self/fd/1"],
+                                     f"artifact port references chardev={refs[0]}")
+                    self.assertEqual(refs, ["artifacts"])
 
     def test_refuses_pty_and_other_unowned_streams_before_spawning(self) -> None:
         from qemu_launch import spawn_qemu
