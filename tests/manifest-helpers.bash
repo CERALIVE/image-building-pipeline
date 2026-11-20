@@ -478,11 +478,11 @@ write_installed_package_status() {
   : >"$status_file"
   local package
   for package in "$@"; do
-    cat >>"$status_file" <<STATUS
-Package: $package
-Status: install ok installed
-
-STATUS
+    printf 'Package: %s\nStatus: install ok installed\n' "$package" >>"$status_file"
+    case "$package" in
+      nginx|nginx-common|nginx-light) printf 'Version: 1.26.3-3+deb13u11\n' >>"$status_file" ;;
+    esac
+    printf '\n' >>"$status_file"
   done
 }
 
@@ -517,6 +517,7 @@ make_parity_rootfs() {
   local packages=() package
   while IFS= read -r package; do [[ -n "$package" ]] && packages+=("$package"); done \
     < <(sed -e 's/#.*//' "${lists[@]}" | awk 'NF{print $1}')
+  packages+=(nginx nginx-common)  # installed alongside the listed nginx-light
   packages+=(gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device cerastream srtla)
   write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
 

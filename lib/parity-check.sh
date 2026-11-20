@@ -15,6 +15,7 @@
 #                   platform     — gstreamer1.0-rockchip-ceralive / rockchip-multimedia-config / librga2-ceralive
 #                                  (families/rk3588.yaml HW-accel + runtime)
 #                   first-party  — CeraLive SRT/ceraui/cerastream/srtla (CI: apt; offline → WARN)
+#                 nginx, nginx-common and nginx-light must meet the security floor.
 #   B. USER       `ceralive` user exists + is in audio/video/dialout/plugdev/
 #                 netdev/sudo/gpio/i2c/spi
 #   C. SERVICES   NetworkManager, ModemManager, ssh, chrony, avahi-daemon,
@@ -26,8 +27,8 @@
 #                 rules file shadowed by an image-owned /etc basename, and exactly
 #                 one owner for every modem-support file present
 #
-# Pure filesystem reads — NO dpkg/chroot needed (host may be Arch). Exit 0 only
-# when there are zero hard FAILs; CI-gated gaps (first-party offline) are WARNs.
+# Reads the rootfs without a chroot; uses host dpkg only for version comparison.
+# Exit 0 only when there are zero hard FAILs.
 #
 # shellcheck shell=bash
 
@@ -124,7 +125,7 @@ main() {
   local status_file="${root}/var/lib/dpkg/status"
   [[ -f "${status_file}" ]] || die "no dpkg status in rootfs (${status_file}) — not a Debian rootfs?"
 
-  # Installed package set — pure parse, no dpkg. A dpkg Status line is three
+  # Parse the installed package names and versions. A dpkg Status line is three
   # space-separated fields after the colon: <want> <flag> <status>, e.g.
   # "install ok installed" for an ordinary package or "hold ok installed" for
   # one `apt-mark hold`-ed (the kernel-freeze set: librockchip-mpp1,
@@ -134,13 +135,18 @@ main() {
   # <want> — matching only the literal substring "install ok installed" missed
   # every held package and reported it as absent, which is exactly backwards:
   # a held package is MORE certainly installed than an ordinary one, not less.
-  local installed
-  installed=" $(awk '
+  local installed_records installed
+  installed_records="$(awk '
     /^Package: / { pkg=$2 }
     /^Status: / { eflag=$3; state=$4 }
-    /^$/ { if (eflag == "ok" && state == "installed" && pkg!="") print pkg; pkg=""; eflag=""; state="" }
-    END { if (eflag == "ok" && state == "installed" && pkg!="") print pkg }
-  ' "${status_file}" | sort -u | tr '\n' ' ') "
+    /^Version: / { version=$2 }
+    function emit_installed() {
+      if (eflag == "ok" && state == "installed" && pkg != "") print pkg "\t" version
+    }
+    /^$/ { emit_installed(); pkg=""; eflag=""; state=""; version="" }
+    END { emit_installed() }
+  ' "${status_file}" | sort -u)"
+  installed=" $(cut -f1 <<<"${installed_records}" | sort -u | tr '\n' ' ') "
   local n_installed
   n_installed="$(echo "${installed}" | wc -w)"
   log_info "rootfs has ${n_installed} installed packages"
@@ -180,6 +186,18 @@ main() {
   else
     fail "Debian packages MISSING from rootfs: ${debian_missing[*]}"
   fi
+
+  # First Debian trixie-security revision with the nginx2root fix.
+  local nginx_floor=1.26.3-3+deb13u11 version
+  for p in nginx nginx-common nginx-light; do
+    version="$(awk -F '\t' -v pkg="${p}" '$1 == pkg { print $2 }' <<<"${installed_records}")"
+    if [[ -z "${version}" ]]; then
+      fail "nginx security floor: ${p} has no installed version (requires >= ${nginx_floor})"
+    elif ! dpkg --compare-versions "${version}" ge "${nginx_floor}"; then
+      fail "nginx security floor: ${p} ${version} does not meet minimum ${nginx_floor}"
+    fi
+  done
+
   if (( ${#platform_missing[@]} == 0 )); then
     pass "platform GStreamer/RGA packages installed (${PLATFORM_PKGS# })"
   else
