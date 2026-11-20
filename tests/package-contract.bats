@@ -2022,6 +2022,7 @@ REPRO
           "$PIPELINE_DIR/manifests/packages/shared.list" \
           "$PIPELINE_DIR/manifests/packages/rk3588.delta.list" \
           "$PIPELINE_DIR/manifests/packages/x86_64.delta.list" | awk 'NF{print $1}')
+  packages+=(nginx nginx-common)  # installed alongside the listed nginx-light
   packages+=(gstreamer1.0-rockchip-ceralive rockchip-multimedia-config ceralive-device cerastream srtla)
   write_installed_package_status "$root/var/lib/dpkg/status" "${packages[@]}"
 
@@ -2041,6 +2042,87 @@ REPRO
   [ "$status" -ne 0 ]
   [[ "$output" == *"python3"* ]]
   [[ "$output" == *"strace"* ]]
+}
+
+@test "parity: each nginx package must be installed at or above the Debian security floor" {
+  local root="$BATS_TEST_TMPDIR/nginx-rootfs"
+  CERALIVE_DEBUG_IMAGE=0 make_parity_rootfs "$root"
+  local status_file="$root/var/lib/dpkg/status" other_packages
+  other_packages="$(awk -v RS='' -v ORS='\n\n' '$2 !~ /^nginx(-common|-light)?$/ { print }' "$status_file")"
+  other_packages+=$'\n\nPackage: libsrt1.5-ceralive\nStatus: install ok installed\n'
+
+  local bin="$BATS_TEST_TMPDIR/bin" real_dpkg
+  real_dpkg="$(command -v dpkg)"
+  mkdir -p "$bin"
+  cat >"$bin/dpkg" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == --compare-versions && "$2" == 1.26.3-3+deb13u12 ]]; then
+  case "$DPKG_COMPARE_FAULT" in
+    error) exit 2 ;;
+    warning) printf 'dpkg: warning: simulated comparison warning\n' >&2; exit 0 ;;
+  esac
+fi
+exec "$REAL_DPKG" "$@"
+SH
+  chmod +x "$bin/dpkg"
+
+  local nginx common light rejected fault package version package_tail status_tail failed=0
+  while IFS='|' read -r nginx common light rejected fault; do
+    printf '%s\n\n' "$other_packages" >"$status_file"
+    for package in "nginx=$nginx" "nginx-common=$common" "nginx-light=$light"; do
+      version="${package#*=}"
+      [[ "$version" == - ]] && continue
+      package_tail='' status_tail=''
+      if [[ "${package%%=*}" == nginx ]]; then
+        [[ "$fault" != package-tail ]] || package_tail=' trailing'
+        [[ "$fault" != status-tail ]] || status_tail=' trailing'
+      fi
+      {
+        printf 'Package: %s%s\nStatus: install ok installed%s\n' \
+          "${package%%=*}" "$package_tail" "$status_tail"
+        if [[ "${package%%=*}" == nginx && "$fault" == version-nul ]]; then
+          printf 'Version: %s\0\n' "$version"
+        elif [[ "$version" != missing ]]; then
+          printf 'Version: %s\n' "$version"
+        fi
+        printf '\n'
+      } >>"$status_file"
+    done
+
+    run env CERALIVE_DEBUG_IMAGE=0 PATH="$bin:$PATH" REAL_DPKG="$real_dpkg" \
+      DPKG_COMPARE_FAULT="$fault" "$LIB_DIR/parity-check.sh" "$root"
+    if [[ "$rejected" == - ]]; then
+      [[ "$status" -eq 0 ]] && continue
+    elif [[ "$status" -eq 1 && "$output" == *"nginx security floor: $rejected "* ]]; then
+      continue
+    fi
+    printf 'nginx=%q nginx-common=%q nginx-light=%q fault=%s expected rejection=%s; got exit %s\n%s\n' \
+      "$nginx" "$common" "$light" "$fault" "$rejected" "$status" "$output"
+    failed=1
+  done <<'ROWS'
+1.26.3-3+deb13u10|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+1.26.3-3+deb13u11|1.26.3-3+deb13u10|1.26.3-3+deb13u11|nginx-common
+1.26.3-3+deb13u11|1.26.3-3+deb13u11|1.26.3-3+deb13u10|nginx-light
+1.26.3-3+deb13u11|1.26.3-3+deb13u11|-|nginx-light
+1.26.3-3+deb13u11|-|1.26.3-3+deb13u11|nginx-common
+1.26.3-3+deb13u11|1.26.3-3+deb13u11|1.26.3-3+deb13u11|-
+1.26.3-3+deb13u12|1.26.3-3+deb13u12|1.26.3-3+deb13u12|-
+1.26.4-1|1.26.4-1|1.26.4-1|-
+1:1.0|1.26.3-3+deb13u11|1.26.3-3+deb13u11|-
+1.26.3-3+deb13u11~rc1|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+missing|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+1.26.3-3+deb13u11 trailing|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+ 1.26.3-3+deb13u11|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+1.26.3-3+deb13u11!|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+v99|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx
+1.26.3-3+deb13u11|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx|package-tail
+1.26.3-3+deb13u11|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx|status-tail
+1.26.3-3+deb13u11|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx|version-nul
+1.26.3-3+deb13u12|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx|error
+1.26.3-3+deb13u12|1.26.3-3+deb13u11|1.26.3-3+deb13u11|nginx|warning
+ROWS
+  [ "$failed" -eq 0 ]
 }
 
 @test "RK3588 plugin package and shared object remain covered by both sysext exclusion sets" {

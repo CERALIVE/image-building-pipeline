@@ -307,6 +307,13 @@ not a dry run. See [`docs/size-notes.md`](../docs/size-notes.md) §10 for
 the exact wiring and the levers that keep both boards under the line (locale
 strip, firmware audit, the Mesa software-GL prune).
 
+### Image parity gate
+
+At step `[7/9]`, the parity gate checks the built rootfs package inventory.
+It fails the build if `nginx`, `nginx-common`, or `nginx-light` is missing
+or older than Debian's `1.26.3-3+deb13u11` security fix. The verifier uses
+`dpkg --compare-versions`, so later Debian revisions also pass.
+
 ### Kernel freeze contract
 
 The kernel, DTB, U-Boot, and firmware packages in every image are frozen
