@@ -324,8 +324,8 @@ def exit_launcher() -> None:
                     report_error(exc)
                 try:
                     published = json.loads(cancellation.exit_receipt.read_bytes())["launcher_exit"]
-                    if type(published) is not int or published != cancellation.committed_exit:
-                        raise ValueError("image receipt disagrees with committed launcher_exit")
+                    if type(published) is not int or published != status:
+                        raise ValueError("image receipt disagrees with launcher exit status")
                 except BaseException as exc:
                     report_error(exc)
             else:
