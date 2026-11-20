@@ -84,12 +84,17 @@ governs any end without acceptance:
   This holds even when the sample that crossed the bound returns after the
   guest deadline.
 
-The settle loop alone owns every retry. Each observation in a pass goes
-through one gate that checks the governing deadline first: the policy, the
-name, the task listing, every thread's nice, every raise, and the leader,
-cgroup and I/O class sample. No observation is issued at or after that
-deadline. None retries or sleeps on its own, so the three-attempt retry of
-the periodic samples does not apply here.
+The settle loop alone owns every retry. Every individual read and system
+call in a pass goes through one gate that checks the governing deadline
+first. That covers the policy, the name, the task listing, each thread's
+nice, each raise, the leader's nice and policy, each cgroup control file and
+`ioprio_get`. A composite sample is split into these single calls, so a call
+that returns late stops the next one. No call is issued at or after the
+deadline, and none retries or sleeps on its own. The three-attempt retry of
+the periodic samples does not apply here. No reader in the settle turns an
+error into a value. The only exception is an absent control file, which is
+the result being read: an absent `io.bfq.weight`, or a missing required
+control that refuses.
 
 An observation error such as `EIO` before the deadline ends the current pass
 as not clean. After a pause capped by the time left, a fresh pass starts from
@@ -106,8 +111,9 @@ Each settle pass checks, in order:
    scheduling policy refuses before any priority write.
 3. The wrapper handoff is proven only when `/proc/<pid>/comm` is
    `qemu-system-x86`, the kernel's 15-byte form of `qemu-system-x86_64`.
-   The launcher supports x86-64 QEMU only. An empty, unreadable, `sh` or
-   `setpriv` name keeps waiting.
+   The launcher supports x86-64 QEMU only. A name that is read but is empty,
+   `sh` or `setpriv` keeps waiting. A failed read of the name is an
+   observation error like any other, and a refusal keeps it as its cause.
 4. A fresh `/proc/<pid>/task` listing is taken, and every listed thread's
    nice is read. A thread below nice 9 is raised to nice 10. Linux niceness
    is per thread, raising it needs no privilege, and the launcher never

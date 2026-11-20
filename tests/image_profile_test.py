@@ -3,6 +3,7 @@
 
 from dataclasses import asdict, dataclass, replace
 import atexit
+import builtins
 from contextlib import ExitStack, contextmanager, suppress
 import dis
 import errno
@@ -2757,39 +2758,106 @@ def qemu_standin(directory: pathlib.Path) -> pathlib.Path:
     return script
 
 
-def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_error=None,
-                  policy=os.SCHED_OTHER, comm=None, cost=None, guest=None, interval=None, exit_code=None,
-                  faults=None):
-    """Sample a stand-in through the production wrapper with a modelled unprivileged nice.
+SETTLE_CGROUP = pathlib.Path("/sys/fs/cgroup/image-settle.scope")
+SETTLE_CONTROLS = {"memory.max": str(24 * 1024**3), "memory.swap.max": "0", "cpu.max": "400000 100000",
+                   "io.weight": "default 10", "cpu.weight": "10"}
+# Every system-call-level function the settle path can reach, from a grep of image_resources and image_stream.
+SETTLE_SYSCALLS = (
+    ("os", os, ("open", "read", "readlink", "listdir", "scandir", "stat", "lstat", "getpriority", "setpriority",
+                "uname", *sorted(name for name in dir(os) if name.startswith("sched_")))),
+    ("builtins", builtins, ("open",)),
+    ("Path", pathlib.Path, ("open", "read_text", "read_bytes", "stat", "lstat", "exists", "is_file", "is_dir",
+                            "iterdir", "readlink")),
+    ("image_resources", image_resources, ("list_directory", "_ioprio_get")),
+    ("libc", image_resources._LIBC, ("syscall",)),
+)
 
-    Time moves only by the settle's pauses, each verification sample's cost and a fault's finish
-    time. Every observation call is logged as (site, issue time). faults maps (site, issue time)
-    to (error or None, finish time or None): that call ends at the finish time, then raises.
-    """
-    real_get, real_set, real_policy = os.getpriority, os.setpriority, os.sched_getscheduler
-    real_list, read_text = image_resources.list_directory, pathlib.Path.read_text
+
+def guard_settle_calls(hooks, clock, deadline):
+    """Fail a settle system call issued outside observe(), at or after the governing deadline, or after
+    an earlier call in the same observe() frame returned past it. Returns the issued calls."""
+    gate = image_resources._SettleRun.observe.__code__
+    depth, crossed, calls = [0], {}, []
+
+    def wrap(name, function):
+        def spy(*args, **kwargs):
+            if depth[0]:
+                return function(*args, **kwargs)  # Part of an outer call, such as os.open in a listing.
+            frame = sys._getframe(1)
+            while frame is not None and frame.f_code is not gate:
+                frame = frame.f_back
+            issued = clock()
+            calls.append((name, issued))
+            assert frame is not None, f"{name} issued outside observe()"
+            assert issued < deadline, f"{name} issued at {issued} s, not before the {deadline} s deadline"
+            assert id(frame) not in crossed, f"{name} issued after a call in the same observe() passed the deadline"
+            depth[0] += 1
+            try:
+                return function(*args, **kwargs)
+            finally:
+                depth[0] -= 1
+                if clock() >= deadline:
+                    crossed[id(frame)] = frame  # Holding the frame keeps its id from being reused.
+        return spy
+
+    for label, owner, names in SETTLE_SYSCALLS:
+        for name in names:
+            hooks.enter_context(patch.object(owner, name, wrap(f"{label}.{name}", getattr(owner, name))))
+    return calls
+
+
+@contextmanager
+def qemu_child():
+    """A ready stand-in named like QEMU, started through the production wrapper."""
     with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
             vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
         assert child.stdout.readline() == b"ready\n"
+        try:
+            yield child
+        finally:
+            with suppress(BrokenPipeError):
+                child.stdin.close()
+
+
+def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_error=None,
+                  policy=os.SCHED_OTHER, comm=None, cost=None, guest=None, interval=None, exit_code=None,
+                  faults=None, child=None, bfq_race=0):
+    """Sample a stand-in through the production wrapper with a modelled unprivileged nice.
+
+    The cgroup is a fake one-level tree. Time moves only by the settle's pauses, each verification
+    sample's cost and a fault's finish time. Every observation call is logged as (site, issue time).
+    faults maps (site, issue time, k) to (error or None, finish time or None): the k-th call at that
+    site and time ends at the finish time, then raises the error. A settle runs under the call guard.
+    child reuses a running stand-in; the leader's nice is modelled, so samples stay independent.
+    bfq_race makes that many io.bfq.weight checks read it as absent, then find it with lstat.
+    """
+    real_get, real_set, real_policy = os.getpriority, os.setpriority, os.sched_getscheduler
+    real_list, read_text, real_lstat = image_resources.list_directory, pathlib.Path.read_text, pathlib.Path.lstat
+    real_ioprio = image_resources._ioprio_get
+    with ExitStack() as owned:
+        child = child or owned.enter_context(qemu_child())
         assert pathlib.Path(f"/proc/{child.pid}/comm").read_text() == "qemu-system-x86\n"
         # The real helper thread inherits the host's or a daemon's nice; pin it so only the modelled leader varies.
         helpers = {int(name) for name in os.listdir(f"/proc/{child.pid}/task")} - {child.pid}
         for tid in helpers:
             os.setpriority(os.PRIO_PROCESS, tid, max(os.getpriority(os.PRIO_PROCESS, tid), image_resources.QEMU_NICE))
         threads, task = helpers | {child.pid}, pathlib.Path(f"/proc/{child.pid}/task")
+        bfq = SETTLE_CGROUP / "io.bfq.weight"
         now = [0.0]
         costs = list(cost or ())
-        pending = dict(faults or {})
+        pending, seen = dict(faults or {}), {}
         state = {"nice": initial, "reads": 0, "writes": [], "write_times": [], "pauses": [], "undo": undo,
-                 "calls": [], "fired": []}
+                 "calls": [], "fired": [], "syscalls": [], "races": 0}
 
         def observed(site):
             issued = now[0]
             state["calls"].append((site, issued))
-            if (site, issued) in pending:
-                error, finish = pending.pop((site, issued))
-                state["fired"].append((site, issued))
+            seen[site, issued] = seen.get((site, issued), 0) + 1
+            key = (site, issued, seen[site, issued])
+            if key in pending:
+                error, finish = pending.pop(key)
+                state["fired"].append(key)
                 if finish is not None:
                     now[0] = finish
                 if error is not None:
@@ -2801,9 +2869,10 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
         def get(which, who):
             if who not in threads:
                 return real_get(which, who)
-            observed("nice")
             if who != child.pid:
+                observed("nice:helper")
                 return real_get(which, who)
+            observed("nice")
             state["reads"] += 1
             if exit_code is not None and state["reads"] == 1:
                 child.stdin.write(f"exit {exit_code}\n".encode())
@@ -2847,16 +2916,33 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
                     if isinstance(value, BaseException):
                         raise value
                     return value
+            elif path == task.parent / "cgroup":
+                observed("cgroup:membership")
+                return f"0::/{SETTLE_CGROUP.name}\n"
+            elif path.parent == SETTLE_CGROUP:
+                observed(f"cgroup:{path.name}")
+                if path == bfq:
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+                return SETTLE_CONTROLS[path.name]
             return read_text(path, *args, **kwargs)
+
+        def lstat(path, *args, **kwargs):
+            if path == bfq:
+                observed("cgroup:io.bfq.weight:lstat")
+                if state["races"] < bfq_race:
+                    state["races"] += 1
+                    return real_lstat(pathlib.Path("/"))
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+            return real_lstat(path, *args, **kwargs)
 
         def listing(path, **kwargs):
             if path == task:
                 observed("listing")
             return real_list(path, **kwargs)
 
-        def cgroup(_pid):
-            observed("cgroup")
-            return 10
+        def ioprio(pid):
+            observed("ioprio")
+            return real_ioprio(pid)
 
         def pause(seconds):
             state["pauses"].append(round(seconds, 9))
@@ -2864,10 +2950,9 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
 
         verify = image_resources._process_priority
 
-        def timed(pid, cancellation):
-            observed("verify")
+        def timed(pid, cancellation, *gate):
             try:
-                return verify(pid, cancellation)
+                return verify(pid, cancellation, *gate)
             finally:
                 now[0] += costs.pop(0) if costs else 0.0
 
@@ -2880,20 +2965,18 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
             with ExitStack() as hooks:
                 for owner, name, value in ((os, "getpriority", get), (os, "setpriority", put),
                                            (os, "sched_getscheduler", scheduler), (pathlib.Path, "read_text", proc_text),
-                                           (image_resources, "list_directory", listing),
-                                           (image_resources, "cgroup_limits", cgroup),
+                                           (pathlib.Path, "lstat", lstat), (image_resources, "list_directory", listing),
+                                           (image_resources, "_ioprio_get", ioprio),
                                            (image_resources, "_process_priority", timed)):
                     hooks.enter_context(patch.object(owner, name, value))
-                if settle:
-                    hooks.enter_context(patch.object(image_resources, "retry_check", no_retry))
                 if interval is not None:
                     hooks.enter_context(patch.object(image_resources, "PRIORITY_SETTLE_INTERVAL", interval))
+                if settle:
+                    hooks.enter_context(patch.object(image_resources, "retry_check", no_retry))
+                    state["syscalls"] = guard_settle_calls(hooks, lambda: now[0], 5.0 if guest is None else min(5.0, guest))
                 return image_resources.process_priority(child.pid, Cancellation(), **options), state, child
         except (image_resources.AdmissionError, image_resources.GuestDeadline, OSError) as error:
             return error, state, child
-        finally:
-            with suppress(BrokenPipeError):
-                child.stdin.close()
 
 
 def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> None:
@@ -2940,6 +3023,8 @@ def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> N
     for names in ([""], [PermissionError(errno.EACCES, "fixture")], ["sh\n"], ["setpriv\n"]):
         error, _, child = settle_sample(12, comm=names)
         assert str(error) == f"QEMU PID {child.pid} did not hand over from its launch wrapper within 5.0 s", (names, error)
+        # A name that was read but is wrong has no cause; a failed read is the refusal's cause.
+        assert error.__cause__ is (names[0] if isinstance(names[0], OSError) else None), (names, error.__cause__)
     # A daemon that keeps lowering it exhausts the bound and refuses with the observed value.
     error, _, _ = settle_sample(-4, undo=100)
     assert isinstance(error, image_resources.PriorityRefusal), error
@@ -2981,7 +3066,8 @@ def test_settle_raises_every_qemu_thread_and_later_threads_inherit_it() -> None:
 
         exited = lambda: os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
         with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
-                patch.object(image_resources, "cgroup_limits", return_value=10):
+                patch.object(image_resources, "cgroup_limits", return_value=10), ExitStack() as hooks:
+            guard_settle_calls(hooks, time.monotonic, time.monotonic() + image_resources.PRIORITY_SETTLE_SECONDS)
             row = image_resources.process_priority(
                 child.pid, Cancellation(), settle=image_resources.Settle(exited, pause=lambda _seconds: None))
         child.stdin.write(b"threads\n")
@@ -3027,49 +3113,74 @@ def test_settle_deadline_precedence_and_confirming_pass() -> None:
         assert max(at for _, at in state["calls"]) < min(5.0, guest or 5.0), (guest, completed, state["calls"])
     # An observation error after the governing deadline reports that deadline, never the raw error.
     eio = OSError(errno.EIO, "fixture observation")
-    result, _, _ = settle_sample(12, guest=1.0, faults={("cgroup", 0.1): (eio, 1.6)})
+    result, _, _ = settle_sample(12, guest=1.0, faults={("cgroup:membership", 0.1, 1): (eio, 1.6)})
     assert type(result) is image_resources.GuestDeadline, result
-    result, _, _ = settle_sample(12, faults={("cgroup", 0.1): (eio, 5.6)})
+    result, _, _ = settle_sample(12, faults={("cgroup:membership", 0.1, 1): (eio, 5.6)})
     assert type(result) is image_resources.AdmissionError and result.__cause__ is eio, result
     # Before the deadline the same error is inconclusive: two later clean passes confirm.
-    result, _, _ = settle_sample(12, faults={("cgroup", 0.0): (eio, None)})
+    result, _, _ = settle_sample(12, faults={("cgroup:membership", 0.0, 1): (eio, None)})
     assert type(result) is dict and result["nice"] == 12, result
 
 
 def test_settle_loop_owns_every_observation_retry() -> None:
-    # Each observation site fails or stalls in the first pass (issued at 0.0 s) or the would-be
-    # confirming pass (0.1 s); the call returns before, exactly at or after the governing deadline.
+    # Each observation call fails or returns late in the first pass (issued at 0.0 s) or the would-be
+    # confirming pass (0.1 s): before, exactly at or just after the governing deadline. The call guard
+    # in settle_sample also fails any call outside observe() or at or after that deadline.
     eio = OSError(errno.EIO, "fixture observation")
-    for site, issued, guest, (error, finish) in product(
-            ("policy", "listing", "nice", "raise", "cgroup"), (0.0, 0.1), (None, 1.0),
-            ((eio, None), (eio, "at"), (eio, "after"), (None, "at"), (None, "after"))):
-        deadline = 5.0 if guest is None else guest
-        when = {None: None, "at": deadline, "after": deadline + 0.5}[finish]
-        case = (site, issued, guest, error, finish)
-        # A raise needs a low leader; a daemon undoing the first raise makes the second pass raise again.
-        initial, undo = (-4, 1 if issued else 0) if site == "raise" else (12, 0)
-        result, state, child = settle_sample(initial, undo=undo, guest=guest, faults={(site, issued): (error, when)})
-        assert state["fired"] == [(site, issued)], (case, state["calls"])
-        # One gate: no observation is issued at or after the governing deadline.
-        assert max(at for _, at in state["calls"]) < deadline, (case, state["calls"])
-        if when is None:
-            # The failed pass never counts: acceptance needs two complete passes after it.
-            assert type(result) is dict, (case, result)
-            assert len([at for name, at in state["calls"] if name == "listing" and at > issued]) == 2, (case, state)
-        elif guest is not None:
-            assert type(result) is image_resources.GuestDeadline, (case, result)
-        elif error is not None:
-            expected = (f"cannot raise QEMU PID {child.pid} to nice 10: fixture observation" if site == "raise" else
-                        f"QEMU PID {child.pid} priority could not be observed within 5.0 s: [Errno 5] fixture observation")
-            assert type(result) is image_resources.AdmissionError and str(result) == expected, (case, result)
-            assert result.__cause__ is eio, (case, result.__cause__)
-        elif site == "raise":
-            assert type(result) is image_resources.PriorityRefusal, (case, result)
-            assert str(result) == "image profile needs non-realtime scheduling and nice >= 9 (observed nice -4, SCHED_OTHER)"
-            assert result.observed == {"nice": -4, "policy": "SCHED_OTHER"}, (case, result.observed)
-        else:
-            assert type(result) is image_resources.AdmissionError, (case, result)
-            assert str(result) == f"QEMU PID {child.pid} priority was not confirmed by a clean pass within 5.0 s", result
+    sites = (("policy", 1), ("policy", 2), ("comm", 1), ("listing", 1), ("nice", 1), ("nice", 2), ("nice:helper", 1),
+             ("raise", 1), ("cgroup:membership", 1), *((f"cgroup:{name}", 1) for name in SETTLE_CONTROLS),
+             ("cgroup:io.bfq.weight", 1), ("cgroup:io.bfq.weight:lstat", 1), ("ioprio", 1))
+    with qemu_child() as standin:
+        for case in product(sites, (0.0, 0.1), (None, 1.0),
+                            ((eio, None), (eio, "at"), (eio, "after"), (None, "at"), (None, "after"))):
+            observation_fault(standin, eio, *case)
+
+
+def observation_fault(standin, eio, site_k, issued, guest, error_finish) -> None:
+    """One fault-matrix case on a shared stand-in."""
+    (site, k), (error, finish) = site_k, error_finish
+    deadline = 5.0 if guest is None else guest
+    when = {None: None, "at": deadline, "after": deadline + 0.1}[finish]
+    case = (site, k, issued, guest, error, finish)
+    # A raise needs a low leader; a daemon undoing the first raise makes the second pass raise again.
+    initial, undo = (-4, 1 if issued else 0) if site == "raise" else (12, 0)
+    result, state, child = settle_sample(initial, undo=undo, guest=guest, faults={(site, issued, k): (error, when)},
+                                         child=standin)
+    assert state["fired"] == [(site, issued, k)], (case, state["calls"])
+    # One gate: no observation is issued at or after the governing deadline.
+    assert max(at for _, at in state["calls"]) < deadline, (case, state["calls"])
+    assert state["syscalls"] and max(at for _, at in state["syscalls"]) < deadline, (case, state["syscalls"])
+    if when is None:
+        # The failed pass never counts: acceptance needs two complete passes after it.
+        assert type(result) is dict, (case, result)
+        assert len([at for name, at in state["calls"] if name == "listing" and at > issued]) == 2, (case, state)
+    elif guest is not None:
+        assert type(result) is image_resources.GuestDeadline, (case, result)
+    elif error is not None:
+        expected = {"raise": f"cannot raise QEMU PID {child.pid} to nice 10: fixture observation",
+                    "comm": f"QEMU PID {child.pid} did not hand over from its launch wrapper within 5.0 s"}.get(
+            site, f"QEMU PID {child.pid} priority could not be observed within 5.0 s: [Errno 5] fixture observation")
+        assert type(result) is image_resources.AdmissionError and str(result) == expected, (case, result)
+        assert result.__cause__ is eio, (case, result.__cause__)
+    elif site == "raise":
+        assert type(result) is image_resources.PriorityRefusal, (case, result)
+        assert str(result) == "image profile needs non-realtime scheduling and nice >= 9 (observed nice -4, SCHED_OTHER)"
+        assert result.observed == {"nice": -4, "policy": "SCHED_OTHER"}, (case, result.observed)
+    else:
+        assert type(result) is image_resources.AdmissionError, (case, result)
+        assert str(result) == f"QEMU PID {child.pid} priority was not confirmed by a clean pass within 5.0 s", result
+
+
+def test_settle_treats_a_composite_verdict_as_an_observation_error() -> None:
+    # io.bfq.weight reads as absent, then its lstat finds it: cgroup_limits raises BFQObservationError.
+    result, state, _ = settle_sample(12, bfq_race=1)
+    assert type(result) is dict, result
+    assert len([at for name, at in state["calls"] if name == "listing" and at > 0.0]) == 2, state["calls"]
+    # Racing on every pass until the bound: the refusal keeps the composite verdict as its cause.
+    result, state, child = settle_sample(12, bfq_race=10**6)
+    assert type(result) is image_resources.AdmissionError, result
+    assert type(result.__cause__) is image_resources.BFQObservationError, result.__cause__
+    assert str(result) == f"QEMU PID {child.pid} priority could not be observed within 5.0 s: {result.__cause__}", result
 
 
 def test_settle_converges_on_threads_created_during_the_raise() -> None:
@@ -3120,7 +3231,8 @@ def test_settle_converges_on_threads_created_during_the_raise() -> None:
             try:
                 with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
                         patch.object(image_resources, "list_directory", listing), \
-                        patch.object(image_resources, "cgroup_limits", return_value=10):
+                        patch.object(image_resources, "cgroup_limits", return_value=10), ExitStack() as hooks:
+                    guard_settle_calls(hooks, lambda: now[0], 5.0 if guest is None else min(5.0, guest))
                     result = image_resources.process_priority(child.pid, Cancellation(), settle=rule)
             except (image_resources.AdmissionError, image_resources.GuestDeadline) as error:
                 result = error
@@ -3152,14 +3264,14 @@ def test_settle_converges_on_threads_created_during_the_raise() -> None:
 
 
 def test_guest_deadline_during_priority_settle_times_out_the_guest() -> None:
-    for mode in ("below-floor", "late-eio"):
+    for mode in ("below-floor", "late-eio", "late-success"):
         guest_deadline_during_priority_settle(mode)
 
 
 def guest_deadline_during_priority_settle(mode: str) -> None:
     real_popen, real_get, real_set = subprocess.Popen, os.getpriority, os.setpriority
-    real_comm = image_resources._comm
-    now, owned, samples = [0.0], {}, []
+    real_read, real_ioprio = pathlib.Path.read_text, image_resources._ioprio_get
+    now, owned, samples, ioprio = [0.0], {}, [], []
     clock = SimpleNamespace(monotonic=lambda: now[0], time=time.time,
                             sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
     with tempfile.TemporaryDirectory() as temporary:
@@ -3172,18 +3284,30 @@ def guest_deadline_during_priority_settle(mode: str) -> None:
             return process
 
         # below-floor: the host keeps the stand-in below the floor for the whole one-second guest budget.
-        # late-eio: a conforming stand-in's cgroup observation, issued in time, returns EIO at 1.1 s.
+        # late-eio and late-success: a conforming stand-in's cgroup sample, issued in time, returns at
+        # 1.1 s with EIO or with a valid weight; neither is retried, and no ioprio_get follows.
         def get(which, who):
             if who == owned.get("pid"):
                 return -4 if mode == "below-floor" else 12
             return real_get(which, who)
 
-        def cgroup(_pid):
+        def cgroup(_pid, _observe=None):
             samples.append(now[0])
-            if mode == "late-eio":
+            if mode != "below-floor":
                 now[0] = 1.1
+            if mode == "late-eio":
                 raise OSError(errno.EIO, "fixture cgroup")
             return 10
+
+        def io_class(pid):
+            ioprio.append(now[0])
+            return real_ioprio(pid)
+
+        def read_text(path, *args, **kwargs):
+            # The handoff is not under test here: name the stand-in QEMU even before its exec completes.
+            if mode != "below-floor" and path == pathlib.Path(f"/proc/{owned.get('pid')}/comm"):
+                return "qemu-system-x86\n"
+            return real_read(path, *args, **kwargs)
 
         def put(which, who, value):
             return None if who == owned.get("pid") else real_set(which, who, value)
@@ -3200,8 +3324,8 @@ def guest_deadline_during_priority_settle(mode: str) -> None:
                         patch.object(image_lifecycle, "time", clock), \
                         patch.object(image_resources, "cgroup_limits", cgroup), \
                         patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
-                        patch.object(image_resources, "_comm", lambda pid: (  # The handoff is not under test here.
-                            image_resources.QEMU_COMM if mode == "late-eio" else real_comm(pid))):
+                        patch.object(pathlib.Path, "read_text", read_text), \
+                        patch.object(image_resources, "_ioprio_get", io_class):
                     vm.boot(pathlib.Path("/unused"), b"{}", "image", 1, disk_fd=overlay.fileno(), image_job=job)
         except subprocess.TimeoutExpired as error:
             assert error.cmd == "image guest" and error.timeout == 1, error
@@ -3209,8 +3333,8 @@ def guest_deadline_during_priority_settle(mode: str) -> None:
             raise AssertionError("guest deadline was not reported as a guest timeout")
         record = json.loads((directory / "teardown.json").read_text())
         assert record["qemu_reaped"] is True and "qemu_priority_refusal" not in record, record
-    # The settle issues no observation after the guest deadline, so the late EIO is never retried.
-    assert mode == "below-floor" or (len(samples) == 1 and samples[0] < 1.0), (mode, samples)
+    # The settle issues no observation after the guest deadline: no retry and no ioprio_get at 1.1 s.
+    assert mode == "below-floor" or (len(samples) == 1 and samples[0] < 1.0 and ioprio == []), (mode, samples, ioprio)
 
 
 def test_guest_exit_during_priority_settle_reports_the_exit() -> None:
@@ -3258,11 +3382,11 @@ def test_priority_syscall_error_restarts_the_whole_observation() -> None:
     for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
         steps = []
 
-        def cpu(_pid):
+        def cpu(_pid, _observe=None):
             steps.append("cpu")
             return 9
 
-        def cgroup(_pid):
+        def cgroup(_pid, _observe=None):
             steps.append("cgroup")
             return 10
 
