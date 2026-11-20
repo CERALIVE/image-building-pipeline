@@ -55,6 +55,8 @@ make_stub nmcli \
   '  *"802-11-wireless.ssid connection show"*) printf "%s\n" "${STUB_CON_SSID:-HomeNet}"; exit 0 ;;' \
   '  *"-f NAME,TYPE connection show"*) [ -n "${STUB_PROFILES_FILE:-}" ] && cat "$STUB_PROFILES_FILE"; exit 0 ;;' \
   '  *"connection up"*) case "$args" in *ceralive-ap*) exit 0 ;; *) exit "${STUB_USER_UP_RC:-0}" ;; esac ;;' \
+  '  *"connection add"*) if [ "${STUB_ADD_RC:-0}" -ne 0 ]; then echo "Error: failed to modify 802-11-wireless.ssid: invalid" >&2; exit "$STUB_ADD_RC"; fi' \
+  '                      echo "Connection '"'"'ceralive-wifi'"'"' (00000000-0000-0000-0000-000000000000) successfully added."; exit 0 ;;' \
   'esac' \
   'exit 0'
 
@@ -75,7 +77,7 @@ make_stub timeout \
   'while [ "${1#-}" != "$1" ]; do shift; done' \
   'shift; exec "$@"'
 
-make_stub logger 'exit 0'
+make_stub logger 'printf "%s\n" "$*" >>"${STUB_LOG_FILE:-/dev/null}"; exit 0'
 make_stub hostname 'printf "%s\n" "${STUB_RUNTIME_HOSTNAME:-factory-seed}"'
 make_stub busctl \
   'case "$*" in' \
@@ -175,6 +177,24 @@ UNCOMMITTED_OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type
 grep -qF 'selected deterministic address' <<<"${UNCOMMITTED_OUT}" && pass "in-flight identity gets deterministic fallback guidance" || fail "in-flight identity gets deterministic fallback guidance"
 # credentials must NOT be persisted anywhere but NM (no temp/state file holds the psk)
 ! grep -rqF 'hunter2pass' "${STATE}" 2>/dev/null && pass "no credential written to /data state" || fail "no credential written to /data state"
+
+# ===========================================================================
+echo "== Scenario C2: nmcli output never reaches the client socket =="
+# stdout is the client socket under Accept=yes; nmcli prints a success line on add.
+reset_state
+printf 'portal-active' >"$(state_file portal-active)"
+for form in 'ssid=HomeNet&psk=hunter2pass' 'ssid=OpenCafe'; do
+  OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: %s\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n%s' "${#form}" "${form}" | bash "${PORTAL}" serve 2>/dev/null)"
+  [[ "${OUT}" == HTTP/* ]]                       && pass "response starts with HTTP/ (${form%%&*})" || fail "response starts with HTTP/ (${form%%&*})"
+  ! grep -qF 'successfully added' <<<"${OUT}"    && pass "nmcli stdout kept out of the response (${form%%&*})" || fail "nmcli stdout kept out of the response (${form%%&*})"
+done
+NM_LOG="${SANDBOX}/portal-log.txt"; : >"${NM_LOG}"; : >"${CALL_LOG}"
+OUT="$(printf 'POST / HTTP/1.1\r\nContent-Length: 28\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nssid=HomeNet&psk=hunter2pass' | env STUB_ADD_RC=2 STUB_LOG_FILE="${NM_LOG}" bash "${PORTAL}" serve 2>/dev/null)"
+[[ "${OUT}" == HTTP/* ]]                         && pass "failed add still answers with HTTP/" || fail "failed add still answers with HTTP/"
+grep -qF 'Could not save' <<<"${OUT}"            && pass "failed add shows the retry page" || fail "failed add shows the retry page"
+! grep -qF 'Error:' <<<"${OUT}"                  && pass "nmcli error kept out of the response" || fail "nmcli error kept out of the response"
+grep -qF 'Error: failed to modify' "${NM_LOG}"   && pass "nmcli error logged" || fail "nmcli error logged"
+! called "systemd-run"                           && pass "no handoff after a failed add" || fail "no handoff after a failed add"
 
 # ===========================================================================
 echo "== Scenario D: connect SUCCESS -> all four MAC6 conditions =="
