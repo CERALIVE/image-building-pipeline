@@ -10,7 +10,7 @@
 #                      BSP package registry, fetched from the Armbian apt repo. On Debian/Ubuntu
 #                      hosts, apt-get is used directly. On non-Debian hosts (e.g.
 #                      Arch Linux), the fetch runs inside the pinned trixie builder
-#                      container via Docker/Podman.
+#                      container via the guarded system Docker path.
 #   2. First-party   — CeraLive SRT / cerastream / gstreamer1.0-libuvcsrc /
 #                      ceralive-device (CeraUI) / srtla .debs, PULLED FROM
 #                      apt.ceralive.tv via a GPG-verified, mTLS-authenticated apt

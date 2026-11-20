@@ -1,4 +1,10 @@
-"""Check the workstation container boundary without a daemon."""
+"""Check the workstation container boundary without a daemon.
+
+The static scan is a best-effort tripwire for accidental raw launches in
+well-formed source. It does not resolve eval, constructed command strings, or
+generated scripts. Runtime guarantees come from ci/container-engine.py and
+launcher refusals, not from the scan.
+"""
 
 import ast
 import json
@@ -34,6 +40,9 @@ INLINE_ENGINE = re.compile(
     rf"""(?:^|[\s"'`/(]){ENGINE_TEXT}["']?\s+(?:--?\S+\s+)*(?:{'|'.join(sorted(VERBS))})\b"""
 )
 INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+DISCOVER_ENGINE = re.compile(
+    rf"\$\(\s*(?:command\s+-v|which|type\s+-p)\s+({ENGINE_TEXT})\s*\)"
+)
 
 
 def engine_verb(tokens: list[str], index: int) -> str:
@@ -47,6 +56,7 @@ def engine_verb(tokens: list[str], index: int) -> str:
 
 def raw_engine(line: str, aliases: set[str] | None = None, verbs: set[str] = VERBS) -> bool:
     """Recognize ordinary shell dispatch without running or expanding shell input."""
+    line = DISCOVER_ENGINE.sub(r"\1", line)
     lexer = shlex.shlex(line, posix=True, punctuation_chars="();|&<>`")
     lexer.whitespace_split = True
     aliases = aliases if aliases is not None else set()
@@ -87,19 +97,54 @@ def raw_engine(line: str, aliases: set[str] | None = None, verbs: set[str] = VER
 def python_engine_lines(text: str) -> Iterator[tuple[int, str]]:
     """Inspect literal argv and command arguments without importing the scanned file."""
     lines = text.splitlines()
-    for node in ast.walk(ast.parse(text)):
+
+    def command_text(node: ast.AST) -> str:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return "".join(command_text(part) if isinstance(part, ast.Constant) else "__value__"
+                           for part in node.values)
+        return ""
+
+    nodes = list(ast.walk(ast.parse(text)))
+    commands = {target.id for node in nodes if isinstance(node, ast.Assign)
+                and raw_engine(command_text(node.value), verbs=VERBS | {"__value__"})
+                for target in node.targets if isinstance(target, ast.Name)}
+    for node in nodes:
         if isinstance(node, (ast.List, ast.Tuple)):
             args = [item.value if isinstance(item, ast.Constant) and isinstance(item.value, str)
                     else "" for item in node.elts]
             suspect = bool(args and args[0].rsplit("/", 1)[-1] in ENGINES and engine_verb(args, 0) in VERBS)
-        elif isinstance(node, ast.Call) and node.args:
-            first = node.args[0]
-            suspect = (isinstance(first, ast.Constant) and isinstance(first.value, str)
-                       and raw_engine(first.value))
+        elif isinstance(node, ast.Call):
+            arguments = [*node.args[:1], *(item.value for item in node.keywords if item.arg in {"args", "cmd"})]
+            suspect = any(raw_engine(command_text(arg), verbs=VERBS | {"__value__"})
+                          or (isinstance(arg, ast.Name) and arg.id in commands)
+                          for arg in arguments)
         else:
             continue
         if suspect:
             yield node.lineno, lines[node.lineno - 1]
+
+
+def yaml_run_blocks(text: str) -> Iterator[tuple[int, str]]:
+    """Read YAML scalars so folded and literal shell blocks keep their distinct semantics."""
+    if not re.search(r"(?m)^\s*(?:-\s+)?run:\s", text):
+        return
+    pending = list(yaml.compose_all(text, Loader=yaml.BaseLoader))
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if isinstance(key, yaml.ScalarNode) and key.value == "run" and isinstance(value, yaml.ScalarNode):
+                    yield value.start_mark.line + 1, value.value
+                else:
+                    pending.append(value)
+        elif isinstance(node, yaml.SequenceNode):
+            pending.extend(node.value)
 
 
 def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
@@ -115,6 +160,10 @@ def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
     )
     markup = path.suffix in {".md", ".yml", ".yaml"} or recipe or path.name == "package.json"
     lines = text.splitlines()
+    if path.suffix in {".yml", ".yaml"}:
+        for number, block in yaml_run_blocks(text):
+            if any(engine_lines(Path("run.sh"), block)):
+                yield number, lines[number - 1]
     for index, line in enumerate(lines):
         if index and lines[index - 1].endswith("\\"):
             continue
@@ -135,6 +184,10 @@ def engine_lines(path: Path, text: str) -> Iterator[tuple[int, str]]:
         payload = stripped.removeprefix("#").strip()
         if recipe:
             payload = payload.lstrip("@-+")
+            assignment = re.fullmatch(r"(\w+)\s*[?:+]?=\s*(\S+)", payload)
+            if assignment and assignment[2].rsplit("/", 1)[-1] in ENGINES:
+                aliases.add(assignment[1])
+            payload = re.sub(r"\$\(([A-Za-z_]\w*)\)", r"${\1}", payload)
         if stripped.startswith("#") and not re.match(
             rf"(?:(?:sudo|env|command|exec|xargs)\s+|[^\s]*?/)*{ENGINE_TEXT}\b", payload
         ):
@@ -446,6 +499,66 @@ DOCKER_CONTEXT=default python3 ci/container-engine.py docker run --cpus=1 --memo
                 self.assertTrue(list(engine_lines(Path("probe.md"), probe)), probe)
         self.assertFalse(list(engine_lines(Path("safe.md"),
             "Use `python3 ci/container-engine.py docker run --cpus=1 --memory=1g fixture`.")))
+
+    def test_static_scan_reads_make_and_shell_discovery(self) -> None:
+        for name, probe in (
+            ("Makefile", 'DOCKER ?= docker\ncheck:\n\t@"$(DOCKER)" run fixture'),
+            ("Makefile", 'ENGINE := /usr/bin/podman\ncheck:\n\t$(ENGINE) run fixture'),
+            ("probe.sh", 'engine=$(command -v docker)\n"$engine" run fixture'),
+            ("probe.sh", 'engine="$(which docker)"\n"$engine" run fixture'),
+            ("probe.sh", 'engine=$(type -p docker); "$engine" -H socket run fixture'),
+            ("probe.sh", '"$(which docker)" run fixture'),
+        ):
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path(name), probe)), probe)
+        self.assertFalse(list(engine_lines(Path("safe.sh"), "if command -v docker; then :; fi")))
+
+    def test_static_scan_reads_python_formatted_and_keyword_commands(self) -> None:
+        for probe in (
+            'subprocess.run(f"docker run {image}", shell=True)',
+            'subprocess.run(f"docker {sub}", shell=True)',
+            'subprocess.run(shlex.split(f"docker --context {context} run fixture"))',
+            'subprocess.run(args=["docker", "--context", context, "run", image])',
+            'launch(cmd=f"docker run {image}")',
+            'cmd = f"docker run {image}"\nlaunch(cmd=cmd)',
+            'cmd = "docker --context other run fixture"\nsubprocess.check_output(cmd, shell=True)',
+        ):
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path("probe.py"), probe)), probe)
+
+    def test_static_scan_reads_yaml_run_blocks(self) -> None:
+        for probe in (
+            "steps:\n  - run: >\n      /usr/bin/docker\n      --context other\n      run fixture",
+            "steps:\n  - run: |\n      docker \\\n        run fixture",
+            'steps:\n  - run: "docker --context other run fixture"',
+        ):
+            with self.subTest(probe=probe):
+                self.assertTrue(list(engine_lines(Path("probe.yml"), probe)), probe)
+        self.assertFalse(list(engine_lines(Path("safe.yml"),
+            "steps:\n  - run: |\n      docker\n      run fixture")))
+
+    def test_mkosi_missing_system_engine_points_to_supported_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            podman = Path(directory) / "podman"
+            for podman_only in (False, True):
+                if podman_only:
+                    podman.write_text("#!/bin/sh\nexit 99\n")
+                    podman.chmod(0o700)
+                with self.subTest(podman_only=podman_only):
+                    result = subprocess.run(
+                        ["/bin/bash", "-c", '''
+source "$1/lib/common.sh"
+source "$1/lib/stages/mkosi.sh"
+PATH="$2"
+MKOSI_VERSION_PIN=26 MKOSI_PYTHON_FLOOR=3.12 MKOSI_BUILDER_IMAGE=fixture select_build_mode
+''', "fixture", str(ROOT), directory],
+                        cwd=ROOT, env={"PATH": os.defpath}, capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("Docker Engine or Moby", result.stderr)
+                    self.assertIn("unix:///var/run/docker.sock", result.stderr)
+                    self.assertIn("DOCKER_CONTEXT=default", result.stderr)
+                    self.assertIn("Docker Desktop and standalone Podman are refused", result.stderr)
 
 
 if __name__ == "__main__":

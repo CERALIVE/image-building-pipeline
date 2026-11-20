@@ -13,7 +13,7 @@
 # NORMALIZATION (byte-identical to task 15):
 #   1. DRY_RUN=1 ./build <board> resolves the containerized mkosi plan and logs
 #      one "… would build with: mkosi …" line (orchestrate.sh step 5/9).
-#   2. Assert the CONTAINER path was resolved ("DRY_RUN=1 (docker|podman)"), never
+#   2. Assert the system Docker path was resolved ("DRY_RUN=1 (docker)"), never
 #      the --native opt-in whose plan differs — this guards against a runner with no
 #      container runtime silently changing the hash.
 #   3. Strip THIS checkout's ABSOLUTE repo path to a stable "<REPO>" token if it
@@ -87,10 +87,10 @@ if [[ -z "${log}" ]]; then
 fi
 [[ -f "${log}" ]] || { echo "ERROR: build log not found: ${log}" >&2; exit 2; }
 
-# 2. Container-path assertion — the resolve MUST pick the containerized builder
-#    (docker/podman), never the --native opt-in whose plan differs.
+# 2. New plans use system Docker. Accept the old Podman marker only when
+#    interpreting a pre-existing plan log; it does not authorize an engine.
 if ! grep -Eq 'DRY_RUN=1 \((docker|podman)\)' "${log}"; then
-  echo "ERROR: build-plan resolve did not choose the container path (expected docker/podman) for '${board}'" >&2
+  echo "ERROR: build-plan resolve did not choose the system Docker path for '${board}'" >&2
   [[ -n "${cleanup_log}" ]] && rm -f "${cleanup_log}"
   exit 1
 fi

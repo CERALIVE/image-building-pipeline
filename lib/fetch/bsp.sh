@@ -419,7 +419,7 @@ collect_declared_bsp_pkgs() {
 # $DEST/debs/. Decision D3's vendor branch remains encoded in the package name.
 #
 # On Debian/Ubuntu hosts with apt-get, uses native path. On other hosts (e.g.
-# Arch Linux), delegates to Docker/Podman fallback.
+# Arch Linux), delegates to the portable fetch fallback.
 # ---------------------------------------------------------------------------
 fetch_bsp() {
   local family="$1" debs="$2"

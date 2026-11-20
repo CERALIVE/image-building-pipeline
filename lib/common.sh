@@ -178,8 +178,8 @@ runtime_pkg_list_files() {
 # would then reject it on every later containerized run — a permanently cold
 # cache wearing the costume of a fix. The daemon is the defect, so it is refused.
 #
-# podman on Linux is not a VM share and reports a different `info` schema, so the
-# check is scoped to docker.
+# Only system Docker is admitted. The legacy Podman name is bound to the same
+# guard so that frozen builder callers cannot invoke it directly.
 # ---------------------------------------------------------------------------
 container_engine() {
   python3 "$(dirname "${BASH_SOURCE[0]}")/../ci/container-engine.py" "$@"
@@ -224,10 +224,8 @@ assert_container_daemon_supported() {
 # correctness requirement here rather than a speed knob, and it is set in this
 # one function so a third build site cannot be added without it.
 #
-# podman needs no equivalent switch (buildah parses RUN --mount natively) but it
-# does need a floor: the `cache` mount TYPE landed in buildah 1.24 / podman 4.0.
-# Below that the same Dockerfile fails inside a file the operator did not write,
-# so the floor is asserted here with a message that names the real cause.
+# The Podman version branch remains for legacy callers; it does not grant
+# access to an engine. The container-engine wrapper refuses standalone Podman.
 # ---------------------------------------------------------------------------
 CONTAINER_BUILD_MIN_DOCKER_MAJOR="${CONTAINER_BUILD_MIN_DOCKER_MAJOR:-23}"
 CONTAINER_BUILD_MIN_PODMAN_MAJOR="${CONTAINER_BUILD_MIN_PODMAN_MAJOR:-4}"
