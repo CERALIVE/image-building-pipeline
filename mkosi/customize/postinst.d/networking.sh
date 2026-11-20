@@ -196,18 +196,23 @@ install_interface_naming() {
   log "installing deterministic interface naming (.link units + loose rp_filter)"
   mkdir -p /etc/systemd/network
 
-  local role var val match
+  local role var val match name_policy
   for role in eth0 eth1 wlan0; do
     var="CERALIVE_INTERFACES_${role}"
     val="${!var:-}"
     [[ -n "${val}" && "${val}" != FIXME* ]] || continue
     match="$(link_path_match "${val}")"
+    name_policy=""
+    # A virtual Wi-Fi leg inherits its parent's Path; keep its userspace name.
+    if [[ "${role}" == wlan0 ]]; then
+      name_policy=$'NamePolicy=keep\n'
+    fi
     cat >"/etc/systemd/network/10-ceralive-${role}.link" <<EOF
 [Match]
 Path=${match}
 
 [Link]
-Name=${role}
+${name_policy}Name=${role}
 EOF
   done
 
@@ -222,9 +227,21 @@ EOF
 Type=wlan
 
 [Link]
+NamePolicy=keep
 Name=wlan0
 EOF
   fi
+
+  # Scope keep to WLAN; stock USB73 must still MAC-name Ethernet/modem replays.
+  cat >/etc/systemd/network/20-ceralive-usb-wlan.link <<'EOF'
+[Match]
+Path=*-usb-*
+Property=ID_NET_NAME_MAC=*
+Type=wlan
+
+[Link]
+NamePolicy=keep mac
+EOF
 
   # rp_filter=2 (loose) validates the return path on ANY interface, not just the
   # arrival one — strict RPF silently drops modem return traffic under multi-WAN
