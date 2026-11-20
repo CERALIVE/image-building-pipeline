@@ -120,6 +120,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     sigmask = signal.pthread_sigmask
     read_text = pathlib.Path.read_text
     read_bytes = pathlib.Path.read_bytes
+    lstat = pathlib.Path.lstat
     fsync = os.fsync
     unlink = pathlib.Path.unlink
     open_image_overlay = image_lifecycle.open_image_overlay
@@ -128,6 +129,8 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     fault = mode.split(":")[1:] if mode.startswith("fault:") else None
     receipt_fault = mode.split(":")[1:] if mode.startswith("receipt-step:") else None
     pair = mode.startswith("pair:")
+    rename_fault = mode.removeprefix("pair:rename-") if mode.startswith("pair:rename-") else None
+    rename_interrupted = False
     inherited = mode == "inherited"
     startup = mode.removeprefix("startup:") if mode.startswith("startup:") else None
     rejected = mode.removeprefix("startup-reject:") if mode.startswith("startup-reject:") else None
@@ -336,7 +339,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         cancel()
 
     def publish(source, destination) -> None:
-        nonlocal during, fail_sync
+        nonlocal during, fail_sync, rename_interrupted
         destination = named(destination)
         if pair:
             with (root / "sequence").open("a") as log:
@@ -383,6 +386,31 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             during = None
             cancel()
             assert signum in signal.sigpending(), "TERM was not pending in the rename step"
+        if rename_fault and destination == directory.parent / "exit.json":
+            if not rename_interrupted:
+                if rename_fault != "before":
+                    replace_file(source, destination)
+                if rename_fault in {"wrong-inode", "wrong-contents"}:
+                    prepared = destination.read_bytes()
+                    candidate = destination.stat()
+                    if rename_fault == "wrong-inode":
+                        replacement = destination.with_name("other-receipt")
+                        replacement.write_bytes(prepared)
+                        replacement.chmod(0o600)
+                        replace_file(replacement, destination)
+                        assert not os.path.samestat(candidate, destination.stat())
+                        assert destination.read_bytes() == prepared
+                    else:
+                        conflicting = prepared.replace(b'"launcher_exit": 0', b'"launcher_exit": 1')
+                        assert conflicting != prepared
+                        destination.write_bytes(conflicting)
+                        assert os.path.samestat(candidate, destination.stat())
+                        assert destination.read_bytes() == conflicting
+                rename_interrupted = True
+                (root / "injected").touch()
+                raise OSError(errno.EIO, f"fixture terminal rename {rename_fault}")
+            if rename_fault == "repair-denied":
+                raise OSError(errno.ENOSPC, "fixture failure marker rename denied")
         replace_file(source, destination)
         if mode == "raising-handler" and destination == directory / "exit.json":
             os.kill(os.getpid(), signal.SIGUSR1)
@@ -390,6 +418,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             (root / "handler-pending").touch()
         if trace_terminal and destination == directory.parent / "exit.json":
             inject_terminal("rename:published")
+
+    def receipt_lstat(path):
+        if (rename_interrupted and rename_fault in {"unconfirmed", "repair-denied"}
+                and named(path) == directory.parent / "exit.json"):
+            raise OSError(errno.EIO, "fixture terminal inode observation denied")
+        return lstat(path)
 
     def sync(fd):
         nonlocal fail_sync, terminal_synced
@@ -638,6 +672,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(image_lifecycle, "open_image_overlay", overlay),
             patch.object(image_vm, "returned_json", read_result),
             patch.object(pathlib.Path, "read_bytes", fixture_read_bytes),
+            patch.object(pathlib.Path, "lstat", receipt_lstat),
             patch.object(ImageJob, "capture", fixture_capture),
             patch.object(image_vm, "validate_return", fixture_return),
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
@@ -967,6 +1002,29 @@ os.execvp(sys.argv[1], sys.argv[1:])
             attempt = directory.parent
             accepted = attempt / "acceptance.json"
             marker = attempt / "exit.json"
+            if mode.startswith("pair:rename-"):
+                fault = mode.removeprefix("pair:rename-")
+                assert (root / "injected").is_file(), (mode, stderr)
+                assert accepted.is_file(), (mode, stderr)
+                journal = attempt.parent / "active.json"
+                if journal.exists():
+                    assert json.loads(journal.read_text())["attempt"] == attempt.name
+                verdict = json.loads(marker.read_text()) if marker.exists() else None
+                actual = (launcher.returncode, verdict and verdict["launcher_exit"],
+                          verdict and verdict["pair_complete"], journal.exists(),
+                          image_vm.completed_acceptance(accepted) is not None)
+                expected = {
+                    "before": (1, None, None, True, False),
+                    "confirmed": (0, 0, True, False, True),
+                    "unconfirmed": (1, 1, False, True, False),
+                    "repair-denied": (1, 0, True, True, False),
+                    "wrong-inode": (1, 1, False, True, False),
+                    "wrong-contents": (1, 1, False, True, False),
+                }
+                assert actual == expected[fault], (mode, actual, stderr.decode())
+                assert f"fixture terminal rename {fault}".encode() in stderr, (mode, stderr)
+                assert not list(root.rglob(".receipt-*")), mode
+                return
             failed = mode == "pair:fail"
             point = mode.removeprefix("pair:critical:")
             cancelled = point in {"begin_finalization:first", "begin_finalization:last",
@@ -1206,6 +1264,27 @@ def test_term_after_final_outcome_is_decided_preserves_receipt_and_status() -> N
 
 def test_final_receipt_rename_decides_status_even_if_directory_sync_fails() -> None:
     cancelled_fixture("exit-sync-error")
+
+
+def test_terminal_rename_failure_before_publication_leaves_pair_uncommitted() -> None:
+    cancelled_fixture("pair:rename-before")
+
+
+def test_interrupted_terminal_rename_commits_the_prepared_receipt() -> None:
+    cancelled_fixture("pair:rename-confirmed")
+
+
+def test_interrupted_terminal_rename_refuses_identical_bytes_on_another_inode() -> None:
+    cancelled_fixture("pair:rename-wrong-inode")
+
+
+def test_interrupted_terminal_rename_refuses_conflicting_bytes_on_the_same_inode() -> None:
+    cancelled_fixture("pair:rename-wrong-contents")
+
+
+def test_unconfirmed_terminal_rename_quarantines_pair_and_preserves_failure() -> None:
+    for fault in ("unconfirmed", "repair-denied"):
+        cancelled_fixture(f"pair:rename-{fault}")
 
 
 def test_mask_restoration_after_rename_cannot_change_launcher_exit() -> None:

@@ -7,6 +7,7 @@ from contextlib import ExitStack, contextmanager
 import errno
 import fcntl
 from functools import partial
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -108,6 +109,8 @@ class Receipt:
         self.temporary = path.parent / (".receipt-" + uuid.uuid4().hex)
         self.file: TextIO | None = None
         self.entry: os.stat_result | None = None
+        self.candidate: os.stat_result | None = None
+        self.prepared: bytes | None = None
         self.directory_fd: int | None = None
         self.renamed = False
         self.errors: list[BaseException] = [] if diagnostic is None else [diagnostic]
@@ -121,8 +124,15 @@ class Receipt:
 
     def temp_write(self) -> None:
         assert self.file is not None
-        json.dump(self.row, self.file, sort_keys=True, indent=2)
-        self.file.write("\n")
+        if self.outcome is None:
+            json.dump(self.row, self.file, sort_keys=True, indent=2)
+            self.file.write("\n")
+        else:
+            with StringIO() as output:
+                json.dump(self.row, output, sort_keys=True, indent=2)
+                text = output.getvalue() + "\n"
+            self.prepared = text.encode("utf-8")
+            self.file.write(text)
 
     def temp_flush(self) -> None:
         assert self.file is not None
@@ -131,6 +141,8 @@ class Receipt:
     def file_sync(self) -> None:
         assert self.file is not None
         os.fsync(self.file.fileno())
+        if self.outcome is not None:
+            self.candidate = retry_check(os.fstat, self.file.fileno())
 
     def file_close(self) -> None:
         if self.file is not None:
@@ -145,15 +157,61 @@ class Receipt:
             self.outcome.begin_finalization()
 
     def rename(self) -> None:
-        if self.outcome is not None and self.row["stop_reason"] != "cancelled":
-            self.outcome.check()
+        outcome = self.outcome
+        if outcome is None:
+            os.replace(self.temporary, self.path)
+            self.renamed = True
+            return
+        if self.row["stop_reason"] != "cancelled":
+            outcome.check()
             if signal.sigpending().intersection(STOP_SIGNALS):
                 raise Cancelled("runner cancelled")
-        status = self.row["launcher_exit"] if self.outcome is not None else None
-        os.replace(self.temporary, self.path)
-        if self.outcome is not None:
-            self.outcome.committed_exit = status
-        self.renamed = True
+        status = self.row["launcher_exit"]
+        try:
+            os.replace(self.temporary, self.path)
+            outcome.committed_exit = status
+        except BaseException as error:
+            if outcome.committed_exit is None:
+                try:
+                    self._resolve_terminal_rename(outcome, status)
+                except BaseException as recovery_error:
+                    report_error(recovery_error)  # Keep the original interruption as the cause.
+            if isinstance(error, Cancelled):
+                # Only the checkpoint above can request a new terminal transaction.
+                raise ReceiptError(str(error)) from error
+            raise
+        finally:
+            self.renamed = outcome.committed_exit is not None
+
+    def _matches_entry(self, path: Path) -> bool:
+        assert self.candidate is not None
+        try:
+            return os.path.samestat(self.candidate, retry_check(path.lstat))
+        except (OSError, MemoryError):
+            return False
+
+    def _matches_prepared_receipt(self) -> bool:
+        assert self.candidate is not None and self.prepared is not None
+        size = len(self.prepared)
+        try:
+            with os.fdopen(checked_open(self.path, private=True, limit=size), "rb") as source:
+                return (os.path.samestat(self.candidate, os.fstat(source.fileno()))
+                        and source.read(size + 1) == self.prepared)
+        except (OSError, MemoryError, StreamError):
+            return False
+
+    def _resolve_terminal_rename(self, outcome: Cancellation, status: int) -> None:
+        if self._matches_entry(self.temporary):
+            return  # The candidate did not move.
+        if self._matches_prepared_receipt():
+            outcome.committed_exit = status
+            return
+        # Leave the latch unset so the launcher retains the journal even if repair succeeds.
+        failed = self.row | {"launcher_exit": 1, "stop_reason": "receipt publication failed"}
+        if "pair_complete" in failed:
+            failed["pair_complete"] = False
+            failed.pop("acceptance_sha256", None)
+        receipt(self.path, failed)
 
     def dir_open(self) -> None:
         if self.renamed:

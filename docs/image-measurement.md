@@ -843,7 +843,7 @@ The launcher holds the flock through all of these steps:
 Every receipt is written to a mode-0600 temporary file in its own directory,
 flushed and file-synced, atomically renamed into place, and followed by a
 directory sync. The final marker's **rename is the commit point**. A
-publication failure before that rename leaves the marker absent and exits
+confirmed failure before that rename leaves the marker absent and exits
 nonzero. Consumers treat a missing marker as failure. Cancellation before
 the final rename transaction produces a marker with `stop_reason` set to
 `cancelled` and `launcher_exit` set to 1 when storage permits. The launcher
@@ -858,9 +858,14 @@ directory-sync failure leaves the file visible at runtime, but a crash may
 lose the rename.
 
 The CLI takes its exit status from the verdict recorded after a successful
-rename. It checks `launcher_exit` in the published marker for diagnostics.
-If the launcher cannot commit a receipt, it exits nonzero and retains the
-journal. The CLI uses a direct process exit so Python
+rename. If the rename is interrupted, the original temporary inode at its old
+name proves it did not move. The new name must have both the original inode and
+the exact prepared bytes to confirm publication. Otherwise the
+launcher reports the original failure, exits nonzero and retains the active
+journal so pair admission refuses the attempt. It replaces the marker with a
+failure verdict if storage permits; otherwise even a visible success marker
+does not complete a pair. The CLI checks `launcher_exit` in the published marker
+for diagnostics and uses a direct process exit so Python
 shutdown hooks cannot replace the result. The external flock releases its
 lock when the launcher exits. The launcher has already reaped QEMU and
 closed the guest descriptors and removed the leased overlay before committing success.
