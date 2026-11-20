@@ -5,29 +5,65 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import errno
+from functools import partial
+import math
 import os
 from pathlib import Path
 import re
 import resource
-from typing import Final, TypedDict
+import time
+from typing import Any, Callable, Final, NoReturn, TypedDict, TypeVar
 
-from image_stream import retry_check
+from image_stream import list_directory, retry_check
 from vm_process import Cancellation
 
 GIB: Final = 1024**3
 MIN_NICE: Final = 9
 MAX_CPU_WEIGHT: Final = 10
 MAX_IO_WEIGHT: Final = 10
+QEMU_NICE: Final = 10
+# A host daemon may renice the launch wrapper or QEMU just after exec; admission waits this long.
+PRIORITY_SETTLE_SECONDS: Final = 5.0
+PRIORITY_SETTLE_INTERVAL: Final = 0.1
+# Proof of the wrapper handoff: the kernel keeps the first 15 bytes of qemu-system-x86_64.
+QEMU_COMM: Final = "qemu-system-x86"
+SCHEDULERS: Final = {os.SCHED_OTHER: "SCHED_OTHER", os.SCHED_BATCH: "SCHED_BATCH", os.SCHED_IDLE: "SCHED_IDLE"}
+REALTIME: Final = {os.SCHED_FIFO: "SCHED_FIFO", os.SCHED_RR: "SCHED_RR", 6: "SCHED_DEADLINE"}
 
 SYS_IOPRIO_GET: Final = 252
 IOPRIO_WHO_PROCESS: Final = 1
 IOPRIO_CLASS_SHIFT: Final = 13
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _LIBC.syscall.restype = ctypes.c_long
+_X86_64: Final = os.uname().machine == "x86_64" and ctypes.sizeof(ctypes.c_void_p) == 8
+
+_T = TypeVar("_T")
+Observe = Callable[..., Any]
+
+
+def _call(operation: Callable[..., _T], *args: object, **_gate: object) -> _T:
+    """The periodic samples' route to a system call: errors reach their retry unchanged."""
+    return operation(*args)
 
 
 class AdmissionError(Exception):
     """An image attempt cannot fit its approved resource envelope."""
+
+
+class PriorityRefusal(AdmissionError):
+    """A sampled process is outside the low-priority, non-realtime floor."""
+
+    def __init__(self, nice: int, policy: int, thread: int | None = None) -> None:
+        name = SCHEDULERS.get(policy) or REALTIME.get(policy) or f"policy {policy}"
+        self.realtime = policy not in SCHEDULERS
+        self.observed = {"nice": nice, "policy": name} | ({} if thread is None else {"thread": thread})
+        where = "" if thread is None else f", thread {thread}"
+        super().__init__(f"image profile needs non-realtime scheduling and nice >= {MIN_NICE} "
+                         f"(observed nice {nice}, {name}{where})")
+
+
+class GuestDeadline(Exception):
+    """The guest's own deadline arrived during the priority settle."""
 
 
 class IOPriorityError(AdmissionError):
@@ -83,9 +119,12 @@ def require_host_lock() -> None:
     raise AdmissionError("image profile requires outer flock --exclusive --close /tmp/host-heavy.lock")
 
 
-def cgroup_limits(pid: int | str) -> int:
-    """Require low CPU weight on the process's cgroup and effective hard caps."""
-    membership = Path(f"/proc/{pid}/cgroup").read_text().strip()
+def cgroup_limits(pid: int | str, observe: Observe = _call) -> int:
+    """Require low CPU weight on the process's cgroup and effective hard caps.
+
+    Each control file is one observation, so the priority settle gates every read.
+    """
+    membership = observe(Path(f"/proc/{pid}/cgroup").read_text).strip()
     if not membership.startswith("0::/"):
         raise AdmissionError("image profile requires unified cgroup v2")
     root = Path("/sys/fs/cgroup")
@@ -101,7 +140,7 @@ def cgroup_limits(pid: int | str) -> int:
 
     def read(path: Path, field: str) -> str:
         try:
-            return (path / field).read_text().strip()
+            return observe((path / field).read_text, expected=(FileNotFoundError,)).strip()
         except FileNotFoundError as error:
             raise AdmissionError(f"missing required cgroup control {path / field}") from error
 
@@ -146,10 +185,10 @@ def cgroup_limits(pid: int | str) -> int:
             bfq = path / "io.bfq.weight"
             try:
                 try:
-                    text = bfq.read_text()
+                    text = observe(bfq.read_text, expected=(FileNotFoundError,))
                 except FileNotFoundError:
                     try:
-                        bfq.lstat()
+                        observe(bfq.lstat, expected=(FileNotFoundError,))
                     except FileNotFoundError:
                         continue
                     raise
@@ -177,12 +216,12 @@ def cgroup_limits(pid: int | str) -> int:
     return weight
 
 
-def require_process_priority(pid: int) -> int:
+def require_process_priority(pid: int, observe: Observe = _call) -> int:
     """Admit only low-priority, non-realtime CPU scheduling."""
-    nice = os.getpriority(os.PRIO_PROCESS, pid)
-    if (nice < MIN_NICE or os.sched_getscheduler(pid) not in
-            (os.SCHED_OTHER, os.SCHED_BATCH, os.SCHED_IDLE)):
-        raise AdmissionError(f"image profile needs non-realtime scheduling and nice >= {MIN_NICE}")
+    nice = observe(os.getpriority, os.PRIO_PROCESS, pid)
+    policy = observe(os.sched_getscheduler, pid)
+    if nice < MIN_NICE or policy not in SCHEDULERS:
+        raise PriorityRefusal(nice, policy)
     return nice
 
 
@@ -192,27 +231,181 @@ class PriorityObservation(TypedDict):
     cpu_weight: int
 
 
-def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
-    """Observe the owned QEMU process, including containment after exec."""
+@dataclass(frozen=True, slots=True)
+class Settle:
+    """The first live sample's child-exit check and the clock of its bound."""
+
+    exited: Callable[[], bool]
+    guest_deadline: float | None = None
+    clock: Callable[[], float] = time.monotonic
+    pause: Callable[[float], None] = time.sleep
+
+
+def process_priority(pid: int, cancellation: Cancellation, *, settle: Settle | None = None) -> PriorityObservation:
+    """Observe the owned QEMU process, including containment after exec.
+
+    The first sample settles: it restores the launch niceness on the exec'd QEMU threads and
+    needs a conformant observation within PRIORITY_SETTLE_SECONDS. Later samples verify only.
+    """
+    if settle is not None:
+        return _SettleRun(pid, cancellation, settle).run()
     try:
         return retry_check(_process_priority, pid, cancellation)
     except IOPrioritySyscallError as error:
         raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
 
 
-def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
-    cancellation.check()
-    if cancellation.finalizing:
-        raise RuntimeError("cannot sample a child during terminal finalization")
-    nice = require_process_priority(pid)
-    cpu_weight = cgroup_limits(pid)
-    if os.uname().machine != "x86_64" or ctypes.sizeof(ctypes.c_void_p) != 8:
-        raise IOPriorityError(os.strerror(errno.ENOSYS))
+class _DeadlineReached(Exception):
+    """An observation was due at or after the governing deadline, so none was issued."""
+
+
+class _Inconclusive(Exception):
+    """An observation failed; the current pass is not clean, and the error is the refusal's cause."""
+
+    def __init__(self, message: str, error: OSError) -> None:
+        super().__init__(message)
+        self.reason = AdmissionError(message)
+        self.reason.__cause__ = error
+
+
+class _SettleRun:
+    """The first live sample. Its loop alone retries; no observation retries or sleeps on its own.
+
+    A child exit always wins. A realtime policy refuses before any write. Only a clean confirming
+    pass is accepted; any other end takes the result of the earlier deadline.
+    """
+
+    def __init__(self, pid: int, cancellation: Cancellation, settle: Settle) -> None:
+        self.pid, self.cancellation, self.settle = pid, cancellation, settle
+        self.settle_end = settle.clock() + PRIORITY_SETTLE_SECONDS
+        self.guest_end = math.inf if settle.guest_deadline is None else settle.guest_deadline
+        self.guest_first = self.guest_end <= self.settle_end
+        self.reason: AdmissionError = _unconfirmed_error(pid)
+        self.previous: frozenset[int] | None = None
+
+    def remaining(self) -> float:
+        return min(self.settle_end, self.guest_end) - self.settle.clock()
+
+    def observe(self, operation: Callable[..., _T], *args: object,
+                failure: Callable[[OSError], str] | None = None,
+                expected: tuple[type[OSError], ...] = ()) -> _T:
+        """The settle's only route to a system call; none is issued at or after the governing deadline.
+
+        An error in expected is this call's value and returns to its caller. Any other OSError
+        reaches the loop, which keeps it as the cause of a refusal.
+        """
+        if self.remaining() <= 0:
+            raise _DeadlineReached
+        try:
+            return operation(*args)
+        except expected:
+            raise
+        except OSError as error:
+            raise _Inconclusive(failure(error) if failure else _unobservable(self.pid, error), error) from error
+
+    def run(self) -> PriorityObservation:
+        while True:
+            self.cancellation.check()
+            if self.settle.exited():
+                raise _settle_exit(self.pid)
+            if self.remaining() <= 0:
+                self.expire()
+            observation = None
+            try:
+                observation = self.attempt()
+            except _DeadlineReached:
+                continue  # The loop head reports a child exit first, then the deadline.
+            except _Inconclusive as failed:
+                self.reason, self.previous = failed.reason, None
+            except OSError as error:
+                # A composite sample's own verdict, such as an incomplete BFQ hierarchy.
+                self.reason, self.previous = _Inconclusive(_unobservable(self.pid, error), error).reason, None
+            except AdmissionError as error:
+                # Only a below-floor reading can still change; any other refusal stands before a deadline.
+                retryable = isinstance(error, PriorityRefusal) and not error.realtime
+                if not (retryable or self.settle.exited() or self.remaining() <= 0):
+                    raise
+                self.reason, self.previous = error, None
+            if self.settle.exited():
+                raise _settle_exit(self.pid)
+            left = self.remaining()
+            if left <= 0:
+                self.expire()
+            if observation is not None:
+                return observation
+            self.settle.pause(min(PRIORITY_SETTLE_INTERVAL, left))
+
+    def attempt(self) -> PriorityObservation | None:
+        """One full pass; its observation counts only when the pass is clean and its set unchanged."""
+        pid, observe = self.pid, self.observe
+        policy = observe(os.sched_getscheduler, pid)
+        if policy not in SCHEDULERS:
+            raise PriorityRefusal(observe(os.getpriority, os.PRIO_PROCESS, pid), policy)
+        comm = observe(Path(f"/proc/{pid}/comm").read_text, failure=lambda _error: _handoff_message(pid))
+        if comm.strip() != QEMU_COMM:  # A name that was read, empty or the wrapper's, keeps waiting.
+            self.reason, self.previous = AdmissionError(_handoff_message(pid)), None
+            return None
+        listing = frozenset(int(name) for name in observe(list_directory, Path(f"/proc/{pid}/task")))
+        clean = True
+        for tid in sorted(listing):
+            nice = observe(os.getpriority, os.PRIO_PROCESS, tid)
+            if nice >= MIN_NICE:
+                continue
+            clean, self.reason = False, PriorityRefusal(nice, policy, None if tid == pid else tid)
+            # Raising needs no privilege; a host renice between the read and this write can fail it.
+            observe(os.setpriority, os.PRIO_PROCESS, tid, QEMU_NICE, failure=partial(_raise_failure, pid, tid))
+        observation = _process_priority(pid, self.cancellation, observe)
+        confirmed, self.previous = clean and listing == self.previous, listing
+        if clean:
+            self.reason = _unconfirmed_error(pid)
+        return observation if confirmed else None
+
+    def expire(self) -> NoReturn:
+        """The earlier deadline governs: the guest's ends the attempt as a guest timeout."""
+        if self.guest_first:
+            raise GuestDeadline("image guest deadline reached during the priority settle")
+        raise self.reason
+
+
+def _handoff_message(pid: int) -> str:
+    return f"QEMU PID {pid} did not hand over from its launch wrapper within {PRIORITY_SETTLE_SECONDS} s"
+
+
+def _unobservable(pid: int, error: OSError) -> str:
+    return f"QEMU PID {pid} priority could not be observed within {PRIORITY_SETTLE_SECONDS} s: {error}"
+
+
+def _unconfirmed_error(pid: int) -> AdmissionError:
+    return AdmissionError(f"QEMU PID {pid} priority was not confirmed by a clean pass within {PRIORITY_SETTLE_SECONDS} s")
+
+
+def _settle_exit(pid: int) -> ProcessLookupError:
+    return ProcessLookupError(errno.ESRCH, f"QEMU PID {pid} exited during the priority settle")
+
+
+def _raise_failure(pid: int, tid: int, error: OSError) -> str:
+    thread = "" if tid == pid else f" thread {tid}"
+    return f"cannot raise QEMU PID {pid}{thread} to nice {QEMU_NICE}: {error.strerror}"
+
+
+def _ioprio_get(pid: int) -> int:
     value = _LIBC.syscall(ctypes.c_long(SYS_IOPRIO_GET), IOPRIO_WHO_PROCESS, pid)
     if value == -1:
         error = ctypes.get_errno()
         raise IOPrioritySyscallError(error, os.strerror(error))
-    policy, level = divmod(value, 1 << IOPRIO_CLASS_SHIFT)
+    return value
+
+
+def _process_priority(pid: int, cancellation: Cancellation, observe: Observe = _call) -> PriorityObservation:
+    """One composite sample; each of its system calls is a separate observation."""
+    cancellation.check()
+    if cancellation.finalizing:
+        raise RuntimeError("cannot sample a child during terminal finalization")
+    nice = require_process_priority(pid, observe)
+    cpu_weight = cgroup_limits(pid, observe)
+    if not _X86_64:
+        raise IOPriorityError(os.strerror(errno.ENOSYS))
+    policy, level = divmod(observe(_ioprio_get, pid), 1 << IOPRIO_CLASS_SHIFT)
     if policy == 1:
         raise AdmissionError("image profile forbids realtime I/O priority")
     if policy not in (0, 2, 3):
