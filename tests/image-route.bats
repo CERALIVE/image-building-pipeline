@@ -45,7 +45,13 @@
 }
 
 @test "image profile lifecycle uses Python stand-ins, never QEMU" {
-  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py"
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --lifecycle
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "image profile startup normalizes inherited process state before spawning" {
+  run python3 "${BATS_TEST_DIRNAME}/image_profile_test.py" --startup
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
 }

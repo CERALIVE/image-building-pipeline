@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 
 from image_capsule import object_id, original_url
-from image_stream import StreamError, unique_object
+from image_stream import StreamError, checked_open, retry_check, unique_object
+
+
+FIRSTPARTY_ORIGIN = "https://apt.ceralive.tv"
+
+
+def require_client_origin(origin: str, repository: str = "firstparty") -> None:
+    """Download approval alone never authorizes presentation of an identity."""
+    if repository == "firstparty" and origin == FIRSTPARTY_ORIGIN:
+        return
+    # Never echo userinfo, paths, or malformed input in a rejection.
+    try:
+        host = urlsplit(origin).hostname or ""
+    except ValueError:
+        host = ""
+    label = f"https://{host}" if re.fullmatch(r"[a-z0-9.-]{1,253}", host) else "<invalid origin>"
+    raise StreamError(f"client identity requires one exact independently approved origin: {FIRSTPARTY_ORIGIN}; "
+                      f"{label} rejected by the credential and redirect policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +42,7 @@ class ArchivePolicy:
     index_path: str
     max_age_seconds: int
     codename: str = ""
+    max_redirects: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,22 +65,25 @@ class PublicPolicy:
     os_version: str = ""
 
 
-def load_policy(path: Path) -> PublicPolicy:
-    if not path.is_file() or path.stat().st_size > 1024 * 1024:
-        raise StreamError("missing or oversized public trust policy")
-    row = json.loads(path.read_text(), object_pairs_hook=unique_object)
-    required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
-    optional = {"addon_public_object", "paseto_public_object", "os_version"}
-    if (not required.issubset(row) or set(row) - required - optional
-            or type(row["schema"]) is not int or row["schema"] != 1):
-        raise StreamError("invalid public trust policy fields")
+def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[str, ArchivePolicy]:
+    """Parse independently approved archives without requiring image ingredients."""
     repositories = {}
-    for name, repo in row["repositories"].items():
+    for origin in client_origins:
+        require_client_origin(origin)
+    for name, repo in rows.items():
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", name):
             raise StreamError("invalid archive policy name")
-        required_fields = set(ArchivePolicy.__dataclass_fields__) - {"codename"}
-        if not required_fields.issubset(repo) or set(repo) - required_fields - {"codename"}:
+        optional_fields = {"codename", "max_redirects"}
+        required_fields = set(ArchivePolicy.__dataclass_fields__) - optional_fields
+        if not required_fields.issubset(repo) or set(repo) - required_fields - optional_fields:
             raise StreamError("invalid archive policy fields")
+        origin = original_url(repo["origin"])
+        if origin in client_origins:
+            require_client_origin(origin, name)
+        maximum = repo.get("max_redirects", 0)
+        if (type(maximum) is not int or not 0 <= maximum <= 3
+                or (maximum and (name != "bsp" or origin in client_origins))):
+            raise StreamError("invalid archive redirect policy: only uncredentialed bsp permits 1-3 hops")
         fingerprints = repo["fingerprints"]
         if (type(fingerprints) is not list or not fingerprints or len(fingerprints) != len(set(fingerprints))
                 or any(not re.fullmatch(r"[A-F0-9]{40}", item) for item in fingerprints)
@@ -73,13 +97,37 @@ def load_policy(path: Path) -> PublicPolicy:
                 or any(part in ("", ".", "..") for part in repo["index_path"].split("/"))):
             raise StreamError("invalid archive validity or identity policy")
         repositories[name] = ArchivePolicy(**(repo | {
-            "origin": original_url(repo["origin"]), "keyring": object_id(repo["keyring"]),
+            "origin": origin, "keyring": object_id(repo["keyring"]),
             "fingerprints": tuple(fingerprints)}))
-    if (not {"firstparty", "bsp", "debian-source"}.issubset(repositories)
-            or repositories["firstparty"].origin != "https://apt.ceralive.tv"
-            or repositories["debian-source"].origin != "https://deb.debian.org/debian"
-            or repositories["firstparty"].suite not in ("stable", "beta")
-            or repositories["firstparty"].codename):
+    if set(client_origins) - {repo.origin for repo in repositories.values()}:
+        raise StreamError(f"credential origin {FIRSTPARTY_ORIGIN} missing from approved archive policy")
+    if (("firstparty" in repositories
+         and (repositories["firstparty"].origin != FIRSTPARTY_ORIGIN
+              or repositories["firstparty"].suite not in ("stable", "beta")
+              or repositories["firstparty"].codename))
+            or ("debian-source" in repositories
+                and repositories["debian-source"].origin != "https://deb.debian.org/debian")):
+        raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
+    return repositories
+
+
+def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolicy:
+    limit = 1024 * 1024
+    def read_policy() -> bytes:
+        with os.fdopen(checked_open(path, limit=limit), "rb") as source:
+            return source.read(limit + 1)
+
+    data = retry_check(read_policy)
+    if len(data) > limit:
+        raise StreamError("missing or oversized public trust policy")
+    row = json.loads(data, object_pairs_hook=unique_object)
+    required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
+    optional = {"addon_public_object", "paseto_public_object", "os_version"}
+    if (not required.issubset(row) or set(row) - required - optional
+            or type(row["schema"]) is not int or row["schema"] != 1):
+        raise StreamError("invalid public trust policy fields")
+    repositories = archive_policies(row["repositories"], client_origins)
+    if not {"firstparty", "bsp", "debian-source"}.issubset(repositories):
         raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
     metadata = row["kernel_metadata"]
     if set(metadata) != {"kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"}:

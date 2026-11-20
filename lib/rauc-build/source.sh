@@ -59,30 +59,63 @@ rauc_fetch_upstream_tarball() {
 # parses for a binary Packages index, so this is its own small reader rather
 # than a reuse of that function).
 #
-# Echoes "<filename>\t<sha256>" on a unique hit; returns 1 otherwise (ambiguous
-# or absent — both fail closed, never a best-effort guess).
+# Default output is "<filename>\t<sha256>". Optional identity output requires
+# one exact stanza and matching Files/Checksums-Sha256 file sets and sizes,
+# emitting "<filename>\t<sha256>\t<size>\t<directory>" for every source file.
 # ---------------------------------------------------------------------------
 rauc_debian_source_lookup() {
-  local index="$1" package="$2" version="$3" want_suffix
+  local index="$1" package="$2" version="$3" format="${4:-legacy}" want_suffix
   want_suffix="_${version}.debian.tar.xz"
-  awk -v want_pkg="${package}" -v want_ver="${version}" -v want_suffix="${want_suffix}" '
+  awk -v want_pkg="${package}" -v want_ver="${version}" -v want_suffix="${want_suffix}" \
+      -v format="${format}" '
     BEGIN { RS=""; FS="\n" }
     {
-      pkg=""; ver=""; in_sha=0; hit=""
+      pkg=""; ver=""; directory=""; in_sha=0; in_files=0; hit=""; bad=0
+      delete fields; delete sizes; delete hashes; delete file_sizes
       for (i = 1; i <= NF; i++) {
         line = $i
+        if (format=="identity" && line ~ /^[A-Za-z0-9-]+:/) {
+          key=tolower(substr(line, 1, index(line, ":")-1))
+          if (++fields[key]>1) bad=1
+        }
         if (line ~ /^Package: /) { pkg = substr(line, 10); in_sha = 0; continue }
         if (line ~ /^Version: /) { ver = substr(line, 10); in_sha = 0; continue }
-        if (line ~ /^Checksums-Sha256:/) { in_sha = 1; continue }
-        if (line ~ /^[A-Za-z-]+:/) { in_sha = 0; continue }
+        if (line ~ /^Directory: /) { directory=substr(line, 12); in_sha=0; in_files=0; continue }
+        if (line ~ /^Checksums-Sha256:/) { in_sha=1; in_files=0; continue }
+        if (line ~ /^Files:/) { in_files=1; in_sha=0; continue }
+        if (line ~ /^[A-Za-z0-9-]+:/) { in_sha=0; in_files=0; continue }
+        if (format=="identity" && (in_sha || in_files) && line ~ /^[ \t]/) {
+          count=split(line, f, " ")
+          if (count!=3 || f[2] !~ /^[1-9][0-9]*$/) bad=1
+          if (in_sha) {
+            if (f[1] !~ /^[0-9a-f]{64}$/ || f[3] in hashes) bad=1
+            hashes[f[3]]=f[1]; sizes[f[3]]=f[2]
+          } else {
+            if (f[1] !~ /^[0-9a-f]{32}$/ || f[3] in file_sizes) bad=1
+            file_sizes[f[3]]=f[2]
+          }
+        }
         if (in_sha && line ~ /^ /) {
           split(line, f, " ")
           # f[1]=sha256 f[2]=size f[3]=filename
           if (f[3] ~ want_suffix"$") hit = f[3] "\t" f[1]
         }
       }
-      if (pkg == want_pkg && ver == want_ver && hit != "") print hit
+      if (pkg == want_pkg && ver == want_ver) {
+        if (format=="identity") {
+          matches++
+          if (bad || fields["package"]!=1 || fields["version"]!=1 ||
+              fields["directory"]!=1 || fields["files"]!=1 ||
+              fields["checksums-sha256"]!=1 || directory=="" || length(hashes)==0) invalid=1
+          for (filename in hashes) {
+            if (!(filename in file_sizes) || sizes[filename]!=file_sizes[filename]) invalid=1
+            printf "%s\t%s\t%s\t%s\n", filename, hashes[filename], sizes[filename], directory
+          }
+          for (filename in file_sizes) if (!(filename in hashes)) invalid=1
+        } else if (hit != "") print hit
+      }
     }
+    END { if (format=="identity" && (matches!=1 || invalid)) exit 1 }
   ' "${index}"
 }
 

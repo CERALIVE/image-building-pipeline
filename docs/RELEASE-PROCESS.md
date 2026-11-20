@@ -489,6 +489,29 @@ The candidate job persists only reusable build state; it never caches a
 candidate image or a trust input. BuildKit loads the canonical
 `ci/Dockerfile` builder image and exports its layers through the GitHub
 Actions cache with a stable repository/OS/architecture/board/mkosi-tool scope.
+The Dockerfile pins the full upstream mkosi commit and verifies the checkout.
+It downloads only wheels pinned by version and SHA-256 in
+[`ci/mkosi-build-requirements.txt`](../ci/mkosi-build-requirements.txt).
+With the package index disabled, pip checks that lock again when installing the
+build dependencies into a disposable venv. That venv builds the mkosi wheel with
+`--no-build-isolation` so pip uses the dependencies already installed there. A
+second `pip install --require-hashes` checks the generated wheel against its
+locally recorded SHA-256 before installing it in the runtime venv. The upstream
+commit pins the source, and the generated hash verifies the wheel at handoff.
+
+Pipx splits `--pip-args` into argument tokens and forwards them to the outer
+`pip install`. Trixie's pip starts its own subprocess to install isolated build
+dependencies and does not forward `--require-hashes` to that subprocess. The
+builder uses plain venvs so each install receives its own requirements file and
+hash flag explicitly. See [pipx 1.7.1](https://github.com/pypa/pipx/tree/1.7.1/src/pipx)
+and [pip 25.1.1](https://github.com/pypa/pip/blob/25.1.1/src/pip/_internal/build_env.py).
+
+When updating mkosi, update the commit pin with `MKOSI_VERSION` and
+`.mkosi-version`, then re-resolve the build and runtime dependencies for the
+builder's Python version. Record each selected wheel's SHA-256 from its versioned
+PyPI JSON URL and the UTC retrieval time in the lock. Mkosi 26 has no default
+runtime dependencies. If a future pin adds any, include their pinned versions and
+hashes in the final install requirements too.
 The source hash is carried in the builder tag and label, while BuildKit's
 content-addressed Dockerfile/context digests select the reusable layers. The
 export uses `mode=min` so the cache contains only layers needed by the loaded

@@ -12,70 +12,22 @@ import json
 import os
 from pathlib import Path
 import re
-import resource
-import runpy
 import subprocess
 import sys
 import tarfile
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "ci/kernel-runner"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
 from image_policy import load_policy
-from image_stream import Identity, StreamError, unique_object
-
-SEALED = runpy.run_path(str(ROOT / "lib/sealed-inputs.py"))
-INDEX_LIMIT = SEALED["INDEX_LIMIT"]
-
-
-def child_limit(length: int) -> None:
-    """Bound downloaded/decompressed files independently of HTTP Content-Length."""
-    resource.setrlimit(resource.RLIMIT_FSIZE, (length, length))
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-
-
-def read_json(path: Path) -> dict:
-    if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024 * 1024:
-        raise StreamError("missing, linked or oversized reviewed inventory")
-    return json.loads(path.read_text(), object_pairs_hook=unique_object)
-
-
-def fetch(url: str, target: Path, length: int, client: tuple[str, str] | None,
-          ca_file: str | None, seconds: int, env: dict[str, str]) -> None:
-    """One exact GET, without curl configuration, proxies, redirects or retries."""
-    args = ["curl", "--disable", "--silent", "--fail", "--globoff", "--noproxy", "*",
-            "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0",
-            "--connect-timeout", str(min(10, seconds)), "--max-time", str(seconds),
-            "--max-filesize", str(length), "--output", str(target),
-            "--write-out", "%{http_code}"]
-    if client:
-        args += ["--cert", client[0], "--key", client[1]]
-    if ca_file:
-        args += ["--cacert", ca_file]
-    result = subprocess.run(args + ["--url", url], env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            timeout=seconds + 5, start_new_session=True,
-                            preexec_fn=lambda: child_limit(length))
-    if result.returncode or result.stdout != b"200":
-        # Name only reviewed public identity; curl stderr can carry credential paths.
-        raise StreamError(f"exact HTTPS GET failed for object {target.name} at {url} "
-                          f"(HTTP {result.stdout.decode(errors='replace')}, curl exit {result.returncode})")
-
-
-def shell(script: str, arguments: list[str], env: dict[str, str]) -> str:
-    """Run only the repository's data validators, never package code."""
-    result = subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(ROOT),
-                             *arguments], env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                            timeout=120, preexec_fn=lambda: child_limit(INDEX_LIMIT))
-    if result.returncode:
-        raise StreamError("signed package lookup or control identity rejected")
-    return result.stdout.strip()
+from image_stream import Identity, StreamError
+from image_transport import (INDEX_LIMIT, SEALED, TransportParser, copy_local, fetch, metadata_base,
+                             read_json, shell, transport_clients)
 
 
 def prepare(args: argparse.Namespace) -> str:
-    policy = load_policy(args.trust_policy)
+    clients = transport_clients(args)
+    policy = load_policy(args.trust_policy, clients.keys())
     reviewed = read_json(args.inventory)
     if set(reviewed) != {"schema", "source_commit", "epoch", "board", "source_bundle",
                          "device_root", "objects", "repositories", "packages"}:
@@ -138,12 +90,12 @@ def prepare(args: argparse.Namespace) -> str:
         del expected["max_age_seconds"]
         if not repo.codename:
             del expected["codename"]
+        if not repo.max_redirects and "max_redirects" not in record:
+            del expected["max_redirects"]
         if (set(record) != set(expected) | {"inrelease", "index"}
                 or any(record[key] != value for key, value in expected.items())):
             raise StreamError("repository differs from independently approved policy")
-        base = repo.origin + "/dists/" + (repo.codename or repo.suite)
-        if name == "firstparty":
-            base += "/binary-" + repo.arch
+        base = metadata_base(name, repo)
         bases[name] = base if name == "firstparty" else repo.origin
         for key, suffixes in (("inrelease", ("InRelease", "Release")),
                               ("index", (repo.index_path,))):
@@ -154,7 +106,9 @@ def prepare(args: argparse.Namespace) -> str:
                     or objects[digest]["urls"][0] not in
                     {original_url(base + "/" + suffix) for suffix in suffixes}):
                 raise StreamError("metadata URL is outside the exact approved repository objects")
-            allowed[digest] = repo.origin
+            previous = allowed.setdefault(digest, name)
+            if (previous == "bsp") != (name == "bsp"):
+                raise StreamError(f"conflicting BSP transport requirements for metadata object {digest}")
         if objects[record["inrelease"]]["length"] > 16 * 1024**2:
             raise StreamError("signed Release metadata exceeds the 16 MiB bound")
 
@@ -180,15 +134,6 @@ def prepare(args: argparse.Namespace) -> str:
            for digest, item in objects.items()):
         raise StreamError("undeclared network metadata")
 
-    clients = {}
-    for origin, certificate, key in args.client_identity:
-        if origin not in {repo.origin for repo in policy.repositories.values()} or origin in clients:
-            raise StreamError("client identity requires one exact independently approved origin")
-        if any(not Path(path).is_absolute() for path in (certificate, key)):
-            raise StreamError("client certificate and key must be explicit absolute paths")
-        clients[origin] = (certificate, key)
-    if not 1 <= args.object_timeout <= 600:
-        raise StreamError("object timeout must be between 1 and 600 seconds")
     destination = args.output
     if destination.exists() or destination.is_symlink():
         raise StreamError("capsule output already exists")
@@ -203,6 +148,7 @@ def prepare(args: argparse.Namespace) -> str:
         data.mkdir(mode=0o700)
         env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": temporary,
                "TMPDIR": temporary, "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}
+        transfers = []
         for digest, item in objects.items():
             if item["kind"] == "deb":
                 continue
@@ -211,21 +157,14 @@ def prepare(args: argparse.Namespace) -> str:
                 source = Path(item["path"])
                 if not source.is_absolute():
                     source = args.inventory.parent / source
-                if source.is_symlink() or not source.is_file() or source.stat().st_size != item["length"]:
-                    raise StreamError("local input is not a regular file of the approved size")
-                with source.open("rb") as stream, target.open("xb") as output:
-                    remaining = item["length"]
-                    while remaining:
-                        chunk = stream.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            break
-                        output.write(chunk)
-                        remaining -= len(chunk)
-                    if remaining or stream.read(1):
-                        raise StreamError("local input changed from its approved size")
+                copy_local(source, target, item["length"])
             else:
-                fetch(item["urls"][0], target, item["length"], clients.get(allowed[digest]),
-                      args.ca_file, args.object_timeout, env)
+                name = allowed[digest]
+                repo = policy.repositories[name]
+                transfer = fetch(item["urls"][0], target, item["length"], clients.get(repo.origin),
+                                 args.ca_file, args.object_timeout, env, name, repo.max_redirects)
+                if transfer:
+                    transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
             if target.stat().st_size != item["length"] or digest_file(target) != digest:
                 raise StreamError("prefetched object size or digest mismatch")
@@ -256,18 +195,21 @@ def prepare(args: argparse.Namespace) -> str:
         package_inventory = []
         for digest, package in packages.items():
             repo = policy.repositories[package["repository"]]
-            record = shell('source "$1/lib/fetch-debs-auth.sh"; auth_lookup_package "$2" "$3" "$4" "$5"',
+            record = shell('source "$1/lib/fetch-debs-auth.sh"; auth_lookup_package "$2" "$3" "$4" "$5" identity',
                            [str(indexes[package["repository"]]), package["name"], package["version"], repo.arch], env)
-            filename, signed_digest, version = record.split("\t")
+            filename, signed_digest, version, arch, size = record.split("\t")
             if filename.startswith("/") or ".." in filename or "://" in filename:
                 raise StreamError("signed package filename is unsafe")
             url = original_url(bases[package["repository"]] + "/" + filename.removeprefix("./"))
             item = objects[digest]
-            if signed_digest != digest or version != package["version"] or item["urls"] != [url]:
+            if (signed_digest != digest or version != package["version"] or arch != package["arch"]
+                    or int(size) != item["length"] or item["urls"] != [url]):
                 raise StreamError("reviewed package differs from original signed index")
             target = data / digest
-            fetch(url, target, item["length"], clients.get(repo.origin),
-                  args.ca_file, args.object_timeout, env)
+            transfer = fetch(url, target, item["length"], clients.get(repo.origin),
+                             args.ca_file, args.object_timeout, env, package["repository"], repo.max_redirects)
+            if transfer:
+                transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
             if target.stat().st_size != item["length"] or digest_file(target) != digest:
                 raise StreamError("package size or digest mismatch")
@@ -279,7 +221,8 @@ def prepare(args: argparse.Namespace) -> str:
         receipt = json.dumps({"schema": 1, "delivery": "offline-capsule",
                               "fetched_at": inventory["fetched_at"],
                               "packages": package_inventory,
-                              "metadata_validity": read_json(data / "metadata-validity.json")},
+                              "metadata_validity": read_json(data / "metadata-validity.json")} |
+                             ({"transfers": transfers} if transfers else {}),
                              sort_keys=True, separators=(",", ":")).encode()
         receipt_digest = hashlib.sha256(receipt).hexdigest()
         (data / receipt_digest).write_bytes(receipt)
@@ -312,12 +255,10 @@ def prepare(args: argparse.Namespace) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = TransportParser(description=__doc__)
     parser.add_argument("--inventory", required=True, type=Path)
     parser.add_argument("--trust-policy", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--client-identity", nargs=3, action="append", default=[],
-                        metavar=("ORIGIN", "CERTIFICATE_PATH", "KEY_PATH"))
     parser.add_argument("--ca-file", help="explicit public HTTPS CA bundle; defaults to system trust")
     parser.add_argument("--object-timeout", type=int, default=120)
     args = parser.parse_args()

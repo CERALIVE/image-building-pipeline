@@ -7,10 +7,20 @@ finish() {
   printf '\nCERALIVE_JOB_DONE=%s\n' "${code}" >/dev/ttyS0
   systemctl poweroff
 }
+finish_image() {
+  # The image host validates artifacts and QEMU status. It does not need this marker.
+  timeout --foreground --signal=KILL 0.25s bash -c \
+    'printf "\nCERALIVE_JOB_DONE=%s\n" "$1" >/dev/ttyS0' _ "${code}" || true
+  systemctl poweroff || true
+}
 trap finish EXIT
 modprobe qemu_fw_cfg
 if [[ -e "${fw}/image/raw" ]]; then
-  python3 /usr/local/lib/ceralive-kernel-runner/image_guest.py && code=0
+  trap finish_image EXIT
+  # The helper returns its records over the artifact port, separate from stdio.
+  exec >/dev/null 2>&1
+  code=0
+  python3 /usr/local/lib/ceralive-kernel-runner/image_guest.py || code=$?
   exit "${code}"
 fi
 install -d -m 0700 -o ubuntu -g ubuntu /run/ceralive-runner
