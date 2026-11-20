@@ -781,7 +781,7 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
     report = failure | {"failure_code": "builder_config_digest_mismatch",
                         "expected_config_digest": "sha256:" + "a" * 64,
                         "observed_config_digest": "sha256:" + "b" * 64}
-    depth = max(100_000, sys.getrecursionlimit() + 1_000)
+    depth = 100_000
     nested = b"[" * depth + json.dumps(marker).encode() + b"]" * depth
     loads = json.loads
     for case, code, data, frame_identity, suffix, expected in (
@@ -793,6 +793,8 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
         ("unknown code", 1, json.dumps(report | {"failure_code": marker}).encode(), IDENTITY, b"", None),
         ("invalid digest", 0, json.dumps(report | {"observed_config_digest": marker}).encode(), IDENTITY, b"", None),
         ("invalid JSON", 1, marker.encode(), IDENTITY, b"", None),
+        ("recursion error on nonzero exit", 1, nested, IDENTITY, b"", None),
+        ("recursion error on zero exit", 0, nested, IDENTITY, b"", None),
         ("nested JSON on nonzero exit", 1, nested, IDENTITY, b"", None),
         ("nested JSON on zero exit", 0, nested, IDENTITY, b"", None),
         ("cancelled parse", 1, json.dumps(report).encode(), IDENTITY, b"", None),
@@ -836,8 +838,11 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
                 raise AssertionError("failed guest reached the verifier")
 
             def parse(value, **options):
-                if case == "cancelled parse" and value == data:
-                    raise Cancelled("runner cancelled")
+                if value == data:
+                    if case.startswith("recursion error "):
+                        raise RecursionError(marker)
+                    if case == "cancelled parse":
+                        raise Cancelled("runner cancelled")
                 return loads(value, **options)
 
             mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
@@ -873,8 +878,11 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
                     assert messages == ["runner cancelled"] and outcome["stop_reason"] == "cancelled", (case, messages)
                 elif code:
                     assert messages == ["image guest exited (1)"], (case, messages)
-                elif case == "nested JSON on zero exit":
+                elif case == "recursion error on zero exit":
                     assert messages == ["returned artifact set is incomplete"], (case, messages)
+                elif case == "nested JSON on zero exit":
+                    assert messages in (["returned artifact set is incomplete"],
+                                        ["invalid guest failure diagnostics"]), (case, messages)
 
 
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:

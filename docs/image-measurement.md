@@ -319,10 +319,13 @@ failure frame against the same identity, digest, and size checks as a successful
 frame, regardless of QEMU's exit status. It writes only the validated failure
 record to `artifacts/failure.json`, including an allowlisted `failure_code` and
 the expected and observed config digests (observed may be `null`). It does not
-report raw engine output or accept the failed measurement. An unreadable JSON
-receipt keeps `image guest exited (N)` on nonzero QEMU exit and reports
-`returned artifact set is incomplete` on zero exit. Neither path publishes the
-receipt or reports parser details. Cancellation and timeouts still propagate.
+report raw engine output or accept the failed measurement. A JSON parse failure,
+including a parser depth limit, reports `returned artifact set is incomplete`
+on zero QEMU exit. If the parser accepts a deeply nested array, the host
+rejects the non-object as `invalid guest failure diagnostics` on zero exit.
+On nonzero exit, both cases keep `image guest exited (N)`. Neither case
+publishes the receipt or echoes guest text or parser details. Cancellation and
+timeouts still propagate.
 This verifier is baked into the guest, so applying a change to it requires a
 rebuilt base and a new owner-approved base digest.
 
