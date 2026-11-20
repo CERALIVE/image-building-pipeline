@@ -893,9 +893,8 @@ non-Image payload (fatal), and a re-run (idempotent).
 
 Kernels and images are built locally on the owner's workstation. These gates
 consume artifacts; they do not authorize publication or add a kernel workflow.
-The production source pin is `7.2.0-ceralive8`, adding nftables reject for
-NetworkManager shared mode and the Rock 5B+ sink-first Type-C default through
-the kernel-patches PR #28 pin; publication remains owner-gated.
+See the [kernel release runbook](kernel-release.md) for the production source
+pin and signed APT availability requirements. Publication remains owner-gated.
 
 Release admission, `--fingerprint-from` and `--reuse-deb` live in the separate
 `lib/kernel/released.sh` entrypoint, selected by the orchestration layer.

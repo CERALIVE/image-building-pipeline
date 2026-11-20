@@ -17,8 +17,28 @@ discrete GPU, Intel integrated GPU, datacenter NIC and Intel IPU drivers.
 Source and patch pins retain nftables reject and the Rock 5B+ sink-first Type-C
 default through kernel-patches PR #28. Revision 9 is preparation only: no tag,
 candidate, release, bench drill or APT publication is implied.
-Its preparation PR must wait for both-board image measurements with the
-`7.2.0-ceralive8` pin before merge, and merge and release remain owner actions.
+The owner can merge the preparation PR once CI passes and independent review
+approves it. The Rock 5B+ and Orange Pi 5 Plus image measurements are post-merge,
+pre-release evidence and are not a prerequisite for merging the kernel PR.
+
+When ready, run the deferred revision-8 baseline measurements (todo 19) using
+the approved image-building-pipeline source commit
+`9d74a7dee0c92b01ec2af85614a04889874e6783` as the capsule's `source_commit`.
+That tree still resolves `7.2.0-ceralive8`, which the offline measurement route
+requires along with the shipping variant and both populated RK3588 slots.
+Follow the [offline measurement runbook](image-measurement.md), including
+its authorization and admission steps. Retain each board's `measurement.json`
+and verifier `acceptance.json` in the private output store. Record the verified
+sizes in `ci/size-baseline.rock-5b-plus.json`,
+`ci/size-baseline.orange-pi-5-plus.json`, and `manifests/size-budget.json`
+without raising the ceilings.
+
+New production RK3588 image builds from the merged tree require
+`linux-image-7.2.0-ceralive-rk3588=7.2.0-ceralive9` in the signed CeraLive APT
+index. If that exact version is unavailable, the build fails with
+`kernel_not_on_apt` without falling back to revision 8 or compiling from source.
+Kernel release and publication remain owner actions.
+
 Revision 8 carries revision 7's kernel, which is revision 6's kernel, which is revision 5's kernel,
 re-tagged each time (revision 5 was never published) on a master that includes the unattended-rollback `boot.scr` fix (PR #229).
 Revision 6 has an identity Release and was drilled on both boards (2026-11-05), but is not on APT: that drill showed the old
