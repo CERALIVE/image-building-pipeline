@@ -665,6 +665,114 @@ def test_real_guest_probe_emits_only_the_frame_for_its_outcome() -> None:
             assert exact_json(json.loads((target / name).read_text()), expected)
 
 
+def test_measure_checks_loaded_platform_config_and_returns_safe_failure_frame() -> None:
+    class BuildReady(Exception):
+        """Builder admission reached the next measurement step."""
+
+    tag = "fixture-builder:v1"
+    archive_id = "e" * 64
+    config = b'{"architecture":"arm64","os":"linux","config":{"Env":["FIXTURE=original"]}}'
+    wrong_config = config.replace(b"original", b"modified")
+    wrong_arch = config.replace(b"arm64", b"amd64")
+    config_id = "sha256:" + hashlib.sha256(config).hexdigest()
+    target_id = "sha256:" + "d" * 64
+    for shape in ("containerd", "classic"):
+        image_id = config_id if shape == "classic" else target_id
+        inspect = {"Id": image_id, "Architecture": "arm64", "Os": "linux", "Config": {}}
+        if shape == "containerd":
+            inspect["Descriptor"] = {"digest": target_id, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+        for case, row, blob, code, observed in (
+            ("match", inspect, config, None, None),
+            ("config mismatch", inspect, wrong_config, "builder_config_digest_mismatch",
+             "sha256:" + hashlib.sha256(wrong_config).hexdigest()),
+            ("tampered config", inspect, wrong_config, "builder_config_digest_mismatch",
+             "sha256:" + hashlib.sha256(wrong_config).hexdigest()),
+            ("inspect platform mismatch", inspect | {"Architecture": "amd64"}, config,
+             "builder_platform_mismatch", None),
+            ("exported platform mismatch", inspect, wrong_arch, "builder_platform_mismatch",
+             "sha256:" + hashlib.sha256(wrong_arch).hexdigest()),
+            ("missing config", inspect, None, "builder_config_unavailable", None),
+            ("malformed config", inspect, b"/private/path/credential", "builder_config_unavailable",
+             "sha256:" + hashlib.sha256(b"/private/path/credential").hexdigest()),
+            ("inspect error", None, None, "builder_engine_inspect_error", None),
+            ("export error", inspect, None, "builder_engine_export_error", None),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                root.joinpath("source/mkosi").mkdir(parents=True)
+                request, wire = root / "request", root / "wire"
+                repos = {name: {"suite": "stable", "keyring": "data", "origin": "unused"}
+                         for name in ("firstparty", "bsp", "debian-source")}
+                trust = {"repositories": repos, "root_der_sha256": "0" * 64, "os_version": "",
+                         "addon_public_object": "", "paseto_public_object": "",
+                         "kernel_metadata": dict.fromkeys(
+                             ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"), "data"),
+                         "builder_images": [{"tag": tag, "object": archive_id, "image_id": config_id, "arch": "arm64"}]}
+                request.write_text(json.dumps({"schema": 1, "identity": asdict(IDENTITY),
+                                               "operation": "measure", "trust": trust}))
+                paths = {"/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw": request,
+                         "/dev/virtio-ports/ceralive-artifacts": wire}
+
+                def unpack_builder(_path, output, _identity):
+                    output.mkdir()
+                    (output / "data").write_bytes(b"fixture keyring and source")
+                    return SimpleNamespace(directory=output, board=IDENTITY.board, device_root="data",
+                                           source_commit=IDENTITY.commit, epoch=IDENTITY.epoch, objects=(
+                                               SimpleNamespace(sha256="data", kind="pinned-source"),
+                                               SimpleNamespace(sha256=archive_id, kind="builder-image")))
+
+                def engine(args, **kwargs):
+                    if args[:1] == ["bash"]:
+                        return subprocess.CompletedProcess(args, 0, "data")
+                    if args[:2] == ["docker", "load"]:
+                        assert args[2:] == ["-i", str(root / "guest/input" / archive_id)]
+                        return subprocess.CompletedProcess(args, 0)
+                    if args in (["docker", "image", "inspect", tag], ["docker", "image", "inspect", "--", tag]):
+                        if row is None:
+                            raise subprocess.CalledProcessError(1, args, stderr=b"/private/path/credential")
+                        return subprocess.CompletedProcess(args, 0, json.dumps([row]))
+                    assert args == ["docker", "image", "save", "--platform", "linux/arm64", "--", tag]
+                    if case == "export error":
+                        raise subprocess.CalledProcessError(1, args, stderr=b"/private/path/credential")
+                    named_digest = hashlib.sha256(config if case == "tampered config" else blob or config).hexdigest()
+                    config_name = "blobs/sha256/" + named_digest
+                    entries = {"manifest.json": json.dumps([{"Config": config_name, "RepoTags": [tag],
+                                                            "Layers": []}]).encode()}
+                    if blob is not None:
+                        entries[config_name] = blob
+                    with tarfile.open(fileobj=kwargs["stdout"], mode="w") as tar:
+                        for name, data in entries.items():
+                            member = tarfile.TarInfo(name)
+                            member.size = len(data)
+                            tar.addfile(member, io.BytesIO(data))
+                    return subprocess.CompletedProcess(args, 0)
+
+                with patch.object(image_guest, "HOME", root / "guest"), \
+                        patch.object(image_guest, "Path", side_effect=lambda p: paths.get(p, pathlib.Path(p))), \
+                        patch.object(image_guest, "unpack", side_effect=unpack_builder), \
+                        patch.object(image_guest, "source_checkout", return_value=root / "source"), \
+                        patch.object(image_guest.shutil, "copyfile"), \
+                        patch.object(image_guest, "resolve", side_effect=BuildReady), \
+                        patch.object(image_guest, "run_gate", side_effect=engine):
+                    try:
+                        image_guest.main()
+                    except BuildReady:
+                        assert code is None and not wire.exists(), (shape, case)
+                        continue
+                    except StreamError:
+                        assert code is not None, (shape, case, "approved image was refused")
+                    else:
+                        raise AssertionError((shape, case, "did not reach builder admission boundary"))
+                target = root / "decoded"
+                target.mkdir()
+                with wire.open("rb") as frame:
+                    assert [member.id for member in decode(frame, target, IDENTITY)] == ["failure.json"]
+                assert exact_json(json.loads((target / "failure.json").read_text()), {
+                    "schema": 1, "identity": asdict(IDENTITY), "failure": "StreamError", "exit": None,
+                    "failure_code": code, "expected_config_digest": config_id, "observed_config_digest": observed,
+                }), (shape, case)
+
+
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:
     child = """
 import os, signal, sys
