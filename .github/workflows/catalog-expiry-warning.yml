@@ -1,0 +1,66 @@
+name: First-party release catalog expiry warning
+
+on:
+  schedule:
+    - cron: "37 8 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-expiry-warning
+  cancel-in-progress: false
+
+jobs:
+  check-catalog:
+    if: github.repository == 'CERALIVE/image-building-pipeline' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      warn: ${{ steps.expiry.outputs.warn }}
+      expired: ${{ steps.expiry.outputs.expired }}
+      expires_at: ${{ steps.expiry.outputs.expires_at }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the committed catalog offline
+        id: expiry
+        shell: bash
+        run: |
+          report=$(python3 ci/catalog_expiry.py)
+          printf '%s\n' "$report" | tee -a "$GITHUB_OUTPUT"
+
+  warn-owner:
+    needs: check-catalog
+    if: needs.check-catalog.outputs.warn == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the catalog refresh issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPIRED: ${{ needs.check-catalog.outputs.expired }}
+          EXPIRES_AT: ${{ needs.check-catalog.outputs.expires_at }}
+        shell: bash
+        run: |
+          title='First-party release catalog needs refresh'
+          issues="repos/$GITHUB_REPOSITORY/issues"
+          number=$(gh api --paginate "$issues?state=open&per_page=100" |
+            jq -rs --arg title "$title" '[.[][] | select(.pull_request == null and .title == $title) | .number] | first // empty')
+
+          status="expires at $EXPIRES_AT"
+          if [[ "$EXPIRED" == true ]]; then
+            status="expired at $EXPIRES_AT"
+          fi
+          body=$(printf '%s\n\n%s\n\n%s' \
+            "@andrescera The committed first-party release catalog on master $status." \
+            'Run `python3 ci/check-first-party-pins.py --refresh` locally with authenticated GitHub access, then open the usual refresh PR.' \
+            'Close this issue once the refreshed catalog is on master.')
+          if [[ -n "$number" ]]; then
+            gh api --method PATCH "$issues/$number" -f body="$body" --jq .html_url
+          else
+            gh api --method POST "$issues" -f title="$title" -f body="$body" --jq .html_url
+          fi
