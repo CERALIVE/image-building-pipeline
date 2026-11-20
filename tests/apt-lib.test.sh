@@ -239,6 +239,186 @@ CERALIVE_BUILD_APT_PROXY='http://evil/;rm' bash -c '
   ' _ "${PIPELINE_DIR}" && fail "runtime remap accepted a malformed cache URL"
 ok "proxy: runtime remap spans the layer via APT_CONFIG, keeps shipped sources, cleans up"
 
+sealed_suites=(RELEASE=trixie APT_SUITE=trixie APT_SUITE_UPDATES=trixie-updates APT_SUITE_SECURITY=trixie-security)
+assert_sealed_policy() {
+  local origin="$1" sources_path="$2" config="$3"
+  local source_opts='arch=arm64 arch-=all by-hash=no pdiffs=no target=Packages inrelease-path=InRelease signed-by=/usr/share/keyrings/debian-archive-keyring.gpg'
+  diff -u - "${sources_path}" <<EOF || fail "unexpected sealed Debian sources"
+deb [${source_opts}] ${origin}/debian trixie main
+deb [${source_opts}] ${origin}/debian trixie-updates main
+deb [${source_opts}] ${origin}/debian-security trixie-security main
+EOF
+  # Ignore comments, not unknown directives or later overrides.
+  diff -u - <(awk '!/^[[:space:]]*(\/\/|$)/' "${config}") <<'EOF' || fail "unexpected sealed APT settings"
+Acquire::Languages "none";
+Acquire::http::AllowRedirect "false";
+Acquire::IndexTargets::deb::Packages::CompressionTypes "gz xz lz4";
+APT::Update::Error-Mode "any";
+EOF
+}
+
+env "${sealed_suites[@]}" CERALIVE_SEALED_APT=1 CERALIVE_BUILD_APT_PROXY=http://127.0.0.1:3142 \
+  CERALIVE_BUILD_APT_SHIPPED_SOURCES="${WORK}/must-not-read.sources" bash -eu -c '
+    log() { :; }
+    source "$1"
+    runtime_build_apt_scope
+    cp "${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list" "$2/runtime.list"
+    printf "Dir::Etc::sourcelist \"/dev/null\";\nDir::Etc::sourceparts \"%s\";\n" \
+      "${CERALIVE_BUILD_APT_DIR}/sources" | cmp - <(head -n 2 "${APT_CONFIG}")
+    tail -n +3 "${APT_CONFIG}" >"$2/runtime.conf"
+  ' _ "${runtime_helper}" "${WORK}" || fail "sealed runtime could not isolate APT from device sources"
+assert_sealed_policy http://127.0.0.1:3142/HTTPS///deb.debian.org "${WORK}/runtime.list" "${WORK}/runtime.conf"
+ok "sealed runtime renders exactly the approved Debian sources and APT settings"
+
+(
+  # Execute the real orchestrator and launcher bodies. The fake engine remaps
+  # /work and inherits only the -e arguments, like the real container boundary.
+  fixture="${WORK}/launcher"
+  mkdir -p "${fixture}/"{bin,mkosi/runtime}
+  ln -s "${PIPELINE_DIR}/manifests" "${fixture}/manifests"
+  cp "${PIPELINE_DIR}/mkosi/runtime/sealed-apt-policy.sh" "${fixture}/mkosi/runtime/"
+  cat >"${fixture}/bin/mkosi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+out="$(dirname "$0")/.."
+proxy= tree= forwarded=
+while (($#)); do
+  case "$1" in
+    --proxy-url) proxy="$2"; shift ;;
+    --sandbox-tree) tree="$2"; shift ;;
+    --environment)
+      [[ "$2" != CERALIVE_SEALED_APT ]] || forwarded="${CERALIVE_SEALED_APT:-}"
+      shift ;;
+  esac
+  shift
+done
+[[ "${proxy}" == http://127.0.0.1:3142 && "${CERALIVE_BUILD_APT_PROXY:-}" == "${proxy}" ]] \
+  || { echo "mkosi did not receive the sealed proxy" >&2; exit 1; }
+[[ "${forwarded}" == 1 ]] || { echo "sealed APT mode did not reach the mkosi environment" >&2; exit 1; }
+[[ -n "${tree}" && -d "${tree}/etc/apt" ]] || { echo "mkosi did not receive the sandbox overlay" >&2; exit 1; }
+# mkosi v26 generates deb-src/debug when this exact path does not exist.
+sources="${tree}/etc/apt/sources.list.d"
+[[ -f "${sources}/mkosi.sources" ]] || { echo "mkosi would regenerate its default sources" >&2; exit 1; }
+cp "${sources}/mkosi.sources" "${out}/marker"
+cp "${sources}/ceralive-sealed.list" "${out}/sandbox.list"
+cp "${tree}/etc/apt/apt.conf.d/99-ceralive-sealed" "${out}/sandbox.conf"
+SH
+  chmod +x "${fixture}/bin/mkosi"
+  env "${sealed_suites[@]}" PATH="${fixture}/bin:${PATH}" bash -eu -c '
+    source <(awk "/^run_mkosi_build\\(\\)/ {body=1} body {print} body && /^}/ {exit}" "$1/lib/orchestrate.sh")
+    source "$1/lib/stages/mkosi.sh"
+    PIPELINE_DIR="$2" MKOSI_DIR="$2/mkosi" HERE="$1/lib" BOARD_ID=rock-5b-plus
+    CERALIVE_SEALED_INPUTS="$2/sealed" CERALIVE_REL_MKOSI_WORKSPACE_DIR=.mkosi-workspace
+    RAUC_KEYRING_FILE=/dev/null MKOSI_VERSION_PIN=26 MKOSI_BUILDER_IMAGE=fake
+    ceralive_mkosi_cache_domain() { echo root; }
+    resolve_debug_image_flag() { :; }
+    select_build_mode() { BUILD_MODE=docker; }
+    apt_proxy_container_host_args() { :; }
+    assert_cache_privilege_domain() { :; }
+    assert_container_daemon_supported() { :; }
+    ensure_builder_image() { :; }
+    log_info() { :; }
+    die() { printf "%s\n" "$*" >&2; exit 1; }
+    container_engine() {
+      local -a vars=("PATH=$PATH" "TMPDIR=${TMPDIR:-/tmp}")
+      local entry body
+      while [[ "$1" != bash ]]; do
+        if [[ "$1" == -e ]]; then
+          entry="$2"
+          if [[ "$entry" == *=* ]]; then vars+=("$entry")
+          else vars+=("$entry=${!entry-}"); fi
+          shift
+        fi
+        shift
+      done
+      body="$5"
+      env -i "${vars[@]}" bash -euo pipefail -c "${body//\/work\//"$PIPELINE_DIR"/}"
+    }
+    run_mkosi_build arm64 "$2/bsp" "$2/firstparty"
+  ' _ "${PIPELINE_DIR}" "${fixture}" || fail "sealed mkosi launcher did not deliver its APT policy"
+  [[ -z "$(awk '!/^[[:space:]]*(#|$)/' "${fixture}/marker")" ]] \
+    || fail "the mkosi marker contains active sources"
+  assert_sealed_policy http://deb.debian.org "${fixture}/sandbox.list" "${fixture}/sandbox.conf"
+) || exit 1
+ok "sealed mkosi receives the proxy, overlay and runtime flag without generating default APT sources"
+
+run_runtime_install() {
+  local proxy="$1" bundle="$2" calls="$3"
+  env "${sealed_suites[@]}" SHARED_PACKAGES='ca-certificates fixture-runtime' \
+    CERALIVE_SEALED_APT=1 CERALIVE_BUILD_APT_PROXY="${proxy}" \
+    SRCDIR="${PIPELINE_DIR}/mkosi" bash -eu -c '
+      postinst=$(head -n -1 "$1")
+      ca_store=/etc/ssl/certs/ca-certificates.crt
+      source <(printf "%s\n" "${postinst//"$ca_store"/"$3"}")
+      calls="$2"
+      runtime_build_apt_prepare_usr() { :; }
+      bootstrap_ca_trust() { echo "sealed runtime entered the live CA path" >&2; exit 90; }
+      apt-get() {
+        [[ -f "${APT_CONFIG:-}" && -f "${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list" ]] || exit 91
+        printf "%s\n" "$*" >>"${calls}"
+      }
+      install_runtime_packages
+    ' _ "${runtime_postinst}" "${calls}" "${bundle}"
+}
+printf 'fixture CA store\n' >"${WORK}/ca-present"
+expected_calls=$'update\ninstall -y --no-install-recommends ca-certificates fixture-runtime'
+run_runtime_install http://127.0.0.1:3142 "${WORK}/ca-present" "${WORK}/sealed-apt-calls" \
+  || fail "sealed runtime did not reach the scoped package install"
+[[ "$(<"${WORK}/sealed-apt-calls")" == "${expected_calls}" ]] \
+  || fail "sealed runtime added an APT transaction or omitted CA installation"
+ok "sealed runtime applies the policy at its first update, with no separate CA fetch"
+
+if output="$(run_runtime_install http://127.0.0.1:3142 "${WORK}/ca-missing" "${WORK}/no-ca-calls" 2>&1)"; then
+  fail "sealed runtime accepted a missing CA store"
+fi
+[[ "${output}" == *"sealed runtime install produced no CA store"* \
+   && "$(<"${WORK}/no-ca-calls")" == "${expected_calls}" ]] \
+  || fail "sealed runtime did not check the missing CA store after installation"
+ok "sealed runtime refuses a missing CA store after installing packages"
+
+if output="$(run_runtime_install http://example.invalid:3142 "${WORK}/ca-present" "${WORK}/nonlocal-calls" 2>&1)"; then
+  fail "sealed runtime accepted a non-local proxy"
+fi
+[[ "${output}" == *"sealed runtime APT requires the guest-local mirror"* && ! -e "${WORK}/nonlocal-calls" ]] \
+  || fail "sealed runtime did not reject the non-local proxy before APT"
+ok "sealed runtime refuses a non-local mirror before APT"
+
+(
+  source "${PIPELINE_DIR}/lib/disk/slot-image.sh"
+  export CERALIVE_SEALED_INPUTS="${WORK}"
+  mkdir -p "${WORK}/slot-tree" "${WORK}/slot-bin"
+  tar() { return 1; } # Unreadable tree takes the container path.
+  docker() { fail "called the real engine"; }
+  # Execute only the command body, with an empty PATH and an apt-get tripwire.
+  container_engine() {
+    local assignment
+    while [[ "$1" != bash ]]; do
+      if [[ "$1" == -e ]]; then
+        assignment="$2"
+        export "${assignment?}"
+        shift
+      fi
+      shift
+    done
+    PATH="${WORK}/slot-bin" /bin/bash -c '
+      apt-get() { printf "unexpected apt\n" >&2; exit 77; }
+      '"$5"
+  }
+  output="$(make_slot_image "${WORK}/slot-tree" "${WORK}/slot.img" 2>&1)" \
+    && fail "sealed slot writer accepted a builder missing the filesystem tools"
+  [[ "${output}" == 'FATAL: sealed slot builder lacks mkfs.ext4 or tune2fs' ]] \
+    || fail "sealed slot writer did not refuse before APT: ${output}"
+) || exit 1
+ok "sealed slot writer refuses missing filesystem tools before APT"
+
+if [[ -n "${SEALED_APT_GET:-}" ]]; then
+  python3 "${PIPELINE_DIR}/tests/sealed_apt_acquire_test.py" \
+    || fail "real APT did not honor the sealed acquisition contract"
+  ok "real APT requested only sealed metadata through both transports"
+else
+  printf 'apt-lib: SKIP: real APT acquisition fixture requires SEALED_APT_GET (see docs/image-measurement.md)\n'
+fi
+
 audit_workflow="${PIPELINE_DIR}/.github/workflows/real-build-audit.yml"
 grep -Fq './dev-cache up' "${audit_workflow}" \
   || fail "real-build audit does not provision its runner's Debian cache"

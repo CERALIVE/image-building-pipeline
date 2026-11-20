@@ -48,8 +48,11 @@ tests/rootfs_measurement_test.py	tool	unit	invoked-by-suite	shipping-content pur
 tests/parity_noexec_test.py	tool	unit	invoked-by-suite	noexec X_OK syscall-denial parity regression driven by image-route.bats
 tests/bootstrap_metadata_test.py	tool	unit	invoked-by-suite	original bootstrap metadata authentication and validity driven by image-route.bats
 tests/capsule-producer.bats	bats	unit	default-bats	host package prefetch with throwaway TLS credentials and original archive signatures
+tests/capsule_transport_fixture.py	helper	support	invoked-by-suite	loopback transport fixture shared by the capsule producer tests
+tests/capsule_transport_policy_test.py	tool	unit	invoked-by-suite	capsule transport policy driven by capsule-producer.bats
 tests/capsule_producer_test.py	tool	unit	invoked-by-suite	local HTTPS capsule producer boundaries driven by capsule-producer.bats
 tests/metadata_discovery_test.py	tool	unit	invoked-by-suite	metadata-only discovery and unchanged inventory integration driven by capsule-producer.bats
+tests/source_discovery_test.py	tool	unit	invoked-by-suite	source discovery authentication driven by capsule-producer.bats
 tests/manifest-schema.bats	bats	unit	default-bats	manifest/board/family schema validation
 tests/package-contract.bats	bats	unit	default-bats	package sets, staging classification, debug delta, kernel freeze
 tests/postinst-wiring.bats	bats	unit	default-bats	runtime postinst executor wiring and udev generators
@@ -175,6 +178,7 @@ tests/boot-script-sanitize.test.sh	shell	unit	default-shell	the A/B selector aga
 tests/deb-lib.test.sh	shell	unit	default-shell	the one Debian control reader/identity asserter/extractor
 tests/versions-lib.test.sh	shell	unit	default-shell	the one versions.yaml pin reader
 tests/apt-lib.test.sh	shell	unit	default-shell	the one apt transport and signed-index module, no silent || true
+tests/sealed_apt_acquire_test.py	tool	integration	invoked-by-suite	real APT loopback acquisition and sealed failure controls, driven by apt-lib.test.sh with SEALED_APT_GET
 tests/boot-state-core.test.sh	shell	unit	default-shell	the shared A/B state core against both persistence adapters
 tests/dongle-netns-retirement.test.sh	shell	unit	default-shell	retired router-dongle netns layer: absence from every installer, teardown of the OTA-surviving /data slot store, bounded slot enumeration, both-track wiring
 tests/slot-sync.test.sh	shell	unit	default-shell	verified local slot mirror: full refusal-gate matrix, check JSON, dpkg-verify comparison, mark-bad/good ordering, SIGTERM handling; internal real loop-mounted-ext4 leg gated on CERALIVE_RUN_REAL_SLOT_SYNC_CONTRACT=required

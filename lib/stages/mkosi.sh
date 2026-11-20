@@ -363,15 +363,19 @@ mkosi_invoke() {
         echo "mkosi: nested runtime Debian cache at ${CERALIVE_BUILD_APT_PROXY} (build-only)"
       fi
       cd /work/mkosi
-      sealed_proxy_args=()
+      sealed_apt_args=()
       if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
-        sealed_proxy_args=(--proxy-url http://127.0.0.1:3142)
+        source runtime/sealed-apt-policy.sh
+        sealed_sandbox="$(mktemp -d)"
+        trap "rm -rf -- \"\${sealed_sandbox}\"" EXIT
+        sealed_apt_sandbox "${sealed_sandbox}"
+        sealed_apt_args=(--proxy-url http://127.0.0.1:3142 --sandbox-tree "${sealed_sandbox}")
       fi
       mkosi \
         --architecture='"${mkosi_arch}"' \
         --release='"${RELEASE}"' \
         --with-network=yes \
-        "${sealed_proxy_args[@]}" \
+        "${sealed_apt_args[@]}" \
         --workspace-directory=/work/'"${CERALIVE_REL_MKOSI_WORKSPACE_DIR}"' \
         '"${env_cli_str}"' \
         --environment CERALIVE_PIPELINE_DIR \
