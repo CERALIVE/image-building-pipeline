@@ -84,10 +84,19 @@ governs any end without acceptance:
   This holds even when the sample that crossed the bound returns after the
   guest deadline.
 
-A pass that completes at or after the governing deadline never counts. The
-launcher never pauses past it and never writes a priority after it. An
-observation error such as `EIO` before that deadline is inconclusive and is
-retried. After it, the deadline's result is reported instead of the error.
+The settle loop alone owns every retry. Each observation in a pass goes
+through one gate that checks the governing deadline first: the policy, the
+name, the task listing, every thread's nice, every raise, and the leader,
+cgroup and I/O class sample. No observation is issued at or after that
+deadline. None retries or sleeps on its own, so the three-attempt retry of
+the periodic samples does not apply here.
+
+An observation error such as `EIO` before the deadline ends the current pass
+as not clean. After a pause capped by the time left, a fresh pass starts from
+the beginning, and acceptance again needs two complete passes. An error that
+returns at or after the deadline reports the deadline's result. A refusal then
+keeps the error as its cause. A pass that completes at or after the governing
+deadline never counts, and the launcher never pauses past it.
 
 Each settle pass checks, in order:
 
@@ -132,6 +141,8 @@ level. The I/O check applies the same bound independently to `io.weight` and
 override. The override replaces that level's default before taking the
 minimum across the hierarchy. A transient EIO, EINTR or EAGAIN or an
 inconclusive BFQ observation restarts the whole sample within the retry bound.
+During the first sample's priority settle, the same errors end the current
+pass instead, and the settle loop decides the retry.
 
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,

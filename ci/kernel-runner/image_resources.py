@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import resource
 import time
-from typing import Callable, Final, TypedDict
+from typing import Callable, Final, NoReturn, TypedDict, TypeVar
 
 from image_stream import list_directory, retry_check
 from vm_process import Cancellation
@@ -235,104 +235,117 @@ def process_priority(pid: int, cancellation: Cancellation, *, settle: Settle | N
     needs a conformant observation within PRIORITY_SETTLE_SECONDS. Later samples verify only.
     """
     if settle is not None:
-        return _settled_priority(pid, cancellation, settle)
+        return _SettleRun(pid, cancellation, settle).run()
     try:
         return retry_check(_process_priority, pid, cancellation)
     except IOPrioritySyscallError as error:
         raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
 
 
-def _settled_priority(pid: int, cancellation: Cancellation, settle: Settle) -> PriorityObservation:
-    """Accept only a clean confirming pass; the earlier deadline decides any other end.
+_T = TypeVar("_T")
 
-    A child exit always wins. A realtime policy refuses before any write. Observation errors
-    before the governing deadline are inconclusive; at or after it, the deadline's result stands.
+
+class _DeadlineReached(Exception):
+    """An observation was due at or after the governing deadline, so none was issued."""
+
+
+class _Inconclusive(Exception):
+    """An observation failed before the governing deadline; the current pass is not clean."""
+
+    def __init__(self, reason: AdmissionError) -> None:
+        super().__init__(str(reason))
+        self.reason = reason
+
+
+class _SettleRun:
+    """The first live sample. Its loop alone retries; no observation retries or sleeps on its own.
+
+    A child exit always wins. A realtime policy refuses before any write. Only a clean confirming
+    pass is accepted; any other end takes the result of the earlier deadline.
     """
-    start = settle.clock()
-    settle_end = start + PRIORITY_SETTLE_SECONDS
-    guest_end = math.inf if settle.guest_deadline is None else settle.guest_deadline
-    guest_first = guest_end <= settle_end
 
-    def remaining() -> float:
-        return min(settle_end, guest_end) - settle.clock()
+    def __init__(self, pid: int, cancellation: Cancellation, settle: Settle) -> None:
+        self.pid, self.cancellation, self.settle = pid, cancellation, settle
+        self.settle_end = settle.clock() + PRIORITY_SETTLE_SECONDS
+        self.guest_end = math.inf if settle.guest_deadline is None else settle.guest_deadline
+        self.guest_first = self.guest_end <= self.settle_end
+        self.reason: AdmissionError = _unconfirmed_error(pid)
+        self.previous: frozenset[int] | None = None
 
-    reason: AdmissionError = _handoff_error(pid)
-    previous: frozenset[int] | None = None
-    while True:
-        cancellation.check()
-        if settle.exited():
-            raise _settle_exit(pid)
-        if remaining() <= 0:
-            _expire(guest_first, reason)
-        confirmed, observation, found = False, None, None
+    def remaining(self) -> float:
+        return min(self.settle_end, self.guest_end) - self.settle.clock()
+
+    def observe(self, operation: Callable[..., _T], *args: object, failure: str | None = None) -> _T:
+        """The settle's only route to an observation; none is issued at or after the governing deadline."""
+        if self.remaining() <= 0:
+            raise _DeadlineReached
         try:
-            policy = os.sched_getscheduler(pid)
-            if policy not in SCHEDULERS:
-                raise PriorityRefusal(os.getpriority(os.PRIO_PROCESS, pid), policy)
-            if _comm(pid) != QEMU_COMM:
-                reason, previous = _handoff_error(pid), None
-            else:
-                result = _thread_pass(pid, policy, remaining)
-                found = result.reason
-                reason = found or _unconfirmed_error(pid)
-                unchanged, previous = result.listing == previous, result.listing
-                observation = process_priority(pid, cancellation)
-                confirmed = found is None and unchanged
-        except PriorityRefusal as error:
-            if settle.exited():
-                raise _settle_exit(pid) from error
-            if error.realtime and remaining() > 0:
-                raise
-            reason, previous = found or error, None
+            return operation(*args)
         except OSError as error:
-            if settle.exited():
-                raise _settle_exit(pid) from error
-            reason, previous = found or _unobservable_error(pid, error), None
-        except AdmissionError as error:
-            if settle.exited():
-                raise _settle_exit(pid) from error
-            if remaining() > 0:
-                raise
-            reason = error
-        if settle.exited():
-            raise _settle_exit(pid)
-        left = remaining()
-        if left <= 0:
-            _expire(guest_first, reason)
-        if confirmed:
-            return observation
-        settle.pause(min(PRIORITY_SETTLE_INTERVAL, left))
+            reason = AdmissionError(f"{failure}: {error.strerror}" if failure else
+                                    f"QEMU PID {self.pid} priority could not be observed within "
+                                    f"{PRIORITY_SETTLE_SECONDS} s: {error}")
+            reason.__cause__ = error
+            raise _Inconclusive(reason) from error
 
+    def run(self) -> PriorityObservation:
+        while True:
+            self.cancellation.check()
+            if self.settle.exited():
+                raise _settle_exit(self.pid)
+            if self.remaining() <= 0:
+                self.expire()
+            observation = None
+            try:
+                observation = self.attempt()
+            except _DeadlineReached:
+                continue  # The loop head reports a child exit first, then the deadline.
+            except _Inconclusive as failed:
+                self.reason, self.previous = failed.reason, None
+            except AdmissionError as error:
+                # Only a below-floor reading can still change; any other refusal stands before a deadline.
+                retryable = isinstance(error, PriorityRefusal) and not error.realtime
+                if not (retryable or self.settle.exited() or self.remaining() <= 0):
+                    raise
+                self.reason, self.previous = error, None
+            if self.settle.exited():
+                raise _settle_exit(self.pid)
+            left = self.remaining()
+            if left <= 0:
+                self.expire()
+            if observation is not None:
+                return observation
+            self.settle.pause(min(PRIORITY_SETTLE_INTERVAL, left))
 
-@dataclass(frozen=True, slots=True)
-class _ThreadPass:
-    listing: frozenset[int]
-    reason: AdmissionError | None  # None only for a pass with no write, low thread or vanished thread
+    def attempt(self) -> PriorityObservation | None:
+        """One full pass; its observation counts only when the pass is clean and its set unchanged."""
+        pid, observe = self.pid, self.observe
+        policy = observe(os.sched_getscheduler, pid)
+        if policy not in SCHEDULERS:
+            raise PriorityRefusal(observe(os.getpriority, os.PRIO_PROCESS, pid), policy)
+        if observe(_comm, pid) != QEMU_COMM:
+            self.reason, self.previous = _handoff_error(pid), None
+            return None
+        listing = frozenset(int(name) for name in observe(list_directory, Path(f"/proc/{pid}/task")))
+        clean = True
+        for tid in sorted(listing):
+            nice = observe(os.getpriority, os.PRIO_PROCESS, tid)
+            if nice >= MIN_NICE:
+                continue
+            clean, self.reason = False, PriorityRefusal(nice, policy, None if tid == pid else tid)
+            # Raising needs no privilege; a host renice between the read and this write can fail it.
+            observe(os.setpriority, os.PRIO_PROCESS, tid, QEMU_NICE, failure=_raise_failure(pid, tid))
+        observation = observe(_process_priority, pid, self.cancellation)
+        confirmed, self.previous = clean and listing == self.previous, listing
+        if clean:
+            self.reason = _unconfirmed_error(pid)
+        return observation if confirmed else None
 
-
-def _thread_pass(pid: int, policy: int, remaining: Callable[[], float]) -> _ThreadPass:
-    """Read every listed thread; raise, never lower, one below the floor; never write after the deadline."""
-    listing = frozenset(int(name) for name in list_directory(Path(f"/proc/{pid}/task")))
-    reason = None
-    for tid in sorted(listing):
-        try:
-            nice = os.getpriority(os.PRIO_PROCESS, tid)
-        except ProcessLookupError:
-            reason = AdmissionError(f"QEMU PID {pid} thread {tid} exited during the priority settle")
-            continue
-        if nice >= MIN_NICE:
-            continue
-        reason = PriorityRefusal(nice, policy, None if tid == pid else tid)
-        if remaining() <= 0:
-            break
-        try:
-            os.setpriority(os.PRIO_PROCESS, tid, QEMU_NICE)
-        except PermissionError as error:
-            # A host renice may land between the read and the write; the next pass decides.
-            reason = AdmissionError(_raise_failure(pid, tid, error))
-        except ProcessLookupError as error:
-            reason = AdmissionError(_raise_failure(pid, tid, error))
-    return _ThreadPass(listing, reason)
+    def expire(self) -> NoReturn:
+        """The earlier deadline governs: the guest's ends the attempt as a guest timeout."""
+        if self.guest_first:
+            raise GuestDeadline("image guest deadline reached during the priority settle")
+        raise self.reason
 
 
 def _handoff_error(pid: int) -> AdmissionError:
@@ -341,19 +354,6 @@ def _handoff_error(pid: int) -> AdmissionError:
 
 def _unconfirmed_error(pid: int) -> AdmissionError:
     return AdmissionError(f"QEMU PID {pid} priority was not confirmed by a clean pass within {PRIORITY_SETTLE_SECONDS} s")
-
-
-def _unobservable_error(pid: int, error: OSError) -> AdmissionError:
-    refusal = AdmissionError(f"QEMU PID {pid} priority could not be observed within {PRIORITY_SETTLE_SECONDS} s: {error}")
-    refusal.__cause__ = error
-    return refusal
-
-
-def _expire(guest_first: bool, reason: AdmissionError) -> None:
-    """The earlier deadline governs: the guest's ends the attempt as a guest timeout."""
-    if guest_first:
-        raise GuestDeadline("image guest deadline reached during the priority settle")
-    raise reason
 
 
 def _settle_exit(pid: int) -> ProcessLookupError:
@@ -368,9 +368,9 @@ def _comm(pid: int) -> str:
         return ""
 
 
-def _raise_failure(pid: int, tid: int, error: OSError) -> str:
+def _raise_failure(pid: int, tid: int) -> str:
     thread = "" if tid == pid else f" thread {tid}"
-    return f"cannot raise QEMU PID {pid}{thread} to nice {QEMU_NICE}: {error.strerror}"
+    return f"cannot raise QEMU PID {pid}{thread} to nice {QEMU_NICE}"
 
 
 def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
