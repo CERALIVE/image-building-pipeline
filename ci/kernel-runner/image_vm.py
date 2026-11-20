@@ -49,7 +49,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 def image_arguments(job: ImageJob) -> list[str]:
     """Only owned disks, one typed read-only input and output-only stdio."""
     return [
-        "-nic", "none", "-nodefaults",
+        "-nic", "none",
         "-drive", f"file=/proc/self/fd/{job.capsule_fd},format=raw,if=none,id=image-input,readonly=on",
         "-device", "virtio-blk-pci,drive=image-input,serial=ceralive-image-input",
         "-device", "virtio-serial-pci",

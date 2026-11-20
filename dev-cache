@@ -3,17 +3,17 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE="${HERE}/ci/apt-cache/compose.yml"
+engine() { python3 "${HERE}/ci/container-engine.py" docker apt-cache "$1"; }
 
 case "${1:-}" in
   up)
-    docker compose -f "${COMPOSE}" up -d --wait
+    engine up
     ;;
   down)
-    docker compose -f "${COMPOSE}" down
+    engine down
     ;;
   status)
-    docker compose -f "${COMPOSE}" ps
+    engine status
     if curl --noproxy '*' -sf --connect-timeout 1 --max-time 1 \
         http://127.0.0.1:3142/acng-report.html >/dev/null; then
       printf 'apt cache: available on http://127.0.0.1:3142\n'

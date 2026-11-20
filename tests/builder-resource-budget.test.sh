@@ -16,10 +16,14 @@ mkdir -p "${TMP}/bin"
 cat >"${TMP}/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == -H ]]; then
+  [[ "$2" == unix:///var/run/docker.sock ]]
+  shift 2
+fi
 case "${1:-}" in
   context)
     [[ "${2:-}" == inspect ]]
-    printf '%s\n' "${MOCK_DOCKER_ENDPOINT}"
+    printf 'default|%s\n' "${MOCK_DOCKER_ENDPOINT}"
     ;;
   info)
     case "${*: -1}" in

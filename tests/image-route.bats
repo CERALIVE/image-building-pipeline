@@ -56,6 +56,18 @@
   [ "$status" -eq 0 ]
 }
 
+@test "all QEMU launches are headless and detached without booting a guest" {
+  run python3 "${BATS_TEST_DIRNAME}/qemu_launch_test.py"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "local container commands require the capped system engine without a terminal" {
+  run python3 "${BATS_TEST_DIRNAME}/container_engine_test.py"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "sealed input import preserves original authentication and identity gates" {
   run python3 "${BATS_TEST_DIRNAME}/sealed_inputs_test.py"
   printf '%s\n' "$output"

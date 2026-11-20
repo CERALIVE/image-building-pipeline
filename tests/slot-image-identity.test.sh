@@ -185,12 +185,16 @@ SH
 cat >"${shim}/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == context ]]; then echo 'default|unix:///var/run/docker.sock'; exit; fi
+[[ "$1 $2" == '-H unix:///var/run/docker.sock' ]]
+shift 2
 [[ "$1" == run && "$2" == --rm ]]
 shift 2
 envs=()
 tree='' out=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --cpus=*|--memory=*) shift ;;
     -e) envs+=("$2"); shift 2 ;;
     -v)
       case "$2" in

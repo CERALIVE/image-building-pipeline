@@ -181,12 +181,16 @@ runtime_pkg_list_files() {
 # podman on Linux is not a VM share and reports a different `info` schema, so the
 # check is scoped to docker.
 # ---------------------------------------------------------------------------
+container_engine() {
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../ci/container-engine.py" "$@"
+}
+
 assert_container_daemon_supported() {
   local runtime="${1:?assert_container_daemon_supported needs a runtime}" daemon_os
   [[ "${runtime}" == "docker" ]] || return 0
 
-  daemon_os="$("${runtime}" info --format '{{.OperatingSystem}}')" \
-    || die "cannot query the ${runtime} daemon ('${runtime} info' failed). Start it, or point DOCKER_CONTEXT/DOCKER_HOST at a live Linux daemon."
+  daemon_os="$(container_engine "${runtime}" info --format '{{.OperatingSystem}}')" \
+    || die "cannot query the system Docker daemon; select DOCKER_CONTEXT=default and use unix:///var/run/docker.sock."
 
   if [[ "${daemon_os}" == *"Docker Desktop"* ]]; then
     die "containerized build refuses the Docker Desktop daemon (OperatingSystem='${daemon_os}'). Its bind mount is a VM share: root in the container cannot unlink host-root-owned files (mkosi's cache invalidation dies in 'rm: cannot remove …: Permission denied'), and it supports no POSIX ACLs/xattrs (mkosi's 'tar --acls --xattrs' dies in 'acl_set_file_at: Operation not supported'). Select a native Linux daemon — e.g. DOCKER_CONTEXT=default with unix:///var/run/docker.sock — and re-run."
@@ -218,7 +222,7 @@ CONTAINER_BUILD_MIN_PODMAN_MAJOR="${CONTAINER_BUILD_MIN_PODMAN_MAJOR:-4}"
 # has a shape this refuses to guess at.
 container_runtime_major() {
   local runtime="${1:?container_runtime_major needs a runtime}" out major
-  out="$("${runtime}" --version 2>/dev/null)" || return 0
+  out="$(container_engine "${runtime}" --version 2>/dev/null)" || return 0
   major="$(printf '%s' "${out}" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   [[ "${major}" =~ ^[0-9]+$ ]] || return 0
   printf '%s' "${major}"
@@ -249,10 +253,10 @@ container_image_build() {
   local runtime="${1:?container_image_build needs a runtime}"; shift
   assert_container_build_cache_mounts "${runtime}"
   if [[ "${runtime}" == "docker" ]]; then
-    DOCKER_BUILDKIT=1 "${runtime}" build "$@"
+    DOCKER_BUILDKIT=1 container_engine "${runtime}" build "$@"
     return
   fi
-  "${runtime}" build "$@"
+  container_engine "${runtime}" build "$@"
 }
 
 # container_build_proxy_args — emit `--build-arg APT_PROXY=<url>` (plus the

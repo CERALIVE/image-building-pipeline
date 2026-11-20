@@ -173,7 +173,7 @@ main() {
   mkdir -p "${work}/out"
 
   log_info "rauc-build: dpkg-buildpackage inside ${tag} (platform=${platform})"
-  "${runtime}" run --rm --platform "${platform}" \
+  container_engine "${runtime}" run --rm --cpus=4 --memory=4g --platform "${platform}" \
     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
     -v "${src_dir}:/build/rauc:rw" \
     -v "${work}/out:/out" \

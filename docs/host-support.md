@@ -122,6 +122,46 @@ disk-backed scratch directory; the Avahi fixture contains no board images.
 
 ## Docker Desktop is refused — the bind mount cannot carry a rootfs
 
+### Local container engine
+
+Host-side repo tooling uses `python3 ci/container-engine.py docker …` on Linux.
+Select `DOCKER_CONTEXT=default` for the command; the wrapper checks the selected
+context and pins `-H unix:///var/run/docker.sock`. It refuses Desktop, alternate
+sockets, remote daemons and standalone Podman rather than changing any context
+or starting an engine. The system daemon must already be running.
+
+Container creation requires positive `--cpus` and `--memory` limits; `start` and
+`exec` require an existing container with both. The CLI gets `/dev/null` as
+stdin and starts in a new session without the desktop environment. Do not use
+`-t`, `-i`, or stdin attachment even in automation. Redirect to a log to keep
+output when running from a terminal.
+
+The only host-access opt-ins go **before** `run`, `create`, `start` or `exec`:
+`--allow-privileged`, `--allow-host-devices` (including `/dev` binds),
+`--allow-host-namespaces` (PID/IPC), and `--allow-host-network`. The existing
+mkosi build opts into privileged operation for its nested image assembly; it
+opts into host networking only for the sealed mirror inside the disposable
+guest. These flags do not waive resource or terminal rules. Prefer a disposable
+guest to a privileged build on a workstation.
+
+Local BuildKit image creation is refused because a CPU or memory limit on the
+CLI does not limit daemon-side build steps. Use a prebuilt builder image.
+GitHub-hosted build jobs and the disposable runner guest retain their own
+BuildKit steps. Guest-only daemon commands baked into the approved base stay
+inside that VM. Existing inline workflow commands in `kernel-release.yml`,
+`real-build-audit.yml`, `release-candidate-build.yml`, and `v2-ci.yml` under
+`.github/workflows/` are outside the local wrapper and unchanged.
+
+Do not start Docker Desktop or its VM for base preparation. The repository's
+base command only starts QEMU; `provision.sh` starts the system Docker Engine
+inside that Ubuntu guest. On Linux the Desktop application can open a graphical
+window. The `docker-desktop.service` user unit can start its VM separately
+through `/opt/docker-desktop/bin/com.docker.backend`. The preparation
+receipt does not show a Desktop launch or establish who started its VM, what
+display/console options it had, or whether it displayed anything. The separate
+reported Debian login incident involved the system daemon, not the Desktop socket;
+the container's starter has not been identified.
+
 `lib/common.sh::assert_container_daemon_supported` reads the daemon's reported
 `OperatingSystem` and **dies** when it contains `Docker Desktop`. Both the mkosi
 stage (`lib/stages/mkosi.sh::mkosi_invoke`) and the kernel-from-source stage
@@ -590,7 +630,8 @@ essence is:
 
 ```bash
 # 1) Does the assembly run loop-free in an UNPRIVILEGED container? (the key test)
-docker run --rm -v "$PWD":/repo:ro debian:trixie-slim bash -euo pipefail -c '
+DOCKER_CONTEXT=default python3 ci/container-engine.py docker run --rm \
+  --cpus=2 --memory=2g -v "$PWD":/repo:ro debian:trixie-slim bash -euo pipefail -c '
   apt-get update -qq && apt-get install -y --no-install-recommends \
     systemd-repart e2fsprogs dosfstools mtools gdisk coreutils >/dev/null
   cp -r /repo/v2 /tmp/v2

@@ -129,6 +129,10 @@ kernel_test_builder_stub() {
 #!/usr/bin/env python3
 import os, pathlib, shutil, sys
 args = sys.argv[1:]
+if args[:2] == ['context', 'inspect']:
+    sys.exit(print('default|unix:///var/run/docker.sock'))
+assert args[:2] == ['-H', 'unix:///var/run/docker.sock']
+args = args[2:]
 with open(os.environ['KERNEL_TEST_RUNTIME_LOG'], 'a') as log:
     log.write(' '.join(args) + '\n')
 if args[:1] == ['info']:

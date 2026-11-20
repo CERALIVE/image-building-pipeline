@@ -48,11 +48,8 @@
 #     ceralive.service). So we drop -e and the ERR trap; keep nounset + pipefail.
 #   * NO `|| true` swallowing of meaningful errors. Expected-to-sometimes-fail
 #     probes are wrapped in explicit `if … then pass else fail/warn fi`.
-#   * The qemu invocation is the task-specified headless form:
-#       qemu-system-x86_64 -nographic -m 1024 -drive file=<img>,format=raw \
-#                          -serial mon:stdio   (+ OVMF for EFI, +kvm:tcg accel)
-#     We drive it through a coprocess so the same stdio carries both the captured
-#     boot log AND the commands we type at the serial getty.
+#   * The shared headless launcher connects QEMU's boot log and serial getty to
+#     private pipes, not to either process's terminal.
 #
 # ---------------------------------------------------------------------------
 # ENV
@@ -142,10 +139,8 @@ QEMU_PID=""
 cleanup() {
   local f d
   if [[ -n "${QEMU_PID}" ]] && kill -0 "${QEMU_PID}" 2>/dev/null; then
-    kill "${QEMU_PID}" 2>/dev/null
-    # give it a moment, then make sure it is gone
-    sleep 1
-    kill -9 "${QEMU_PID}" 2>/dev/null
+    kill "${QEMU_PID}" 2>/dev/null || true
+    wait "${QEMU_PID}" 2>/dev/null || true
   fi
   for f in "${CLEANUP_FILES[@]:-}"; do [[ -n "${f}" && -f "${f}" ]] && rm -f "${f}"; done
   for d in "${CLEANUP_DIRS[@]:-}"; do [[ -n "${d}" && -d "${d}" ]] && rm -rf "${d}"; done
@@ -169,15 +164,15 @@ discover_image() {
 # materialize_raw <image> <out_var> — yield a plain raw disk path qemu can -drive.
 # Decompresses *.xz into a temp file (cleaned on exit); passes .img/.raw through.
 materialize_raw() {
-  local img="$1" __out="$2" tmp raw
+  local img="$1" __out="$2" tmp unpacked
   case "${img}" in
     *.xz)
       tmp="$(mktemp -d)"; CLEANUP_DIRS+=("${tmp}")
-      raw="${tmp}/$(basename "${img%.xz}")"
-      if ! xz -dc "${img}" >"${raw}"; then
+      unpacked="${tmp}/$(basename "${img%.xz}")"
+      if ! xz -dc "${img}" >"${unpacked}"; then
         fail "xz decompress failed for ${img}"; return 1
       fi
-      printf -v "${__out}" '%s' "${raw}"; return 0 ;;
+      printf -v "${__out}" '%s' "${unpacked}"; return 0 ;;
     *.img|*.raw)
       printf -v "${__out}" '%s' "${img}"; return 0 ;;
     *)
@@ -207,11 +202,11 @@ resolve_ovmf() {
 }
 
 # ===========================================================================
-# BOOT + SERIAL CAPTURE (qemu via coprocess)
+# BOOT + SERIAL CAPTURE (qemu via private FIFOs)
 # ===========================================================================
 
 # wait_for <fd> <transcript> <regex> <timeout_s> — read lines from the qemu
-# coprocess output fd, append each to the transcript, return 0 the moment a line
+# serial output fd, append each to the transcript, return 0 the moment a line
 # matches <regex>; return 1 on timeout. Wall-clock bounded via SECONDS.
 wait_for() {
   local fd="$1" transcript="$2" regex="$3" timeout="$4"
@@ -280,12 +275,11 @@ boot_and_capture() {
   : >"${transcript}"
 
   local -a qargs=(
-    -nographic
     -no-reboot
     -m "${QEMU_MEM_MB}"
     -machine "q35,accel=kvm:tcg"
     -drive "file=${raw},format=raw,if=ide"
-    -serial mon:stdio
+    -nic user
   )
   # EFI/GRUB x86 image (task 33) needs OVMF; fall back to legacy BIOS with a warn.
   local ovmf
@@ -296,16 +290,27 @@ boot_and_capture() {
     warn "no OVMF firmware found — booting legacy BIOS (the x86 image is EFI/GRUB; boot may not reach userspace). Install 'ovmf' to enable EFI boot."
   fi
 
-  log_info "launching: ${QEMU_BIN} ${qargs[*]}"
-  # Coprocess: ${QEMU[0]} = serial+console output, ${QEMU[1]} = serial input.
-  coproc QEMU { exec "${QEMU_BIN}" "${qargs[@]}" 2>&1; }
-  QEMU_PID="${COPROC_PID}"
+  local private serial console_in console_out
+  private="$(mktemp -d)" || { fail "could not allocate private serial directory"; return 1; }
+  CLEANUP_DIRS+=("${private}")
+  serial="${private}/serial"
+  mkfifo "${serial}.in" "${serial}.out" || { fail "could not create serial pipes"; return 1; }
+  # Open both ends so neither the launcher nor the console reader blocks in open().
+  exec {console_in}<>"${serial}.in" {console_out}<>"${serial}.out" ||
+    { fail "could not open serial pipes"; return 1; }
+  log_info "launching headless: ${QEMU_BIN} ${qargs[*]}"
+  python3 "${PIPELINE_DIR}/ci/kernel-runner/qemu_launch.py" \
+    "${QEMU_BIN}" "${serial}" "${private}/qemu.log" "${qargs[@]}" &
+  QEMU_PID=$!
 
   # 1. Wait for systemd to reach multi-user.target. systemd prints either
   #    "Reached target multi-user.target" (unit id) or "Reached target
   #    Multi-User System." (description) depending on version — match both.
   local reach_re='Reached target ([Mm]ulti-[Uu]ser|multi-user\.target)'
-  if ! wait_for "${QEMU[0]}" "${transcript}" "${reach_re}" "${BOOT_TIMEOUT}"; then
+  if ! wait_for "${console_out}" "${transcript}" "${reach_re}" "${BOOT_TIMEOUT}"; then
+    if [[ -s "${private}/qemu.log" ]]; then
+      tail -n 20 "${private}/qemu.log" >>"${transcript}"
+    fi
     fail "image did not reach multi-user.target within ${BOOT_TIMEOUT}s (see transcript)"
     return 1
   fi
@@ -315,21 +320,21 @@ boot_and_capture() {
   #    best-effort: if the appliance has no serial getty / unknown credentials, we
   #    skip the active probes and rely on the passive boot-log assertions.
   local login_re='([Ll]ogin:|\$ |# )'
-  if wait_for "${QEMU[0]}" "${transcript}" "${login_re}" "${LOGIN_TIMEOUT}"; then
-    send "${QEMU[1]}" "${SERIAL_USER}"
+  if wait_for "${console_out}" "${transcript}" "${login_re}" "${LOGIN_TIMEOUT}"; then
+    send "${console_in}" "${SERIAL_USER}"
     sleep 1
     if [[ -n "${SERIAL_PASSWORD}" ]]; then
       # Wait for the Password: prompt before sending it.
-      wait_for "${QEMU[0]}" "${transcript}" '[Pp]assword:' 15
-      send "${QEMU[1]}" "${SERIAL_PASSWORD}"
+      wait_for "${console_out}" "${transcript}" '[Pp]assword:' 15
+      send "${console_in}" "${SERIAL_PASSWORD}"
       sleep 1
     fi
     # Type the probe block; force a non-interactive, stable prompt first.
-    send "${QEMU[1]}" "export PS1='qemu# '"
+    send "${console_in}" "export PS1='qemu# '"
     local cmdline
-    while IFS= read -r cmdline; do send "${QEMU[1]}" "${cmdline}"; done < <(guest_probe_script)
+    while IFS= read -r cmdline; do send "${console_in}" "${cmdline}"; done < <(guest_probe_script)
     # Let the probe output land (bounded by the END marker).
-    drain "${QEMU[0]}" "${transcript}" 30
+    drain "${console_out}" "${transcript}" 30
   else
     warn "no serial login/shell prompt within ${LOGIN_TIMEOUT}s — running PASSIVE boot-log checks only (set SERIAL_USER/SERIAL_PASSWORD if the image needs login)"
   fi

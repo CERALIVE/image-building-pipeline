@@ -40,6 +40,7 @@ import vm_startup
 from image_lifecycle import ImageJob, reconcile
 from image_stream import Identity, StreamError, encode
 import vm
+from qemu_launch import parent_bound
 from image_vm import retained_outputs, validate_base
 from vm_process import CATCHABLE_SIGNALS, Cancellation, run
 
@@ -2810,7 +2811,7 @@ def guard_settle_calls(hooks, clock, deadline):
 def qemu_child():
     """A ready stand-in named like QEMU, started through the production wrapper."""
     with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
-            vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
+            parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
         assert child.stdout.readline() == b"ready\n"
         try:
@@ -3046,7 +3047,7 @@ def test_settle_raises_every_qemu_thread_and_later_threads_inherit_it() -> None:
     # Linux nice is per thread: the stand-in starts a thread before the settle and one after it.
     real_get, real_set = os.getpriority, os.setpriority
     with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
-            vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
+            parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
         assert child.stdout.readline() == b"ready\n"
         tids = {int(name) for name in os.listdir(f"/proc/{child.pid}/task")}
@@ -3193,7 +3194,7 @@ def test_settle_converges_on_threads_created_during_the_raise() -> None:
         gone, after it has cloned the grandchild at nice 5 when one is named.
         """
         with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
-                vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
+                parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
             assert child.stdout.readline() == b"ready\n"
             nice = {child.pid: initial} | {10**7 + n: initial for n in range(workers)}

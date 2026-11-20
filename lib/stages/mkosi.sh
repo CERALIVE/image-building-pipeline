@@ -53,7 +53,7 @@ select_build_mode() {
 ensure_builder_image() {
   local runtime="$1"
   [[ "${MKOSI_BUILDER_IMAGE_OVERRIDDEN}" == "1" ]] && return 0
-  if "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
+  if container_engine "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
     return 0
   fi
   [[ -z "${CERALIVE_SEALED_INPUTS:-}" ]] || die "sealed input capsule lacks the pinned mkosi builder image"
@@ -327,13 +327,14 @@ mkosi_invoke() {
     env_cli_str+=" --environment ${n}"
   done
 
-  local -a cache_host_args=()
+  local -a cache_host_args=() engine_access=(--allow-privileged)
   mapfile -t cache_host_args < <(apt_proxy_container_host_args)
   if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
     # This is the disposable guest's network namespace, with no external NIC.
     cache_host_args+=(--network host)
+    engine_access+=(--allow-host-network)
   fi
-  "${runtime}" run --rm --privileged \
+  container_engine "${runtime}" "${engine_access[@]}" run --rm --cpus=4 --memory=16g --privileged \
     "${cache_host_args[@]}" \
     "${env_flags[@]}" \
     -e "CERALIVE_SEALED_INPUTS=${CERALIVE_SEALED_INPUTS:-}" \

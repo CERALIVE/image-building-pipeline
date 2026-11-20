@@ -302,8 +302,11 @@ main() {
 
   local work
   work="$(mktemp -d)"
-  # shellcheck disable=SC2064  # expand $work now: the trap must survive the local going out of scope
-  trap "${runtime} run --rm -v '${work}/src:/src' '${KERNEL_BUILDER_IMAGE_TAG}' bash -c 'find /src -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'; rm -rf '${work}'" EXIT
+  # EXIT can run after these locals are out of scope.
+  KERNEL_CLEANUP_DIR="${work}"
+  KERNEL_CLEANUP_CMD=(container_engine "${runtime}" run --rm --cpus=1 --memory=1g
+    -v "${work}/src:/src" "${KERNEL_BUILDER_IMAGE_TAG}" bash -c 'find /src -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +')
+  trap '"${KERNEL_CLEANUP_CMD[@]}"; rm -rf -- "${KERNEL_CLEANUP_DIR}"' EXIT
   install -d -m 0755 "${work}/out" "${work}/src" "${out_dir}"
 
   ccache_dir="${ccache_dir:-${PIPELINE_DIR}/${CERALIVE_REL_KERNEL_CCACHE_DIR}}"
@@ -517,7 +520,7 @@ main() {
   # The whole pinned-input dance runs INSIDE the container so the git, make and
   # toolchain versions are the pinned ones end to end — a host-side clone would
   # reintroduce exactly the host dependence the container exists to remove.
-  local -a container_args=(--rm \
+  local -a container_args=(--rm --cpus=4 --memory=16g \
     -e "KERNEL_GIT_URL=${git_url}" \
     -e "KERNEL_TAG=${tag}" \
     -e "KERNEL_COMMIT=${commit}" \
@@ -551,21 +554,21 @@ main() {
   )
   # Resolve the source epoch before cache lookup. Keep this clone for the build,
   # so a cold miss does not fetch the kernel twice.
-  "${runtime}" run "${container_args[@]}" -e KERNEL_EPOCH_ONLY=1 \
+  container_engine "${runtime}" run "${container_args[@]}" -e KERNEL_EPOCH_ONLY=1 \
     "${KERNEL_BUILDER_IMAGE_TAG}" bash -euo pipefail -c "${container_script}" \
     || die "cannot derive epoch from the pinned kernel clone"
   epoch="$(<"${work}/out/kernel-epoch")"
   [[ "${epoch}" =~ ^[0-9]+$ ]] || die "invalid pinned kernel epoch"
-  builder_packages="$("${runtime}" run --rm "${KERNEL_BUILDER_IMAGE_TAG}" \
+  builder_packages="$(container_engine "${runtime}" run --rm --cpus=1 --memory=1g "${KERNEL_BUILDER_IMAGE_TAG}" \
     dpkg-query -W -f '${Package}=${Version} ${Architecture}\n' | LC_ALL=C sort)" \
     || die "cannot resolve kernel builder package closure"
   [[ -n "${builder_packages}" ]] || die "empty kernel builder package closure"
-  builder_compiler="$("${runtime}" run --rm "${KERNEL_BUILDER_IMAGE_TAG}" aarch64-linux-gnu-gcc --version)" \
+  builder_compiler="$(container_engine "${runtime}" run --rm --cpus=1 --memory=1g "${KERNEL_BUILDER_IMAGE_TAG}" aarch64-linux-gnu-gcc --version)" \
     || die "cannot resolve kernel builder compiler identity"
   [[ -n "${builder_compiler}" ]] || die "empty kernel builder compiler identity"
   input_fingerprint="$(kernel_input_fingerprint)"
   if [[ "${cache_mode}" == 'auto' ]]; then
-    builder_digest="$("${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
+    builder_digest="$(container_engine "${runtime}" image inspect --format '{{.Id}}' "${KERNEL_BUILDER_IMAGE_TAG}")" \
       || die "cannot inspect kernel builder image identity"
     [[ -n "${builder_digest}" ]] || die "kernel builder image has no identity"
     cache_key="$(kernel_artifact_cache_key)"
@@ -575,7 +578,7 @@ main() {
       return 0
     fi
   fi
-  "${runtime}" run "${container_args[@]}" "${KERNEL_BUILDER_IMAGE_TAG}" \
+  container_engine "${runtime}" run "${container_args[@]}" "${KERNEL_BUILDER_IMAGE_TAG}" \
     bash -euo pipefail -c "${container_script}" \
     || die "kernel build failed for board '${board}' (see the container log above)"
 

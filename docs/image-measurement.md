@@ -31,7 +31,10 @@ inventory, trust policy and digest-named metadata. An approved older source
 bundle still supplies the build, but the base supplies the mirror.
 The existing SHA-verified cloud image and create-only publication remain in
 use. This **trusted preparation** has networking for public tools; it installs
-no Actions runner. The image base is 128 GiB virtual, at most 32 GiB allocated,
+no Actions runner. Do not start Docker Desktop for preparation. `build-base`
+uses no host Docker command or socket; cloud-init installs and starts the
+system Docker Engine **inside the guest**. See [host container policy](host-support.md#local-container-engine).
+The image base is 128 GiB virtual, at most 32 GiB allocated,
 and must be selected by its independently approved SHA-256. Kernel bases are
 not resized or reused. `image` checks the base's digest, read-only permissions,
 format, virtual size and absence of backing/data files before starting QEMU.

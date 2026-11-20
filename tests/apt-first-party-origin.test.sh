@@ -21,8 +21,8 @@ set -o errtrace
 trap 'bad "fixture command failed at line $LINENO: $BASH_COMMAND"; exit 1' ERR
 if [[ "${1:-}" != --in-container ]]; then
   command -v docker >/dev/null || { printf 'real APT or Docker is required for the origin policy test\n' >&2; exit 1; }
-  docker image inspect debian:trixie-slim >/dev/null || { printf 'offline Debian trixie image missing\n' >&2; exit 1; }
-  exec docker run --rm --network none -e CERALIVE_APT_FIXTURE_CONTAINER=1 -v "${ROOT}:${ROOT}:ro" debian:trixie-slim bash "${ROOT}/tests/apt-first-party-origin.test.sh" --in-container
+  python3 "${ROOT}/ci/container-engine.py" docker image inspect debian:trixie-slim >/dev/null || { printf 'offline Debian trixie image missing\n' >&2; exit 1; }
+  exec python3 "${ROOT}/ci/container-engine.py" docker run --rm --cpus=1 --memory=1g --network none -e CERALIVE_APT_FIXTURE_CONTAINER=1 -v "${ROOT}:${ROOT}:ro" debian:trixie-slim bash "${ROOT}/tests/apt-first-party-origin.test.sh" --in-container
 fi
 [[ "${CERALIVE_APT_FIXTURE_CONTAINER:-}" == 1 ]] || { printf 'APT fixture must run in disposable offline container\n' >&2; exit 1; }
 

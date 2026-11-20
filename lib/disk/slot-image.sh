@@ -85,7 +85,7 @@ make_slot_image() {
     else printf 'rootfs tree is unreadable and no container runtime is available\n' >&2; return 1; fi
     image="${MKOSI_BUILDER_IMAGE:-debian:trixie-slim}"
     img_dir="$(dirname "${out}")"; img_base="$(basename "${out}")"
-    "${runtime}" run --rm \
+    container_engine "${runtime}" run --rm --cpus=2 --memory=4g \
       -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
       -e "E2FSPROGS_FAKE_TIME=${SOURCE_DATE_EPOCH:-0}" \
       -e "FS_UUID=${uuid}" -e "FS_SEED=${seed}" -e "FS_LABEL=${label}" \
