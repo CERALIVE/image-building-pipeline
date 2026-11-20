@@ -23,8 +23,9 @@ the workstation to validate this implementation. PR CI owns that gate.
 
 Prepare an independent base with `build-base --profile image --base FILE`.
 Use a new path and record the new SHA-256 for owner approval before use. The
-base installs `sealed-inputs.py`, `image_urls.py`, `fetch-debs-auth.sh` and
-`fetch/index.sh` under `/usr/local/lib/ceralive-kernel-runner`. The mirror uses
+base installs the managed mirror's five files under
+`/usr/local/lib/ceralive-kernel-runner`: `sealed-inputs.py`, `image_urls.py`,
+`vm_process.py`, `fetch-debs-auth.sh` and `fetch/index.sh`. The mirror uses
 the provisioned Python, Bash, GnuPG and system utilities with the capsule's
 inventory, trust policy and digest-named metadata. An approved older source
 bundle still supplies the build, but the base supplies the mirror.
@@ -659,11 +660,14 @@ The guest and verifier reset `SIGCHLD` to its default disposition at startup.
 The shared gate waiter rejects an ignored `SIGCHLD`, `ECHILD`, or a cached
 return code that it did not observe itself. This covers QEMU and disk tools,
 the guest build and mirror, filesystem and mount checks, and transport
-downloads and validators. Shell gates retain their own checked child waits
-for the tools they call, including resize and reserve checks and public
-trust verification with OpenSSL and gpgv. The host tooling checks the actual
-exit of the shell gate. The image wrapper’s serial marker and poweroff
-request are best effort. Their status does not authorize artifact acceptance.
+downloads and validators. The runner checks the observed exit status of each
+shell gate. Public-root, signed-metadata and slot-reserve validation reject
+failed OpenSSL, gpgv and filesystem metadata checks, respectively. The
+inherited `lib/parity-check.sh` absence checks can pass when `find` or
+`grep` encounters an unreadable entry. The preceding slot comparison on
+the same mount refuses unreadable entries. The image wrapper’s serial marker
+and poweroff request are best effort. Their status does not authorize artifact
+acceptance.
 
 Send a single TERM, INT or HUP to the launcher to cancel the attempt. The
 idle I/O loop checks for cancellation at least once per second. The launcher

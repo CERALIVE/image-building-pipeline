@@ -795,13 +795,30 @@ runpy.run_path(str(script), run_name="__main__")
         assemble_image_payload(root)
         library = root / "usr/local/lib/ceralive-kernel-runner"
         script, address = library / "sealed-inputs.py", root / "mirror-port"
+        argv = [sys.executable, "-B", "-I", "-S", "-c", child, str(script), str(address)]
+        def mirror_env(objects: pathlib.Path) -> dict[str, str]:
+            return {"PATH": os.environ["PATH"], "HOME": temporary, "LANG": "C.UTF-8",
+                    "CERALIVE_SEALED_INPUTS": str(objects), "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}
+
+        # The entry point imports the Python helpers and sources both shell validators.
+        dependencies = ("sealed-inputs.py", "image_urls.py", "vm_process.py", "fetch-debs-auth.sh", "fetch/index.sh")
+        for name in dependencies:
+            installed = library / name
+            omitted = installed.with_suffix(".omitted")
+            installed.rename(omitted)
+            try:
+                with bootstrap_fixture() as objects:
+                    result = subprocess.run([*argv, "hit"], cwd=root,
+                                            env=mirror_env(objects),
+                                            input=b"S", capture_output=True, timeout=5)
+                assert result.returncode == 1 and b"CERALIVE_SEALED_MIRROR_READY" not in result.stdout, (
+                    name, result.returncode, result.stdout, result.stderr)
+            finally:
+                omitted.rename(installed)
         for mode in ("hit", "miss", "short", "short-source", "marker-error", "foreign-term", "stop-retry"):
             healthy = mode in ("hit", "stop-retry")
             with bootstrap_fixture() as objects, subprocess.Popen(
-                [sys.executable, "-B", "-I", "-S", "-c", child, str(script), str(address), mode],
-                cwd=root, env={"PATH": os.environ["PATH"], "HOME": temporary, "LANG": "C.UTF-8",
-                               "CERALIVE_SEALED_INPUTS": str(objects),
-                               "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
+                [*argv, mode], cwd=root, env=mirror_env(objects),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             ) as mirror:
                 try:
