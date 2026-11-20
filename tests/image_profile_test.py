@@ -2758,7 +2758,8 @@ def qemu_standin(directory: pathlib.Path) -> pathlib.Path:
 
 
 def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_error=None,
-                  policy=os.SCHED_OTHER, comm=None, cost=None, guest=None, interval=None, exit_code=None):
+                  policy=os.SCHED_OTHER, comm=None, cost=None, guest=None, interval=None, exit_code=None,
+                  failures=None):
     """Sample a stand-in through the production wrapper with a modelled unprivileged nice.
 
     Time moves only by the settle's pauses and by each verification sample's cost.
@@ -2770,6 +2771,9 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
             stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
         assert child.stdout.readline() == b"ready\n"
         assert pathlib.Path(f"/proc/{child.pid}/comm").read_text() == "qemu-system-x86\n"
+        # The real helper thread inherits the host's or a daemon's nice; pin it so only the modelled leader varies.
+        for tid in (int(name) for name in os.listdir(f"/proc/{child.pid}/task") if int(name) != child.pid):
+            os.setpriority(os.PRIO_PROCESS, tid, max(os.getpriority(os.PRIO_PROCESS, tid), image_resources.QEMU_NICE))
         now = [0.0]
         costs = list(cost or ())
         state = {"nice": initial, "reads": 0, "writes": [], "write_times": [], "pauses": [], "undo": undo}
@@ -2826,9 +2830,14 @@ def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_e
 
         verify = image_resources.process_priority
 
+        samples = count(1)
+
         def timed(pid, cancellation, **options):
             assert not options
             now[0] += costs.pop(0) if costs else 0.0
+            failure = (failures or {}).get(next(samples))
+            if failure is not None:
+                raise failure
             return verify(pid, cancellation)
 
         options = {"settle": image_resources.Settle(exited, guest_deadline=guest, clock=lambda: now[0], pause=pause)
@@ -2875,14 +2884,10 @@ def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> N
         error, state, _ = settle_sample(nice, policy=policy)
         assert isinstance(error, image_resources.PriorityRefusal) and state["writes"] == [], (error, state)
         assert str(error) == f"image profile needs non-realtime scheduling and nice >= 9 (observed nice {nice}, {name})"
-    error, state, _ = settle_sample(5, policy=OSError(errno.EIO, "fixture policy"))
-    assert isinstance(error, OSError) and error.errno == errno.EIO and state["writes"] == [], (error, state)
-    # One monotonic bound, checked before a sample is accepted.
-    row, _, _ = settle_sample(12, cost=[4.9])
-    assert type(row) is dict and row["nice"] == 12, row
-    for seconds in (5.0, 5.1):
-        error, _, _ = settle_sample(12, cost=[seconds])
-        assert str(error) == f"QEMU priority conformed after {seconds:.3f} s, not within the 5.0 s settle bound", error
+    # An unreadable policy stays inconclusive and refuses at the bound, still without any write.
+    error, state, child = settle_sample(5, policy=OSError(errno.EIO, "fixture policy"))
+    assert type(error) is image_resources.AdmissionError and error.__cause__.errno == errno.EIO, error
+    assert str(error).startswith(f"QEMU PID {child.pid} priority could not be observed") and state["writes"] == []
     # Only QEMU's own name proves the wrapper handed over; empty or unreadable names keep waiting.
     row, _, _ = settle_sample(12, comm=["", PermissionError(errno.EACCES, "fixture"), "sh", "setpriv", "qemu-system-x86\n"])
     assert type(row) is dict and row["nice"] == 12, row
@@ -2955,16 +2960,46 @@ def test_settle_never_outlasts_the_guest_deadline() -> None:
     assert type(error) is image_resources.GuestDeadline, error
 
 
+def test_settle_deadline_precedence_and_confirming_pass() -> None:
+    # The first clean pass starts at 0 s; the confirming second pass costs (completion - 0.1) s.
+    unconfirmed = "priority was not confirmed by a clean pass within 5.0 s"
+    for guest, completed, outcome in (
+            (None, 4.9, "accept"), (None, 5.0, "settle"), (None, 5.1, "settle"), (None, 6.1, "settle"),
+            (1.0, 4.9, "guest"), (5.0, 4.9, "accept"), (5.0, 5.0, "guest"), (5.0, 6.1, "guest"),
+            (6.0, 4.9, "accept"), (6.0, 5.0, "settle"), (6.0, 5.1, "settle"), (6.0, 6.1, "settle")):
+        result, state, _ = settle_sample(12, guest=guest, cost=[0.0, round(completed - 0.1, 9)])
+        if outcome == "accept":
+            assert type(result) is dict and result["nice"] == 12, (guest, completed, result)
+        elif outcome == "guest":
+            assert type(result) is image_resources.GuestDeadline, (guest, completed, result)
+        else:
+            assert type(result) is image_resources.AdmissionError and unconfirmed in str(result), (guest, completed, result)
+        assert state["writes"] == [], state
+    # An observation error after the governing deadline reports that deadline, never the raw error.
+    eio = OSError(errno.EIO, "fixture observation")
+    result, _, _ = settle_sample(12, guest=1.0, cost=[0.0, 1.5], failures={2: eio})
+    assert type(result) is image_resources.GuestDeadline, result
+    result, _, _ = settle_sample(12, cost=[0.0, 5.5], failures={2: eio})
+    assert type(result) is image_resources.AdmissionError and result.__cause__ is eio, result
+    # Before the deadline the same error is inconclusive: two later clean passes confirm.
+    result, _, _ = settle_sample(12, failures={1: eio})
+    assert type(result) is dict and result["nice"] == 12, result
+
+
 def test_settle_converges_on_threads_created_during_the_raise() -> None:
     real_get, real_set, real_list = os.getpriority, os.setpriority, image_resources.list_directory
 
-    def settle(creations, *, workers=0, guest=None, write_cost=0.0):
-        """Model every thread; a not-yet-raised thread clones a worker right after a listing."""
+    def settle(creations, *, workers=0, guest=None, write_cost=0.0, initial=-4, vanish=None):
+        """Model every thread; a not-yet-raised thread clones a worker right after a listing.
+
+        vanish maps a listing number to (worker, grandchild): reading that worker then reports it
+        gone, after it has cloned the grandchild at nice 5 when one is named.
+        """
         with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
                 vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
             assert child.stdout.readline() == b"ready\n"
-            nice = {child.pid: -4} | {10**7 + n: -4 for n in range(workers)}
+            nice = {child.pid: initial} | {10**7 + n: initial for n in range(workers)}
             now, writes, listings = [0.0], [], [0]
             task = pathlib.Path(f"/proc/{child.pid}/task")
 
@@ -2978,6 +3013,12 @@ def test_settle_converges_on_threads_created_during_the_raise() -> None:
                 return names
 
             def get(which, who):
+                if vanish and listings[0] in vanish and who == vanish[listings[0]][0] and who in nice:
+                    worker, grandchild = vanish[listings[0]]
+                    del nice[worker]
+                    if grandchild is not None:
+                        nice[grandchild] = 5
+                    raise ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH))
                 return nice[who] if who in nice else real_get(which, who)
 
             def put(which, who, value):
@@ -2999,19 +3040,29 @@ def test_settle_converges_on_threads_created_during_the_raise() -> None:
                 result = error
             finally:
                 child.stdin.close()
-            return result, nice, writes
+            return result, nice, writes, listings[0]
 
     # A worker cloned between the listing and the first raise, then one per pass for three passes.
     for creations in (1, 3):
-        result, nice, _ = settle(creations)
+        result, nice, _, _ = settle(creations)
         assert type(result) is dict and len(nice) == 1 + creations, (result, nice)
         assert min(nice.values()) >= image_resources.MIN_NICE, nice
     # A process that never stops cloning low workers is never accepted.
-    result, nice, _ = settle(10**6)
+    result, nice, _, _ = settle(10**6)
     assert isinstance(result, image_resources.PriorityRefusal) and "thread" in result.observed, result
     # No priority write after the deadline: the second low thread is left once guest time is gone.
-    result, nice, writes = settle(0, workers=1, guest=1.0, write_cost=1.0)
+    result, nice, writes, _ = settle(0, workers=1, guest=1.0, write_cost=1.0)
     assert type(result) is image_resources.GuestDeadline and writes == [0.0], (result, writes)
+    worker, grandchild = 10**7, 3 * 10**7
+    # A listed worker clones a grandchild at nice 5 and exits: the next listing finds and raises it.
+    result, nice, _, _ = settle(0, workers=1, initial=12, vanish={2: (worker, grandchild)})
+    assert type(result) is dict and worker not in nice and nice[grandchild] == 10, (result, nice)
+    # A thread vanishing in the confirming pass forces two more passes over the new set.
+    result, nice, _, listings = settle(0, workers=1, initial=12, vanish={2: (worker, None)})
+    assert type(result) is dict and listings == 4, (result, listings)
+    # The clean path: one raising pass, then one confirming pass with no write.
+    result, nice, writes, listings = settle(0)
+    assert type(result) is dict and listings == 2 and writes == [0.0], (result, writes, listings)
 
 
 def test_guest_deadline_during_priority_settle_times_out_the_guest() -> None:

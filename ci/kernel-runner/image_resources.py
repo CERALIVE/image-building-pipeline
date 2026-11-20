@@ -243,69 +243,115 @@ def process_priority(pid: int, cancellation: Cancellation, *, settle: Settle | N
 
 
 def _settled_priority(pid: int, cancellation: Cancellation, settle: Settle) -> PriorityObservation:
-    """Check policy before any write; a child exit always wins over a priority error.
+    """Accept only a clean confirming pass; the earlier deadline decides any other end.
 
-    The settle stops at the earlier of PRIORITY_SETTLE_SECONDS from one monotonic start and the
-    guest deadline; it never pauses past or writes after that point. Acceptance needs every
-    thread in a fresh /proc listing at the floor.
+    A child exit always wins. A realtime policy refuses before any write. Observation errors
+    before the governing deadline are inconclusive; at or after it, the deadline's result stands.
     """
     start = settle.clock()
-    bound = start + PRIORITY_SETTLE_SECONDS
-    guest = math.inf if settle.guest_deadline is None else settle.guest_deadline
+    settle_end = start + PRIORITY_SETTLE_SECONDS
+    guest_end = math.inf if settle.guest_deadline is None else settle.guest_deadline
+    guest_first = guest_end <= settle_end
 
     def remaining() -> float:
-        return min(bound, guest) - settle.clock()
+        return min(settle_end, guest_end) - settle.clock()
 
     reason: AdmissionError = _handoff_error(pid)
+    previous: frozenset[int] | None = None
     while True:
         cancellation.check()
         if settle.exited():
             raise _settle_exit(pid)
         if remaining() <= 0:
-            _expire(settle, guest, reason)
-        handed_over, observation = False, None
+            _expire(guest_first, reason)
+        confirmed, observation, found = False, None, None
         try:
             policy = os.sched_getscheduler(pid)
             if policy not in SCHEDULERS:
                 raise PriorityRefusal(os.getpriority(os.PRIO_PROCESS, pid), policy)
-            handed_over = _comm(pid) == QEMU_COMM
-            if handed_over and _raise_threads(pid, remaining):
+            if _comm(pid) != QEMU_COMM:
+                reason, previous = _handoff_error(pid), None
+            else:
+                result = _thread_pass(pid, policy, remaining)
+                found = result.reason
+                reason = found or _unconfirmed_error(pid)
+                unchanged, previous = result.listing == previous, result.listing
                 observation = process_priority(pid, cancellation)
-                lowest = _lowest_thread(pid)
-                if lowest is not None:
-                    raise PriorityRefusal(lowest[1], policy, lowest[0])
+                confirmed = found is None and unchanged
         except PriorityRefusal as error:
             if settle.exited():
                 raise _settle_exit(pid) from error
-            if error.realtime:
+            if error.realtime and remaining() > 0:
                 raise
-            reason, observation = error, None
-        except (OSError, AdmissionError) as error:
+            reason, previous = found or error, None
+        except OSError as error:
             if settle.exited():
                 raise _settle_exit(pid) from error
-            raise
+            reason, previous = found or _unobservable_error(pid, error), None
+        except AdmissionError as error:
+            if settle.exited():
+                raise _settle_exit(pid) from error
+            if remaining() > 0:
+                raise
+            reason = error
         if settle.exited():
             raise _settle_exit(pid)
-        if not handed_over:
-            reason = _handoff_error(pid)
         left = remaining()
         if left <= 0:
-            if observation is not None:
-                reason = AdmissionError(f"QEMU priority conformed after {settle.clock() - start:.3f} s, "
-                                        f"not within the {PRIORITY_SETTLE_SECONDS} s settle bound")
-            _expire(settle, guest, reason)
-        if observation is not None:
+            _expire(guest_first, reason)
+        if confirmed:
             return observation
         settle.pause(min(PRIORITY_SETTLE_INTERVAL, left))
+
+
+@dataclass(frozen=True, slots=True)
+class _ThreadPass:
+    listing: frozenset[int]
+    reason: AdmissionError | None  # None only for a pass with no write, low thread or vanished thread
+
+
+def _thread_pass(pid: int, policy: int, remaining: Callable[[], float]) -> _ThreadPass:
+    """Read every listed thread; raise, never lower, one below the floor; never write after the deadline."""
+    listing = frozenset(int(name) for name in list_directory(Path(f"/proc/{pid}/task")))
+    reason = None
+    for tid in sorted(listing):
+        try:
+            nice = os.getpriority(os.PRIO_PROCESS, tid)
+        except ProcessLookupError:
+            reason = AdmissionError(f"QEMU PID {pid} thread {tid} exited during the priority settle")
+            continue
+        if nice >= MIN_NICE:
+            continue
+        reason = PriorityRefusal(nice, policy, None if tid == pid else tid)
+        if remaining() <= 0:
+            break
+        try:
+            os.setpriority(os.PRIO_PROCESS, tid, QEMU_NICE)
+        except PermissionError as error:
+            # A host renice may land between the read and the write; the next pass decides.
+            reason = AdmissionError(_raise_failure(pid, tid, error))
+        except ProcessLookupError as error:
+            reason = AdmissionError(_raise_failure(pid, tid, error))
+    return _ThreadPass(listing, reason)
 
 
 def _handoff_error(pid: int) -> AdmissionError:
     return AdmissionError(f"QEMU PID {pid} did not hand over from its launch wrapper within {PRIORITY_SETTLE_SECONDS} s")
 
 
-def _expire(settle: Settle, guest: float, reason: AdmissionError) -> None:
-    """The guest's own deadline wins over the settle bound."""
-    if settle.clock() >= guest:
+def _unconfirmed_error(pid: int) -> AdmissionError:
+    return AdmissionError(f"QEMU PID {pid} priority was not confirmed by a clean pass within {PRIORITY_SETTLE_SECONDS} s")
+
+
+def _unobservable_error(pid: int, error: OSError) -> AdmissionError:
+    refusal = AdmissionError(f"QEMU PID {pid} priority could not be observed within {PRIORITY_SETTLE_SECONDS} s: {error}")
+    refusal.__cause__ = error
+    return refusal
+
+
+def _expire(guest_first: bool, reason: AdmissionError) -> None:
+    """The earlier deadline governs: the guest's ends the attempt as a guest timeout."""
+    if guest_first:
         raise GuestDeadline("image guest deadline reached during the priority settle")
     raise reason
 
@@ -320,44 +366,6 @@ def _comm(pid: int) -> str:
         return Path(f"/proc/{pid}/comm").read_text().strip()
     except OSError:
         return ""
-
-
-def _raise_threads(pid: int, remaining: Callable[[], float]) -> bool:
-    """Raise, never lower, each listed thread below the floor; False if the deadline stopped it."""
-    for name in list_directory(Path(f"/proc/{pid}/task")):
-        tid = int(name)
-        try:
-            if os.getpriority(os.PRIO_PROCESS, tid) >= MIN_NICE:
-                continue
-            if remaining() <= 0:
-                return False
-            os.setpriority(os.PRIO_PROCESS, tid, QEMU_NICE)
-        except PermissionError as error:
-            # Another actor reniced it between the read and this write: accept a conformant value.
-            if os.getpriority(os.PRIO_PROCESS, tid) >= MIN_NICE:
-                continue
-            raise AdmissionError(_raise_failure(pid, tid, error)) from error
-        except ProcessLookupError as error:
-            if tid != pid:
-                continue  # A worker thread exited after the listing.
-            raise AdmissionError(_raise_failure(pid, tid, error)) from error
-    return True
-
-
-def _lowest_thread(pid: int) -> tuple[int, int] | None:
-    """Re-list the threads: one created by a not-yet-raised thread inherited its old nice."""
-    lowest = None
-    for name in list_directory(Path(f"/proc/{pid}/task")):
-        tid = int(name)
-        try:
-            nice = os.getpriority(os.PRIO_PROCESS, tid)
-        except ProcessLookupError:
-            if tid == pid:
-                raise
-            continue  # Exited during the pass; the next listing decides.
-        if nice < MIN_NICE and (lowest is None or nice < lowest[1]):
-            lowest = (tid, nice)
-    return lowest
 
 
 def _raise_failure(pid: int, tid: int, error: OSError) -> str:

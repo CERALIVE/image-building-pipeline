@@ -74,35 +74,47 @@ A host daemon can lower the niceness of QEMU's short-lived launch wrapper.
 ananicy-cpp, for example, gives `sh` nice -4, which QEMU inherits at exec.
 The first live sample therefore settles.
 
-The settle stops at the earlier of 5.0 seconds after its start, on a monotonic
-clock, and the guest's own deadline. A sample that completes at or after that
-point does not count, even if it conforms. The launcher never pauses past the
-stop point and never writes a priority after it. When the guest deadline is
-reached first, the attempt ends as a guest timeout, not a priority refusal.
+Two deadlines start from the settle's single monotonic start: the settle
+bound, 5.0 seconds later, and the guest's own deadline. The earlier one
+governs any end without acceptance:
 
-Each settle iteration checks, in order:
+- When the guest deadline is earlier or equal, the attempt ends as a guest
+  timeout.
+- When the settle bound is earlier, the attempt ends as a priority refusal.
+  This holds even when the sample that crossed the bound returns after the
+  guest deadline.
+
+A pass that completes at or after the governing deadline never counts. The
+launcher never pauses past it and never writes a priority after it. An
+observation error such as `EIO` before that deadline is inconclusive and is
+retried. After it, the deadline's result is reported instead of the error.
+
+Each settle pass checks, in order:
 
 1. A child that has exited ends the settle as a guest exit, never as a
    priority error.
-2. A realtime (`SCHED_FIFO`, `SCHED_RR`, `SCHED_DEADLINE`), unknown or
-   unreadable scheduling policy refuses before any priority write.
+2. A realtime (`SCHED_FIFO`, `SCHED_RR`, `SCHED_DEADLINE`) or unknown
+   scheduling policy refuses before any priority write.
 3. The wrapper handoff is proven only when `/proc/<pid>/comm` is
    `qemu-system-x86`, the kernel's 15-byte form of `qemu-system-x86_64`.
-   An empty, unreadable, `sh` or `setpriv` name keeps waiting.
-4. After the handoff, each thread listed in `/proc/<pid>/task` below nice 9
-   is raised to nice 10. Linux niceness is per thread, raising it needs no
-   privilege, and the launcher never lowers it. If that write fails with a
-   permission error, the launcher re-reads the value and accepts it when
-   another actor has already made it conform. Otherwise it refuses with the
-   exact error.
+   The launcher supports x86-64 QEMU only. An empty, unreadable, `sh` or
+   `setpriv` name keeps waiting.
+4. A fresh `/proc/<pid>/task` listing is taken, and every listed thread's
+   nice is read. A thread below nice 9 is raised to nice 10. Linux niceness
+   is per thread, raising it needs no privilege, and the launcher never
+   lowers it.
 5. The leader's nice and policy, the cgroup limits and the I/O class must
-   conform. So must every thread in a fresh listing.
+   conform.
 
-A thread cloned by a thread that was not yet raised inherits that thread's
-old niceness. Any such thread found in the fresh listing makes the sample
-inconclusive, and the next iteration raises it. Acceptance therefore requires
-every thread present at the settle to be at the floor. Threads created later
-inherit the raised niceness of their creating thread.
+A settle is accepted only by a clean confirming pass. In that pass, every
+thread in a fresh listing is at nice 9 or above, the launcher makes no write,
+no listed thread exits, and the listing is the same set as the previous
+pass's. Any write, vanished thread, new thread or changed set forces another
+full pass, until the governing deadline. A thread cloned by a worker that
+then exits therefore appears in the next listing and is raised there. The
+fastest acceptance takes two passes: one that raises, then one that confirms.
+Threads created after acceptance inherit the raised niceness of their
+creating thread.
 
 The periodic samples about every five seconds verify the leader thread only
 and never renice. A priority refusal records the observed nice and scheduling
