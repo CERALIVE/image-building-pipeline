@@ -70,6 +70,72 @@ includes the last complete QEMU observation of `nice`, the I/O class (via `iopri
 `cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
 is refused for the measurement guest.
 
+A host daemon can lower the niceness of QEMU's short-lived launch wrapper.
+ananicy-cpp, for example, gives `sh` nice -4, which QEMU inherits at exec.
+The first live sample therefore settles.
+
+Two deadlines start from the settle's single monotonic start: the settle
+bound, 5.0 seconds later, and the guest's own deadline. The earlier one
+governs any end without acceptance:
+
+- When the guest deadline is earlier or equal, the attempt ends as a guest
+  timeout.
+- When the settle bound is earlier, the attempt ends as a priority refusal.
+  This holds even when the sample that crossed the bound returns after the
+  guest deadline.
+
+The settle loop alone owns every retry. Every individual read and system
+call in a pass goes through one gate that checks the governing deadline
+first. That covers the policy, the name, the task listing, each thread's
+nice, each raise, the leader's nice and policy, each cgroup control file and
+`ioprio_get`. A composite sample is split into these single calls, so a call
+that returns late stops the next one. No call is issued at or after the
+deadline, and none retries or sleeps on its own. The three-attempt retry of
+the periodic samples does not apply here. No reader in the settle turns an
+error into a value. The only exception is an absent control file, which is
+the result being read: an absent `io.bfq.weight`, or a missing required
+control that refuses.
+
+An observation error such as `EIO` before the deadline ends the current pass
+as not clean. After a pause capped by the time left, a fresh pass starts from
+the beginning, and acceptance again needs two complete passes. An error that
+returns at or after the deadline reports the deadline's result. A refusal then
+keeps the error as its cause. A pass that completes at or after the governing
+deadline never counts, and the launcher never pauses past it.
+
+Each settle pass checks, in order:
+
+1. A child that has exited ends the settle as a guest exit, never as a
+   priority error.
+2. A realtime (`SCHED_FIFO`, `SCHED_RR`, `SCHED_DEADLINE`) or unknown
+   scheduling policy refuses before any priority write.
+3. The wrapper handoff is proven only when `/proc/<pid>/comm` is
+   `qemu-system-x86`, the kernel's 15-byte form of `qemu-system-x86_64`.
+   The launcher supports x86-64 QEMU only. A name that is read but is empty,
+   `sh` or `setpriv` keeps waiting. A failed read of the name is an
+   observation error like any other, and a refusal keeps it as its cause.
+4. A fresh `/proc/<pid>/task` listing is taken, and every listed thread's
+   nice is read. A thread below nice 9 is raised to nice 10. Linux niceness
+   is per thread, raising it needs no privilege, and the launcher never
+   lowers it.
+5. The leader's nice and policy, the cgroup limits and the I/O class must
+   conform.
+
+A settle is accepted only by a clean confirming pass. In that pass, every
+thread in a fresh listing is at nice 9 or above, the launcher makes no write,
+no listed thread exits, and the listing is the same set as the previous
+pass's. Any write, vanished thread, new thread or changed set forces another
+full pass, until the governing deadline. A thread cloned by a worker that
+then exits therefore appears in the next listing and is raised there. The
+fastest acceptance takes two passes: one that raises, then one that confirms.
+Threads created after acceptance inherit the raised niceness of their
+creating thread.
+
+The periodic samples about every five seconds verify the leader thread only
+and never renice. A priority refusal records the observed nice and scheduling
+policy, plus the thread when it is not the leader, in its error and as
+`qemu_priority_refusal` in the receipts.
+
 The sampler excludes the cgroup v2 mount root, where these per-cgroup
 controls can be absent. The workload and each non-root ancestor must expose
 `memory.max`, `memory.swap.max`, `cpu.max` and `io.weight`. The workload also
@@ -81,6 +147,8 @@ level. The I/O check applies the same bound independently to `io.weight` and
 override. The override replaces that level's default before taking the
 minimum across the hierarchy. A transient EIO, EINTR or EAGAIN or an
 inconclusive BFQ observation restarts the whole sample within the retry bound.
+During the first sample's priority settle, the same errors end the current
+pass instead, and the settle loop decides the retry.
 
 The host-heavy lock is the existing `/tmp/host-heavy.lock` inode. Do not unlink
 or replace it. If a governing plan lock also applies, acquire host lock first,

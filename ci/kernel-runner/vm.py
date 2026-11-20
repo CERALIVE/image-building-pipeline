@@ -43,6 +43,16 @@ def die_with_parent(parent: int) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+def parent_bound(args: list[str], parent: int) -> list[str]:
+    """Run args under a kernel-enforced SIGKILL on parent death.
+
+    setpriv arms the signal, then the shell refuses if the parent already changed in that race.
+    Both execs keep the same PID, so niceness set on it applies to the final QEMU process.
+    """
+    return ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
+            'test "$PPID" = "$1" || exit 125; shift; exec "$@"', "runner-child", str(parent), *args]
+
+
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
          seed: Path | None = None, source_bundle: Path | None = None,
          disk_fd: int | None = None, image_job=None, image_base: bool = False,
@@ -94,9 +104,7 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         check_spawn_signals(cancellation)
         parent = os.getpid()
         if image_job:
-            # Both execs keep the same PID. Check the race before setpriv armed parent death.
-            args = ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
-                    'test "$PPID" = "$1" || exit 125; shift; exec "$@"', "runner-child", str(parent), *args]
+            args = parent_bound(args, parent)
         process = spawn_gate(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
                                    preexec_fn=None if image_job else partial(die_with_parent, parent),
                                    start_new_session=image_job is not None,
