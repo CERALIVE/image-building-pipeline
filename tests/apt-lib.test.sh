@@ -239,6 +239,104 @@ CERALIVE_BUILD_APT_PROXY='http://evil/;rm' bash -c '
   ' _ "${PIPELINE_DIR}" && fail "runtime remap accepted a malformed cache URL"
 ok "proxy: runtime remap spans the layer via APT_CONFIG, keeps shipped sources, cleans up"
 
+sealed_out="$(
+  APT_SUITE=trixie APT_SUITE_UPDATES=trixie-updates APT_SUITE_SECURITY=trixie-security \
+    CERALIVE_SEALED_APT=1 CERALIVE_BUILD_APT_PROXY=http://127.0.0.1:3142 \
+    CERALIVE_BUILD_APT_SHIPPED_SOURCES="${WORK}/must-not-read.sources" bash -eu -c '
+      log() { :; }
+      source "$1/mkosi/runtime/build-apt-cache.sh"
+      runtime_build_apt_scope
+      cat "${APT_CONFIG}" "${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list"
+    ' _ "${PIPELINE_DIR}"
+)" || fail "sealed runtime could not render its own sources without the shipped sources"
+SEALED_OUT="${sealed_out}" python3 - <<'PY' || fail "sealed runtime admitted the wrong Debian targets"
+import os
+
+output = os.environ["SEALED_OUT"]
+for option in (
+    'Acquire::Languages "none";',
+    'Acquire::http::AllowRedirect "false";',
+    'Acquire::IndexTargets::deb::Packages::CompressionTypes "gz xz";',
+    'APT::Update::Error-Mode "any";',
+):
+    assert option in output, option
+common = {
+    "arch=arm64", "arch-=all", "by-hash=no", "pdiffs=no", "target=Packages",
+    "inrelease-path=InRelease", "signed-by=/usr/share/keyrings/debian-archive-keyring.gpg",
+}
+entries = []
+for line in output.splitlines():
+    if not line.startswith("deb ["):
+        continue
+    opts, tail = line.removeprefix("deb [").split("] ")
+    assert set(opts.split()) == common, opts
+    entries.append(tail)
+assert entries == [
+    f"http://127.0.0.1:3142/HTTPS///deb.debian.org/{archive} {suite} main"
+    for suite, archive in (
+        ("trixie", "debian"),
+        ("trixie-updates", "debian"),
+        ("trixie-security", "debian-security"),
+    )
+]
+PY
+ok "sealed runtime uses only the three binary arm64 main indexes, independently of device sources"
+
+if ! env RELEASE=trixie APT_SUITE=trixie APT_SUITE_UPDATES=trixie-updates \
+    APT_SUITE_SECURITY=trixie-security SHARED_PACKAGES='ca-certificates fixture-runtime' \
+    CERALIVE_SEALED_APT=1 CERALIVE_BUILD_APT_PROXY=http://127.0.0.1:3142 \
+    SRCDIR="${PIPELINE_DIR}/mkosi" bash -eu -c '
+      source <(head -n -1 "$1")
+      calls="$2"
+      runtime_build_apt_prepare_usr() { :; }
+      bootstrap_ca_trust() { echo "sealed runtime entered the live CA path" >&2; exit 90; }
+      apt-get() {
+        [[ -f "${APT_CONFIG:-}" && -f "${CERALIVE_BUILD_APT_DIR}/sources/ceralive-sealed.list" ]] || exit 91
+        printf "%s\n" "$*" >>"${calls}"
+      }
+      export -f apt-get
+      install_runtime_packages
+    ' _ "${runtime_postinst}" "${WORK}/sealed-apt-calls"; then
+  fail "sealed runtime did not reach the scoped package install"
+fi
+[[ "$(<"${WORK}/sealed-apt-calls")" == $'update\ninstall -y --no-install-recommends ca-certificates fixture-runtime' ]] \
+  || fail "sealed runtime added an APT transaction or omitted CA installation"
+ok "sealed runtime applies the policy at its first update, with no separate CA fetch"
+
+(
+  source "${PIPELINE_DIR}/lib/disk/slot-image.sh"
+  export CERALIVE_SEALED_INPUTS="${WORK}"
+  mkdir -p "${WORK}/slot-tree" "${WORK}/slot-bin"
+  tar() { return 1; } # Unreadable tree takes the container path.
+  docker() { fail "called the real engine"; }
+  # Execute only the command body, with an empty PATH and an apt-get tripwire.
+  container_engine() {
+    local assignment
+    while [[ "$1" != bash ]]; do
+      if [[ "$1" == -e ]]; then
+        assignment="$2"
+        export "${assignment?}"
+        shift
+      fi
+      shift
+    done
+    PATH="${WORK}/slot-bin" /bin/bash -c '
+      apt-get() { printf "unexpected apt\n" >&2; exit 77; }
+      '"$5"
+  }
+  output="$(make_slot_image "${WORK}/slot-tree" "${WORK}/slot.img" 2>&1)" \
+    && fail "sealed slot writer accepted a builder missing the filesystem tools"
+  [[ "${output}" == 'FATAL: sealed slot builder lacks mkfs.ext4 or tune2fs' ]] \
+    || fail "sealed slot writer did not refuse before APT: ${output}"
+) || exit 1
+ok "sealed slot writer refuses missing filesystem tools before APT"
+
+if [[ -n "${SEALED_APT_GET:-}" ]]; then
+  python3 "${PIPELINE_DIR}/tests/sealed_apt_acquire_test.py" \
+    || fail "real APT did not honor the sealed acquisition contract"
+  ok "real APT requested only sealed metadata through both transports"
+fi
+
 audit_workflow="${PIPELINE_DIR}/.github/workflows/real-build-audit.yml"
 grep -Fq './dev-cache up' "${audit_workflow}" \
   || fail "real-build audit does not provision its runner's Debian cache"

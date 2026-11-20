@@ -88,11 +88,16 @@ make_slot_image() {
     container_engine "${runtime}" run --rm --cpus=2 --memory=4g \
       -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
       -e "E2FSPROGS_FAKE_TIME=${SOURCE_DATE_EPOCH:-0}" \
+      -e "CERALIVE_SLOT_SEALED=${CERALIVE_SEALED_INPUTS:+1}" \
       -e "FS_UUID=${uuid}" -e "FS_SEED=${seed}" -e "FS_LABEL=${label}" \
       -v "${tree}:/rootfs-tree:ro" -v "${img_dir}:/out" "${image}" \
       bash -euo pipefail -c '
         export DEBIAN_FRONTEND=noninteractive
         if ! command -v mkfs.ext4 >/dev/null 2>&1 || ! command -v tune2fs >/dev/null 2>&1; then
+          if [[ "${CERALIVE_SLOT_SEALED}" == 1 ]]; then
+            echo "FATAL: sealed slot builder lacks mkfs.ext4 or tune2fs" >&2
+            exit 1
+          fi
           apt-get update -qq
           apt-get install -y --no-install-recommends \
             -o Dpkg::Options::=--force-unsafe-io e2fsprogs >/dev/null

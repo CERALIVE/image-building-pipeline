@@ -198,7 +198,7 @@ retry_apt() {
     out="$("$@" 2>&1)"; rc=$?
     printf '%s\n' "${out}"
     [[ "${rc}" -eq 0 && "${out}" != *'Failed to fetch'* ]] && return 0
-    if (( attempt == 1 )) && [[ "${out}" == *'certificate verify failed'* ]]; then
+    if (( attempt == 1 )) && [[ "${CERALIVE_SEALED_APT:-0}" != 1 && "${out}" == *'certificate verify failed'* ]]; then
       diagnose_debian_tls_failure
     fi
     if (( attempt == 1 )) && [[ "${out}" == *'sqv returned an error code'* ]]; then
@@ -218,8 +218,16 @@ install_runtime_packages() {
   local pkgs
   read -r -a pkgs <<<"${SHARED_PACKAGES}"
   log "installing ${#pkgs[@]} runtime package(s) from shared.list: ${pkgs[*]}"
-  bootstrap_ca_trust
-  runtime_debian_apt_install "${pkgs[@]}"
+  if [[ "${CERALIVE_SEALED_APT:-0}" == 1 ]]; then
+    runtime_build_apt_prepare_usr || return 1
+  else
+    bootstrap_ca_trust
+  fi
+  runtime_debian_apt_install "${pkgs[@]}" || return 1
+  if [[ "${CERALIVE_SEALED_APT:-0}" == 1 && ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+    log "FATAL: sealed runtime install produced no CA store"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
