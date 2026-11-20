@@ -19,9 +19,9 @@
 
 # ---------------------------------------------------------------------------
 # select_build_mode — decide HOW mkosi runs and set the global BUILD_MODE to one
-# of: native | docker | podman. Containerized is the CANONICAL default (task 9);
-# native is opt-in (--native / MKOSI_NATIVE=1). For the container path the runtime
-# is auto-detected (docker first, then podman). Logs the chosen plan incl. the
+# of: native | docker. Containerized is the CANONICAL default (task 9);
+# native is opt-in (--native / MKOSI_NATIVE=1). The container path requires
+# system Docker. Logs the chosen plan incl. the
 # pinned mkosi/Python versions, and dies with an ACTIONABLE message (not a stack
 # trace) when the container path has no runtime. Called by both the DRY_RUN plan
 # and the real run_mkosi_build, so the two never diverge.
@@ -35,10 +35,8 @@ select_build_mode() {
 
   if command -v docker >/dev/null 2>&1; then
     BUILD_MODE="docker"
-  elif command -v podman >/dev/null 2>&1; then
-    BUILD_MODE="podman"
   else
-    die "containerized build is the default but no container runtime is installed. Install docker or podman, or re-run with --native (MKOSI_NATIVE=1) to build with host mkosi ${MKOSI_VERSION_PIN} (needs Python ${MKOSI_PYTHON_FLOOR}+)."
+    die "containerized build needs system Docker. Install Docker Engine or Moby, use unix:///var/run/docker.sock, and select DOCKER_CONTEXT=default. Docker Desktop and standalone Podman are refused. Alternatively, use an authorized Linux lab builder or hosted CI, or use --native with host mkosi ${MKOSI_VERSION_PIN} (Python ${MKOSI_PYTHON_FLOOR}+)."
   fi
   log_info "mkosi: containerized build (DEFAULT) — runtime=${BUILD_MODE}, builder ${MKOSI_BUILDER_IMAGE} (pinned: mkosi ${MKOSI_VERSION_PIN}, Python ${MKOSI_PYTHON_FLOOR}+)"
   return 0
@@ -53,7 +51,7 @@ select_build_mode() {
 ensure_builder_image() {
   local runtime="$1"
   [[ "${MKOSI_BUILDER_IMAGE_OVERRIDDEN}" == "1" ]] && return 0
-  if "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
+  if container_engine "${runtime}" image inspect "${MKOSI_BUILDER_IMAGE}" >/dev/null 2>&1; then
     return 0
   fi
   [[ -z "${CERALIVE_SEALED_INPUTS:-}" ]] || die "sealed input capsule lacks the pinned mkosi builder image"
@@ -265,7 +263,7 @@ assert_cache_privilege_domain() {
     return 0
   fi
 
-  die "mkosi cache ${cache_dir} is owned by uid ${owner_uid}, but --native runs mkosi as uid ${builder_uid}: mkosi 26 refuses a foreign-owned cache, then cannot remove it, and the build dies in 'rm: cannot remove …: Permission denied'. Delete it from the domain that owns it first — 'sudo rm -rf ${cache_dir}', or from a throwaway privileged container: ${BUILD_MODE:-docker} run --rm --privileged -v ${PIPELINE_DIR}:/work ${MKOSI_BUILDER_IMAGE} rm -rf -- /work/${CERALIVE_REL_MKOSI_CACHE_ROOT}"
+  die "mkosi cache ${cache_dir} is owned by uid ${owner_uid}, but --native runs mkosi as uid ${builder_uid}: mkosi 26 refuses a foreign-owned cache, then cannot remove it, and the build dies in 'rm: cannot remove …: Permission denied'. Have its owner or an authorized administrator remove that cache directory (rm -rf -- ${cache_dir}) before switching modes."
 }
 
 # ---------------------------------------------------------------------------
@@ -278,7 +276,7 @@ assert_cache_privilege_domain() {
 mkosi_invoke() {
   # Runtime's source mount is mkosi/, so carry the authoritative pin snapshot.
   cp "${PIPELINE_DIR}/manifests/first-party-deb-versions.txt" "${MKOSI_DIR}/runtime/first-party-deb-versions.txt"
-  select_build_mode   # sets BUILD_MODE (native|docker|podman); logs the plan
+  select_build_mode   # sets BUILD_MODE (native|docker); logs the plan
 
   # Same-filesystem workspace. mkosi RENAMES each finished subimage tree out of
   # its workspace into mkosi/build/, and rename(2) cannot cross a device — with
@@ -327,13 +325,14 @@ mkosi_invoke() {
     env_cli_str+=" --environment ${n}"
   done
 
-  local -a cache_host_args=()
+  local -a cache_host_args=() engine_access=(--allow-privileged)
   mapfile -t cache_host_args < <(apt_proxy_container_host_args)
   if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
     # This is the disposable guest's network namespace, with no external NIC.
     cache_host_args+=(--network host)
+    engine_access+=(--allow-host-network)
   fi
-  "${runtime}" run --rm --privileged \
+  container_engine "${runtime}" "${engine_access[@]}" run --rm --cpus=4 --memory=16g --privileged \
     "${cache_host_args[@]}" \
     "${env_flags[@]}" \
     -e "CERALIVE_SEALED_INPUTS=${CERALIVE_SEALED_INPUTS:-}" \

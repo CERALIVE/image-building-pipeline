@@ -178,19 +178,37 @@ runtime_pkg_list_files() {
 # would then reject it on every later containerized run — a permanently cold
 # cache wearing the costume of a fix. The daemon is the defect, so it is refused.
 #
-# podman on Linux is not a VM share and reports a different `info` schema, so the
-# check is scoped to docker.
+# Only system Docker is admitted. The legacy Podman name is bound to the same
+# guard so that frozen builder callers cannot invoke it directly.
 # ---------------------------------------------------------------------------
+container_engine() {
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../ci/container-engine.py" "$@"
+}
+
 assert_container_daemon_supported() {
   local runtime="${1:?assert_container_daemon_supported needs a runtime}" daemon_os
+  if [[ "${runtime}" == "podman" ]]; then
+    podman() { container_engine podman "$@"; }
+  fi
   [[ "${runtime}" == "docker" ]] || return 0
 
-  daemon_os="$("${runtime}" info --format '{{.OperatingSystem}}')" \
-    || die "cannot query the ${runtime} daemon ('${runtime} info' failed). Start it, or point DOCKER_CONTEXT/DOCKER_HOST at a live Linux daemon."
+  daemon_os="$(container_engine "${runtime}" info --format '{{.OperatingSystem}}')" \
+    || die "cannot query the system Docker daemon; select DOCKER_CONTEXT=default and use unix:///var/run/docker.sock."
 
   if [[ "${daemon_os}" == *"Docker Desktop"* ]]; then
     die "containerized build refuses the Docker Desktop daemon (OperatingSystem='${daemon_os}'). Its bind mount is a VM share: root in the container cannot unlink host-root-owned files (mkosi's cache invalidation dies in 'rm: cannot remove …: Permission denied'), and it supports no POSIX ACLs/xattrs (mkosi's 'tar --acls --xattrs' dies in 'acl_set_file_at: Operation not supported'). Select a native Linux daemon — e.g. DOCKER_CONTEXT=default with unix:///var/run/docker.sock — and re-run."
   fi
+
+  # The immutable kernel recipe invokes the selected runtime by name, including
+  # in its EXIT trap. Bind that name only in the admitted builder's shell.
+  docker() {
+    if [[ "${1:-}" == "run" ]]; then
+      shift
+      container_engine docker run --cpus=4 --memory=16g "$@"
+    else
+      container_engine docker "$@"
+    fi
+  }
 
   log_info "container daemon: ${daemon_os} (native bind mounts — real uids, ACLs and xattrs)"
   return 0
@@ -206,10 +224,8 @@ assert_container_daemon_supported() {
 # correctness requirement here rather than a speed knob, and it is set in this
 # one function so a third build site cannot be added without it.
 #
-# podman needs no equivalent switch (buildah parses RUN --mount natively) but it
-# does need a floor: the `cache` mount TYPE landed in buildah 1.24 / podman 4.0.
-# Below that the same Dockerfile fails inside a file the operator did not write,
-# so the floor is asserted here with a message that names the real cause.
+# The Podman version branch remains for legacy callers; it does not grant
+# access to an engine. The container-engine wrapper refuses standalone Podman.
 # ---------------------------------------------------------------------------
 CONTAINER_BUILD_MIN_DOCKER_MAJOR="${CONTAINER_BUILD_MIN_DOCKER_MAJOR:-23}"
 CONTAINER_BUILD_MIN_PODMAN_MAJOR="${CONTAINER_BUILD_MIN_PODMAN_MAJOR:-4}"
@@ -218,7 +234,7 @@ CONTAINER_BUILD_MIN_PODMAN_MAJOR="${CONTAINER_BUILD_MIN_PODMAN_MAJOR:-4}"
 # has a shape this refuses to guess at.
 container_runtime_major() {
   local runtime="${1:?container_runtime_major needs a runtime}" out major
-  out="$("${runtime}" --version 2>/dev/null)" || return 0
+  out="$(container_engine "${runtime}" --version 2>/dev/null)" || return 0
   major="$(printf '%s' "${out}" | sed -n 's/^[^0-9]*\([0-9][0-9]*\)\..*/\1/p' | head -n1)"
   [[ "${major}" =~ ^[0-9]+$ ]] || return 0
   printf '%s' "${major}"
@@ -249,10 +265,10 @@ container_image_build() {
   local runtime="${1:?container_image_build needs a runtime}"; shift
   assert_container_build_cache_mounts "${runtime}"
   if [[ "${runtime}" == "docker" ]]; then
-    DOCKER_BUILDKIT=1 "${runtime}" build "$@"
+    DOCKER_BUILDKIT=1 container_engine "${runtime}" build "$@"
     return
   fi
-  "${runtime}" build "$@"
+  container_engine "${runtime}" build "$@"
 }
 
 # container_build_proxy_args — emit `--build-arg APT_PROXY=<url>` (plus the

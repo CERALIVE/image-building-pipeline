@@ -129,6 +129,10 @@ kernel_test_builder_stub() {
 #!/usr/bin/env python3
 import os, pathlib, shutil, sys
 args = sys.argv[1:]
+if args[:2] == ['context', 'inspect']:
+    sys.exit(print('default|unix:///var/run/docker.sock'))
+assert args[:2] == ['-H', 'unix:///var/run/docker.sock']
+args = args[2:]
 with open(os.environ['KERNEL_TEST_RUNTIME_LOG'], 'a') as log:
     log.write(' '.join(args) + '\n')
 if args[:1] == ['info']:
@@ -136,6 +140,9 @@ if args[:1] == ['info']:
 elif args[:2] == ['image', 'inspect']:
     print('sha256:fixture')
 elif args[:1] == ['run']:
+    assert args[1:3] == ['--cpus=4', '--memory=16g'], args
+    assert os.readlink('/proc/self/fd/0') == '/dev/null'
+    assert os.getsid(0) == os.getpid()
     if 'dpkg-query' in args:
         print('gcc-aarch64-linux-gnu=14.2 arm64')
     elif 'aarch64-linux-gnu-gcc' in args:

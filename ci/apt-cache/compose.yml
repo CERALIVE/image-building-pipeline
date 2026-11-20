@@ -1,6 +1,8 @@
 services:
   apt-cache:
     image: docker.io/sameersbn/apt-cacher-ng@sha256:82f55f9c8f627cee8ef5f710c1745388d79d3a3f2f3150353e6500021bec11b4
+    cpus: 1
+    mem_limit: 512m
     restart: unless-stopped
     ports:
       - "3142:3142"

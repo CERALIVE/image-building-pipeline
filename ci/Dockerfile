@@ -23,9 +23,8 @@
 #              floor. There is no python3.12 package in trixie; 3.13 is the shipped
 #              interpreter and is forward-compatible with the 3.12 requirement.
 #
-# Build (orchestrate.sh does this automatically when the tag is absent):
-#   docker build -t ceralive-mkosi-builder:26 -f ci/Dockerfile ci
-#   podman build -t ceralive-mkosi-builder:26 -f ci/Dockerfile ci
+# Authorized runners build this via lib/common.sh. Workstations use a prebuilt
+# image with MKOSI_BUILDER_IMAGE; see docs/host-support.md#local-container-engine.
 FROM debian:trixie-20260623-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 # mkosi version pin — MUST match .mkosi-version (26).

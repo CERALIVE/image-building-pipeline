@@ -28,6 +28,8 @@ mkdir -p "${work}/bin" "${work}/out" "${work}/content"
 # ---------------------------------------------------------------------------
 cat >"${work}/bin/docker" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$1" == context ]]; then echo 'default|unix:///var/run/docker.sock'; exit; fi
+[[ "$1 $2 $3" == '-H unix:///var/run/docker.sock run' ]] || exit 90
 while [[ "$1" != bash ]]; do
   if [[ "$1" == -e ]]; then export "$2"; shift 2; else shift; fi
 done

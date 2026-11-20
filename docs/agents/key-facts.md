@@ -1104,8 +1104,8 @@ Two guards close it, and both fail loudly:
   daemon whose `OperatingSystem` contains `Docker Desktop`. Called from
   `lib/stages/mkosi.sh::mkosi_invoke` AND
   `lib/kernel/builder.sh::ensure_kernel_builder_image`, so the refusal lands at
-  `[2b/9]`/`[5/9]` instead of after a kernel compile. Scoped to `docker` —
-  podman on Linux is not a VM share and reports a different `info` schema.
+  `[2b/9]`/`[5/9]` instead of after a kernel compile. The launch guard permits
+  only the system Docker socket and also refuses standalone Podman.
 - **`lib/stages/mkosi.sh::assert_cache_privilege_domain <dir> <uid>`** compares
   the cache's owner against the uid mkosi is about to run as. Absent or matching
   → proceed. Container path (uid 0) meeting a user-owned cache → **warn**, since

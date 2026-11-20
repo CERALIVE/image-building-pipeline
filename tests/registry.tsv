@@ -41,6 +41,8 @@ tests/generate-dev-rauc-pki.sh	tool	support	default-fixture	materializes the ign
 tests/image-route.bats	bats	unit	default-bats	offline image profile, bounded transport, sealed authentication and measurement-purpose contracts
 tests/image_route_test.py	tool	unit	invoked-by-suite	artifact framing and capsule contracts driven by image-route.bats
 tests/image_profile_test.py	tool	unit	invoked-by-suite	Python-child launcher and resource admission contracts driven by image-route.bats
+tests/qemu_launch_test.py	tool	unit	invoked-by-suite	headless VM launch and terminal isolation contracts driven by image-route.bats
+tests/container_engine_test.py	tool	unit	invoked-by-suite	system container socket and host isolation contracts driven by image-route.bats
 tests/sealed_inputs_test.py	tool	unit	invoked-by-suite	synthetic signed-index import boundaries driven by image-route.bats
 tests/rootfs_measurement_test.py	tool	unit	invoked-by-suite	shipping-content purpose and raw-assembly split driven by image-route.bats
 tests/parity_noexec_test.py	tool	unit	invoked-by-suite	noexec X_OK syscall-denial parity regression driven by image-route.bats

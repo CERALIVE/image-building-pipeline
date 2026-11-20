@@ -123,8 +123,12 @@ flock --exclusive --close "$KERNEL_HEAVY_LOCK" \
 
 Run these commands under the workstation's shared exclusive heavy-suite lock.
 The base uses SHA-verified Ubuntu noble/20261017 and runner 2.338.2; cloud-init
-installs Docker and CI/build dependencies, disables SSH and console logins,
+installs guest-local Docker Engine and CI/build dependencies, disables SSH and console logins,
 then powers off. Job output uses journal+console, not a shared login terminal.
+Base preparation never calls a host Docker engine or starts Docker Desktop.
+QEMU starts in a new session without a window or TTY; redirect launcher output
+to a regular log to retain base/check serial diagnostics. JIT guest output
+is never relayed.
 The host alone requests a single-use JIT configuration. It reaches the guest
 through an anonymous RAM fd/QEMU firmware configuration; no registration
 credential is written to a host file or printed. The guest starts `run.sh

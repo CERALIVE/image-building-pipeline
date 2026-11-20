@@ -31,7 +31,7 @@ matching bench report and immutable publication authorization.
 |---|---|---|
 | mkosi | ≥ 26 (native builds only; container build needs none of this host-side) | `mkosi --version` → `mkosi 26` on this host |
 | Python | ≥ 3.12 (native build host requirement) | this host runs 3.14.6 |
-| Container runtime | Docker or Podman — the container build is canonical | `docker --version` → 29.7.2; `podman --version` → 6.0.2, both present |
+| Container runtime | [System Docker Engine](docs/host-support.md#local-container-engine) at `unix:///var/run/docker.sock`; Docker Desktop and standalone Podman are refused | Canonical CI path |
 | curl | ≥ 7.71.0 **on the build host**, including container mode | hosted Ubuntu 22.04 provides 7.81.0; see [host curl prerequisite](docs/host-support.md#build-host-curl-prerequisite) |
 | Disk | ~24 GiB free workspace + Docker root for the production-runner contract; a dev box needs headroom for the mkosi cache + `.staging/` + output `.raw`/`.raucb` per board | see `df -h` in the full prerequisites walkthrough below |
 | ccache | recommended for unpublished local kernel-from-source builds | `which ccache` → `/usr/bin/ccache` present on this host |
@@ -43,7 +43,7 @@ This table is the quick-reference; the full, step-by-step, executed walkthrough
 [`docs/DEVICE-BRINGUP.md`](docs/DEVICE-BRINGUP.md) §1-4. **The container build
 is canonical** — most of the table above (mkosi/Python versions) matters only
 if you opt into `--native`; container-mode fetches still need host curl ≥ 7.71.0
-alongside Docker or Podman.
+alongside system Docker. Workstations use prebuilt builder images.
 
 ## Supported Devices
 
@@ -1005,15 +1005,12 @@ Two things make that work and are easy to undo by accident, so both are pinned b
 `RUN --mount` needs BuildKit, and the legacy `docker build` builder does not
 ignore the flag — it refuses to parse the Dockerfile. So `lib/common.sh`'s
 `container_image_build` is the one entry point both builder-image build sites go
-through: it sets `DOCKER_BUILDKIT=1` for docker, needs no switch for podman, and
-refuses a runtime below the floor where cache mounts exist (docker 23, podman 4)
-with a message naming the real cause.
+through on authorized builders: it sets `DOCKER_BUILDKIT=1` and requires Docker
+23 or newer when building an image with cache mounts.
 
-> **Measuring this yourself:** `docker build --no-cache` is the wrong tool. It
-> resets the cache mounts as well as the layer cache, so the second build looks
-> exactly like the first and the cache appears not to work. Prune only the layer
-> cache — `docker builder prune -af --filter=type=regular` — and the apt layer
-> re-executes against a warm mount.
+> **Measuring cache reuse:** On a disposable authorized builder, invalidate only
+> the layer cache, not the cache mounts, so the apt layer re-executes against a
+> warm mount. For workstation use, see the [system engine policy](docs/host-support.md#local-container-engine).
 
 ### Persistent kernel-source mirror
 
@@ -1061,8 +1058,8 @@ mkosi/cache/<board>/native
 ```
 
 Both live under the same per-board root CI saves and restores, so nothing about
-the release cache changes. `MKOSI_NATIVE` alone selects the domain — docker and
-podman both run mkosi as uid 0 and are one domain, not two. The existing
+the release cache changes. `MKOSI_NATIVE` alone selects the domain; the
+container path runs mkosi as uid 0. The existing
 ownership assertion stays, because separate leaves make a collision unlikely but
 not impossible (a `sudo ./build --native` still owns the native leaf as root).
 

@@ -28,11 +28,12 @@ sudo meson install -C "${work}/build"
 getent passwd ceralive-ota >/dev/null || sudo useradd --system --no-create-home --shell /usr/sbin/nologin ceralive-ota
 sudo busctl call --system org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
 source manifests/target-release.env
-docker pull "debian:${RELEASE}"
-docker pull "debian:${RELEASE}-slim"
-container="$(docker create --network none "debian:${RELEASE}")"
-trap 'docker rm "${container}"; rm -rf -- "${work}"' EXIT
-docker export "${container}" >"${RUNNER_TEMP}/kernel-stage-rootfs.tar"
+engine() { python3 "${ROOT}/ci/container-engine.py" docker "$@"; }
+engine pull "debian:${RELEASE}"
+engine pull "debian:${RELEASE}-slim"
+container="$(engine create --cpus=1 --memory=1g --network none "debian:${RELEASE}")"
+trap 'engine rm "${container}"; rm -rf -- "${work}"' EXIT
+engine export "${container}" >"${RUNNER_TEMP}/kernel-stage-rootfs.tar"
 export CERALIVE_KERNEL_STAGE_ROOTFS="${RUNNER_TEMP}/kernel-stage-rootfs.tar"
 CERALIVE_RUN_REAL_AVAHI_CONTRACT=required \
   CERALIVE_RUN_REAL_RAUC_CONTRACT=required \

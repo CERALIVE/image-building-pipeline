@@ -20,9 +20,10 @@ import time
 
 import yaml
 from image_lifecycle import job_disk, report_error, sync_directory, unlink_observed
+from qemu_launch import spawn_qemu
 from vm_process import (
-    CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals, child_environment,
-    child_pipes, poll_owned, read_check_script, run, spawn_gate, terminate, wait,
+    CHILD_CWD, STOP_SIGNALS, Cancellation, check_spawn_signals,
+    child_pipes, poll_owned, read_check_script, run, terminate, wait,
 )
 from vm_startup import STARTUP_ERROR, StartupError, sanitize_startup
 
@@ -43,16 +44,6 @@ def die_with_parent(parent: int) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
-def parent_bound(args: list[str], parent: int) -> list[str]:
-    """Run args under a kernel-enforced SIGKILL on parent death.
-
-    setpriv arms the signal, then the shell refuses if the parent already changed in that race.
-    Both execs keep the same PID, so niceness set on it applies to the final QEMU process.
-    """
-    return ["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "/bin/sh", "-c",
-            'test "$PPID" = "$1" || exit 125; shift; exec "$@"', "runner-child", str(parent), *args]
-
-
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
          seed: Path | None = None, source_bundle: Path | None = None,
          disk_fd: int | None = None, image_job=None, image_base: bool = False,
@@ -65,10 +56,9 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         os.write(fd, payload)
         os.lseek(fd, 0, os.SEEK_SET)
         args = [
-            "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
+            "-enable-kvm", "-machine", "q35", "-cpu", "host",
             "-smp", "4" if image_job or image_base else "16",
-            "-m", "20480" if image_job or image_base else "16384", "-display", "none", "-monitor", "none",
-            "-serial", f"file:/proc/self/fd/{image_job.console_write}" if image_job else "stdio",
+            "-m", "20480" if image_job or image_base else "16384",
             "-no-reboot",
             "-device", "virtio-blk-pci,drive=system,bootindex=1",
             "-fw_cfg", f"name=opt/ceralive/{kind},file=/proc/self/fd/{fd}",
@@ -102,24 +92,18 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         if any(private_fd < 3 for private_fd in descriptors):
             raise RuntimeError("guest descriptor aliases a standard stream")
         check_spawn_signals(cancellation)
-        parent = os.getpid()
-        if image_job:
-            args = parent_bound(args, parent)
-        process = spawn_gate(args, pass_fds=descriptors, env=child_environment(), cwd=CHILD_CWD,
-                                   preexec_fn=None if image_job else partial(die_with_parent, parent),
-                                   start_new_session=image_job is not None,
-                                   stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE,
-                                   stderr=(subprocess.DEVNULL if image_job and image_job.probe else
-                                           subprocess.PIPE if image_job else subprocess.STDOUT),
-                                   restore_signals=True)
+        process = spawn_qemu(args, serial=image_job.console_write if image_job else 1,
+                             pass_fds=descriptors, cwd=CHILD_CWD,
+                             preexec_fn=None if image_job else partial(die_with_parent, os.getpid()),
+                             stderr=(subprocess.DEVNULL if image_job and image_job.probe else
+                                     subprocess.PIPE if image_job else subprocess.STDOUT))
         with child_pipes(process):
             lines: list[bytes] = []
 
             def console() -> None:
                 for line in process.stdout:
                     lines.append(line)
-                    if kind != "jit":
+                    if kind != "jit" and not sys.stdout.isatty():
                         sys.stdout.buffer.write(line)
                         sys.stdout.buffer.flush()
 

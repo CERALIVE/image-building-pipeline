@@ -45,7 +45,7 @@ emit_artifact() {
   else
     log_info "rootfs is root-owned — tarring inside the builder container"
     local runtime="docker"; command -v docker >/dev/null 2>&1 || runtime="podman"
-    "${runtime}" run --rm \
+    container_engine "${runtime}" run --rm --cpus=2 --memory=2g \
       -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-0}" \
       -v "${MKOSI_DIR}:/work" -v "$(dirname "${artifact}")":/out \
       "${MKOSI_BUILDER_IMAGE}" \

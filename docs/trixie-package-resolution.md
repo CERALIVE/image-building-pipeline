@@ -15,11 +15,19 @@ Every name was resolved against a **real Debian trixie `arm64` package index**,
 not from memory and not from `packages.debian.org` prose:
 
 ```bash
-docker run -d --platform linux/arm64 debian:trixie-slim sleep 3600
-# main + contrib + non-free + non-free-firmware all enabled
-apt-cache policy <pkg>          # per-package candidate + Architecture
-apt-get install --dry-run …     # the WHOLE list, as one transaction
+export DOCKER_CONTEXT=default
+engine() { python3 ci/container-engine.py docker "$@"; }
+pkg=libv4l-0
+engine run --rm --platform linux/arm64 --cpus=2 --memory=2g debian:trixie-slim \
+  bash -ec 'sed -i "s/^Components: main$/Components: main contrib non-free non-free-firmware/" \
+    /etc/apt/sources.list.d/debian.sources
+    apt-get update && apt-cache policy "$@" && apt-get install --dry-run "$@"' bash "$pkg"
+# Pass the whole package list as arguments to the final bash invocation for the transaction check.
 ```
+
+Use the [system Docker socket](host-support.md#local-container-engine) only.
+Redirect to a log to retain output at a terminal. This does not open a shell
+or leave a detached container running after resolution.
 
 `arm64` matters: it is the architecture the shipped RK3588 image is built for, and
 an `amd64`-only check would have reported `Architecture: all` packages

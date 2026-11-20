@@ -28,15 +28,16 @@ context="${DOCKER_CONTEXT:-}"
   || die "production candidate requires DOCKER_CONTEXT=default (got ${context:-<unset>})"
 
 command -v docker >/dev/null 2>&1 || die 'docker is not installed'
-endpoint="$(docker context inspect default --format '{{.Endpoints.docker.Host}}')"
+engine() { python3 "$(dirname "${BASH_SOURCE[0]}")/container-engine.py" docker "$@"; }
+endpoint="$(engine context inspect default --format '{{.Endpoints.docker.Host}}')"
 [[ "${endpoint}" == unix:///var/run/docker.sock ]] \
   || die "default Docker context must use unix:///var/run/docker.sock (got ${endpoint})"
 
-daemon_os="$(docker info --format '{{.OperatingSystem}}')"
+daemon_os="$(engine info --format '{{.OperatingSystem}}')"
 [[ "${daemon_os}" != *'Docker Desktop'* ]] \
   || die "Docker Desktop is not allowed for the production candidate (daemon_os=${daemon_os})"
 
-daemon_memory_bytes="$(docker info --format '{{.MemTotal}}')"
+daemon_memory_bytes="$(engine info --format '{{.MemTotal}}')"
 require_integer 'Docker daemon memory' "${daemon_memory_bytes}"
 (( daemon_memory_bytes >= MIN_DAEMON_MEMORY_BYTES )) \
   || die "Docker daemon memory budget is below 16 GiB (bytes=${daemon_memory_bytes})"
@@ -53,7 +54,7 @@ host_headroom_kib=$((mem_available_kib + swap_free_kib))
   || die "host memory+swap headroom is below 16 GiB (available_kib=${mem_available_kib} swap_free_kib=${swap_free_kib})"
 
 workspace="${GITHUB_WORKSPACE:-$(pwd)}"
-docker_root="$(docker info --format '{{.DockerRootDir}}')"
+docker_root="$(engine info --format '{{.DockerRootDir}}')"
 [[ -n "${docker_root}" ]] || die 'Docker root directory is empty'
 workspace_free_kib="$(free_kib "${workspace}")"
 docker_root_free_kib="$(free_kib "${docker_root}")"

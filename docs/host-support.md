@@ -63,7 +63,7 @@ network-denial/return/cancellation probe and board builds remain unrun.
 |---|---|---|---|---|
 | **Ubuntu/Debian (CI)** | ✅ Fully supported | container *(or native)* | by parity¹ | Canonical CI builder. |
 | **Arch Linux** | ✅ Fully supported | container *(or native)* | ✅ yes | The host this spike ran on. |
-| **Fedora/RHEL** | ✅ Supported, SELinux caveat | container *(Podman or Docker)* | no | Needs SELinux volume labels. |
+| **Fedora/RHEL** | ⚠️ Documented, not CI-verified | container via system Docker | no | Use a lab host or hosted CI if SELinux blocks the build. |
 | **macOS Apple Silicon** | ❌ Refused (Docker Desktop) | — | no (no macOS in env) | arm64 is native and the loop limit is moot, but the VM file share carries neither real uids nor ACLs/xattrs — the build refuses the daemon. |
 | **WSL2** | ⚠️ Container-only, caveated | container *(native possible)* | no (no Windows in env) | binfmt/WSLInterop collision needs handling. |
 
@@ -121,6 +121,59 @@ contract to address a pathname-length error. Disk-heavy tests can retain their
 disk-backed scratch directory; the Avahi fixture contains no board images.
 
 ## Docker Desktop is refused — the bind mount cannot carry a rootfs
+
+### Local container engine
+
+Host-side repo tooling uses `python3 ci/container-engine.py docker …` on Linux.
+Select `DOCKER_CONTEXT=default` for the command; the wrapper checks the selected
+context and pins `-H unix:///var/run/docker.sock`. It refuses Desktop, alternate
+sockets, remote daemons and standalone Podman rather than changing any context
+or starting an engine. The system daemon must already be running.
+
+Container creation requires positive `--cpus` and `--memory` limits; `start` and
+`exec` require an existing container with both. The CLI gets `/dev/null` as
+stdin and starts in a new session without the desktop environment. Do not use
+`-t`, `-i`, or stdin attachment even in automation. Redirect to a log to keep
+output when running from a terminal.
+
+The only host-access opt-ins go **before** `run`, `create`, `start` or `exec`:
+`--allow-privileged`, `--allow-host-devices` (including `/dev` binds),
+`--allow-host-namespaces` (PID/IPC), and `--allow-host-network`. The existing
+mkosi build opts into privileged operation for its nested image assembly; it
+opts into host networking only for the sealed mirror inside the disposable
+guest. These flags do not waive resource or terminal rules. Prefer a disposable
+guest to a privileged build on a workstation.
+
+Developer shells cannot start BuildKit image creation, even with redirected
+input. Use prebuilt builder images. The disposable runner guest retains its
+own BuildKit path under the VM limits. On the host, a GitHub-hosted job for
+this repository or a protected self-hosted audit or release job may build a
+missing builder image only when it has no controlling TTY, no TTY on standard
+streams, and neither `DISPLAY` nor `WAYLAND_DISPLAY` set. `GITHUB_ACTIONS=true`
+by itself is not sufficient. The workflow-restricted runner group remains
+the authorization boundary; the environment checks are not authentication.
+
+A qualifying runner job on the owner's workstation may use only the native
+system socket and default Docker driver. Buildx 0.35+ and daemon BuildKit
+0.31+ are required for per-`RUN` limits of 4 CPUs and 16 GiB RAM with no
+additional swap. These limit build steps, not all daemon activity. The CLI
+runs detached with null stdin; the BuildKit path accepts no alternate builder,
+insecure entitlements, privileged flags, device or `/dev` mounts. The separate,
+existing privileged mkosi assembly opt-in does not apply to cold image builds.
+Guest-only daemon commands baked into the approved base stay inside that VM.
+Existing inline workflow commands in `kernel-release.yml`,
+`real-build-audit.yml`, `release-candidate-build.yml`, and `v2-ci.yml` under
+`.github/workflows/` are outside the local wrapper and unchanged.
+
+Do not start Docker Desktop or its VM for base preparation. The repository's
+base command only starts QEMU; `provision.sh` starts the system Docker Engine
+inside that Ubuntu guest. On Linux the Desktop application can open a graphical
+window. The `docker-desktop.service` user unit can start its VM separately
+through `/opt/docker-desktop/bin/com.docker.backend`. The preparation
+receipt does not show a Desktop launch or establish who started its VM, what
+display/console options it had, or whether it displayed anything. The separate
+reported Debian login incident involved the system daemon, not the Desktop socket;
+the container's starter has not been identified.
 
 `lib/common.sh::assert_container_daemon_supported` reads the daemon's reported
 `OperatingSystem` and **dies** when it contains `Docker Desktop`. Both the mkosi
@@ -184,9 +237,9 @@ per checkout.
 
 ## Persistent Debian APT cache on build hosts
 
-Install Docker Compose on a Linux build runner, then run `./dev-cache up` from
-this checkout (or `docker compose -f ci/apt-cache/compose.yml up -d --wait` in
-runner provisioning). The image is pinned by OCI digest and stores downloaded
+Install the Compose plugin on an authorized Linux build runner, then run
+`DOCKER_CONTEXT=default ./dev-cache up` from this checkout. It uses the guarded
+system socket during runner provisioning as well. The image is pinned by OCI digest and stores downloaded
 packages in the `apt-cache` named volume; `./dev-cache down` stops the service
 without deleting the volume. `./dev-cache status` reports the listener and report
 page. On an always-on runner the Compose service's `restart: unless-stopped`
@@ -383,7 +436,7 @@ trixie builder; the host only provides the container runtime + kernel.
 
 | Requirement | Minimum | Why |
 |---|---|---|
-| Docker **or** Podman | Docker ≥ 20.10 / Podman ≥ 4.0 | runs the builder `--privileged` |
+| System Docker Engine | Docker 23+ for builder-image creation on authorized runners | runs the builder `--privileged` |
 | Kernel | any maintained 5.x+ | overlayfs + binfmt_misc |
 | `qemu-user-static` + `binfmt-support` | distro current | arm64 emulation (host-side, **F-flag**) |
 
@@ -408,7 +461,7 @@ unprivileged.
 **Exact requirements**
 
 ```bash
-sudo pacman -S docker            # or: podman
+sudo pacman -S docker
 # arm64 binfmt with the F-flag (one of):
 sudo pacman -S qemu-user-static qemu-user-static-binfmt   # extra/community
 sudo systemctl restart systemd-binfmt        # register the handlers
@@ -422,35 +475,17 @@ handler registered *without* F will not fire inside the build container.
 
 ---
 
-### Fedora/RHEL — ✅ supported, SELinux caveat
+### Fedora/RHEL
 
-Linux-native; the same trixie builder runs under Podman (Fedora default) or
-Docker. Not live-tested in this environment, but it is the same kernel-feature
-surface as Arch/Ubuntu.
+Install system Docker Engine or your distro's Moby packages where authorized.
+Use its system socket at `unix:///var/run/docker.sock`, select
+`DOCKER_CONTEXT=default`, and provision prebuilt builder images. Docker Desktop,
+standalone/rootless Podman, and its Docker CLI shim are not supported. For arm64
+builds, confirm `qemu-aarch64` is registered with the binfmt `F` flag.
 
-**Exact requirements**
-
-```bash
-sudo dnf install -y qemu-user-static podman   # qemu-user-static pulls binfmt
-systemctl restart systemd-binfmt
-```
-
-**Caveat — SELinux relabels the bind mount.** The build bind-mounts the repo
-into the container (`-v ${PIPELINE_DIR}:/work`). Under enforcing SELinux, Podman/Docker
-must be told to relabel or the container gets `Permission denied` on `/work`.
-
-*Workaround* (pick one):
-
-```bash
-# A) Podman handles this automatically for its own mounts, but the orchestrator
-#    passes a plain -v. If you hit denials, run the builder by hand with :z, or:
-sudo setsebool -P container_use_devices on        # for the --privileged devices
-# B) last resort for a throwaway dev box:
-#    add --security-opt label=disable to the run (edit run_mkosi_build locally).
-```
-
-Rootless Podman additionally needs `newuidmap`/`newgidmap` (the `shadow-utils`
-package) for the user-namespace mapping.
+This setup is not CI-verified on Fedora/RHEL. If system Docker is unavailable or
+SELinux denies the checkout bind mount, build on an authorized Linux lab host
+or use hosted CI rather than bypassing the launch guard or disabling SELinux.
 
 ---
 
@@ -468,7 +503,7 @@ package) for the user-namespace mapping.
 
 Docker Desktop runs containers inside a Linux VM (Virtualization.Framework /
 LinuxKit). There is **no native build path** — macOS is not Linux, so
-`--native` mkosi is impossible. Use the container build only.
+`--native` mkosi is impossible. Use an authorized Linux builder instead.
 
 **What's actually fine**
 
@@ -493,38 +528,23 @@ partitioned loop mount — today none do): scan + `mknod` the partition nodes by
 hand, or run `losetup` in a throwaway side-container; see
 `task-16-host-spikes.txt` references. **Not required for the current pipeline.**
 
-**Required versions / settings**
-
-| Requirement | Setting |
-|---|---|
-| Docker Desktop | ≥ 4.x with **VirtioFS** file sharing enabled (Settings → General) |
-| File sharing | the checkout's parent dir must be in Docker Desktop's shared paths |
-| Resources | ≥ 4 GB RAM / ≥ 20 GB disk to the VM (rootfs build + 8–16 GB image) |
-| Runtime | Docker (Podman Machine on macOS works the same, same caveats) |
-
-```bash
-# macOS Apple Silicon — container build (native arm64, no qemu):
-./build rock-5b-plus
-# If /work is denied: add the repo's parent to Docker Desktop shared folders.
-```
-
 **Bottom line:** refused. The target arch being native and assembly being
 loop-free are both true and both beside the point — the blocker is the VM file
 share, which cannot represent the root-owned, ACL/xattr-bearing Debian rootfs
 that mkosi builds. An M-series Mac needs a real Linux VM with a genuine
-filesystem (or a remote Linux daemon), not Docker Desktop's share.
+filesystem. Run the build on that Linux host, not against a remote Docker socket.
 
 ---
 
-### WSL2 — ⚠️ container-only (native possible), caveated
+### WSL2
 
 > **Not validated in this environment** (no Windows/WSL2 host reachable).
 > Derived from the WSL2 kernel feature set + the loop-free proof.
 
 WSL2 runs a **real Microsoft-built Linux kernel**, so it is much closer to a
-native Linux host than macOS is. You can run the container build (Docker Desktop
-WSL2 backend, or docker/podman inside a WSL distro) and, on a Debian/Ubuntu
-trixie WSL distro with mkosi ≥ 26, even the `--native` path.
+native Linux host than macOS is. For a container build use system Docker
+installed inside the WSL distro, not the Docker Desktop backend or Podman.
+The `--native` path requires a distro with mkosi ≥ 26.
 
 **What's fine**
 
@@ -558,17 +578,13 @@ sudo apt-get install -y qemu-user-static binfmt-support
 grep flags /proc/sys/fs/binfmt_misc/qemu-aarch64   # confirm 'F' after restart
 ```
 
-If you build on **Docker Desktop's WSL2 backend**, Docker Desktop ships its own
-multi-arch binfmt (`tonistiigi/binfmt`) and usually registers `qemu-aarch64`
-with F for you — verify with the `grep` above before a long build.
-
 **Required versions / settings**
 
 | Requirement | Setting |
 |---|---|
 | WSL | WSL 2 (`wsl --set-default-version 2`); kernel ≥ 5.15 |
 | Distro | for `--native`: Debian/Ubuntu **trixie+** with mkosi ≥ 26, Python ≥ 3.12 |
-| Runtime | Docker Desktop (WSL2 backend) or docker/podman inside the distro |
+| Runtime | System Docker inside the distro, using `unix:///var/run/docker.sock` and prebuilt builder images |
 | binfmt | `qemu-user-static` **with F flag**, surviving `systemd-binfmt` (above) |
 
 ```bash
@@ -590,7 +606,8 @@ essence is:
 
 ```bash
 # 1) Does the assembly run loop-free in an UNPRIVILEGED container? (the key test)
-docker run --rm -v "$PWD":/repo:ro debian:trixie-slim bash -euo pipefail -c '
+DOCKER_CONTEXT=default python3 ci/container-engine.py docker run --rm \
+  --cpus=2 --memory=2g -v "$PWD":/repo:ro debian:trixie-slim bash -euo pipefail -c '
   apt-get update -qq && apt-get install -y --no-install-recommends \
     systemd-repart e2fsprogs dosfstools mtools gdisk coreutils >/dev/null
   cp -r /repo/v2 /tmp/v2

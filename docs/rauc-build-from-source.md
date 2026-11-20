@@ -79,14 +79,13 @@ anything fetched.
 ### Container platform handling
 
 Unlike the kernel builder (one native-host container + a cross-compilation
-toolchain), the RAUC builder is run under `docker run/build --platform` per
+toolchain), the guarded RAUC builder passes `--platform` per
 target architecture — native on an amd64 host for `amd64`, qemu-emulated
 (binfmt, the SAME emulation `ci/Dockerfile`'s own mkosi container build already
 depends on for arm64) for `arm64`. The builder image TAG is platform-qualified
 (`ceralive-rauc-builder-linux-<arch>:<hash>`) — a single shared tag across two
-platform-different image contents was found, empirically, to make
-`docker run --platform linux/arm64` silently try to pull a nonexistent
-registry image once an amd64-only image already existed under that tag.
+platform-different image contents made the arm64 launch try to pull a
+nonexistent registry image once an amd64-only image existed under that tag.
 
 ### Test-suite handling
 

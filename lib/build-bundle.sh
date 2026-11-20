@@ -94,7 +94,7 @@ bundle_with_rauc() {
     # mount here fails every containerized build ("Read-only file system") —
     # not a signing/security boundary, since ${content} is this function's own
     # ephemeral mktemp scratch dir, discarded by build-bundle()'s RETURN trap.
-    "${runtime}" run --rm \
+    container_engine "${runtime}" run --rm --cpus=4 --memory=4g \
       -e "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
       -e "RAUC_BUNDLE_MKSQUASHFS_ARGS=${RAUC_BUNDLE_MKSQUASHFS_ARGS:-}" \
       -v "${content}:/bundle" -v "${out_dir}:/out" \

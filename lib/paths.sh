@@ -92,7 +92,7 @@ ceralive_rel_board_mkosi_cache_dir() {
 # Giving each domain its own cache leaf means neither can invalidate the other,
 # and each keeps a warm cache of its own.
 #
-# The discriminator is MKOSI_NATIVE and nothing else: docker and podman both run
+# The discriminator is MKOSI_NATIVE and nothing else: system Docker runs
 # mkosi as uid 0 in a privileged container, so they are one domain, not two.
 # ceralive_assert_cleanup_allowed is unaffected — both leaves live under the
 # already-allowlisted cache root.

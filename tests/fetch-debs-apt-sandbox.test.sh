@@ -153,19 +153,13 @@ fi
 # Part B — real apt, real UID 0, in a container. Never skipped.
 # ---------------------------------------------------------------------------
 
-RUNTIME=""
-for candidate in docker podman; do
-	if command -v "${candidate}" >/dev/null 2>&1; then
-		RUNTIME="${candidate}"
-		break
-	fi
-done
-[[ -n "${RUNTIME}" ]] \
-	|| abort "no container runtime (docker/podman) — the real-UID-0 apt sandbox leg cannot be skipped"
+command -v docker >/dev/null 2>&1 \
+	|| abort "system Docker is required for the real-UID-0 apt sandbox leg"
+engine() { python3 "${PIPELINE_DIR}/ci/container-engine.py" docker "$@"; }
 [[ -x "${HARNESS}" ]] || abort "container harness missing or not executable: ${HARNESS}"
 
-if ! "${RUNTIME}" image inspect "${CONTAINER_IMAGE}" >/dev/null 2>&1; then
-	"${RUNTIME}" pull "${CONTAINER_IMAGE}" >/dev/null \
+if ! engine image inspect "${CONTAINER_IMAGE}" >/dev/null 2>&1; then
+	engine pull "${CONTAINER_IMAGE}" >/dev/null \
 		|| abort "cannot obtain container image ${CONTAINER_IMAGE} for the real-UID-0 apt sandbox leg"
 fi
 
@@ -245,13 +239,13 @@ cp -a "${REPO_ROOT}/versions.yaml" "${CTX}/repo/"
 
 run_leg() {
 	local leg="$1" cid rc=0
-	cid="$("${RUNTIME}" create --network=none "${CONTAINER_IMAGE}" \
+	cid="$(engine create --cpus=1 --memory=1g --network=none "${CONTAINER_IMAGE}" \
 		"${HARNESS_IN_CONTAINER}" "${leg}" "$(id -u):$(id -g)")"
-	"${RUNTIME}" cp "${CTX}/repo" "${cid}:/repo" >/dev/null
-	"${RUNTIME}" cp "${FIXTURE}" "${cid}:/fx" >/dev/null
-	"${RUNTIME}" start -a "${cid}" || rc=$?
-	"${RUNTIME}" cp "${cid}:/work/${leg}" "${RUN_DIR}/work/" >/dev/null || rc=9
-	"${RUNTIME}" rm -f "${cid}" >/dev/null
+	engine cp "${CTX}/repo" "${cid}:/repo" >/dev/null
+	engine cp "${FIXTURE}" "${cid}:/fx" >/dev/null
+	engine start -a "${cid}" || rc=$?
+	engine cp "${cid}:/work/${leg}" "${RUN_DIR}/work/" >/dev/null || rc=9
+	engine rm -f "${cid}" >/dev/null
 	return "${rc}"
 }
 

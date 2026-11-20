@@ -62,7 +62,12 @@ run_guard() {
 stub_docker() {
   local dir="$1" body="$2"
   mkdir -p "${dir}"
-  { printf '#!/usr/bin/env bash\n'; printf '%s\n' "${body}"; } >"${dir}/docker"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '%s\n' 'if [[ "$1" == context ]]; then echo "default|unix:///var/run/docker.sock"; exit; fi'
+    printf '%s\n' '[[ "$1 $2 $3" == "-H unix:///var/run/docker.sock info" ]] || exit 90'
+    printf '%s\n' "${body}"
+  } >"${dir}/docker"
   chmod +x "${dir}/docker"
 }
 
