@@ -784,6 +784,38 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
     depth = 100_000
     nested = b"[" * depth + json.dumps(marker).encode() + b"]" * depth
     loads = json.loads
+    command_failure = failure | {"failure": "CalledProcessError", "exit": 1}
+    wrong_identity = Identity("other-attempt", IDENTITY.board, IDENTITY.commit, IDENTITY.epoch, IDENTITY.input_sha256)
+    process_cases = (
+        ("command exit 1", command_failure, IDENTITY, True),
+        ("command exit 2", command_failure | {"exit": 2}, IDENTITY, True),
+        ("command exit 255", command_failure | {"exit": 255}, IDENTITY, True),
+        ("command with code", report | command_failure, IDENTITY, True),
+        ("command bool exit", command_failure | {"exit": True}, IDENTITY, False),
+        ("command string exit", command_failure | {"exit": "1"}, IDENTITY, False),
+        ("command guest text exit", command_failure | {"exit": marker}, IDENTITY, False),
+        ("command float exit", command_failure | {"exit": 1.0}, IDENTITY, False),
+        ("command null exit", command_failure | {"exit": None}, IDENTITY, False),
+        ("command zero exit", command_failure | {"exit": 0}, IDENTITY, False),
+        ("command negative exit", command_failure | {"exit": -1}, IDENTITY, False),
+        ("command exit 256", command_failure | {"exit": 256}, IDENTITY, False),
+        ("command huge exit", command_failure | {"exit": 10**50}, IDENTITY, False),
+        ("command extra field", command_failure | {"output": marker}, IDENTITY, False),
+        ("command unknown code", (report | command_failure) | {"failure_code": marker}, IDENTITY, False),
+        ("command wrong frame identity", command_failure, wrong_identity, False),
+        ("command wrong record identity", command_failure | {"identity": asdict(wrong_identity)}, IDENTITY, False),
+        ("command unknown failure kind", command_failure | {"failure": marker}, IDENTITY, False),
+        ("command non-string failure kind", command_failure | {"failure": [marker]}, IDENTITY, False),
+        ("command unknown failure kind with null exit", failure | {"failure": marker}, IDENTITY, False),
+        ("command non-string failure kind with null exit", failure | {"failure": [marker]}, IDENTITY, False),
+        ("command timeout", failure | {"failure": "TimeoutExpired"}, IDENTITY, True),
+        ("command timeout with exit", command_failure | {"failure": "TimeoutExpired"}, IDENTITY, False),
+        ("command timeout with code", report | {"failure": "TimeoutExpired"}, IDENTITY, False),
+        ("guest I/O error", failure | {"failure": "FileNotFoundError"}, IDENTITY, True),
+        ("command I/O error with code", report | {"failure": "FileNotFoundError"}, IDENTITY, False),
+        ("guest value error", failure | {"failure": "JSONDecodeError"}, IDENTITY, True),
+        ("guest missing field", failure | {"failure": "KeyError"}, IDENTITY, True),
+    )
     for case, code, data, frame_identity, suffix, expected in (
         ("nonzero", 1, json.dumps(report).encode(), IDENTITY, b"", report),
         ("zero", 0, json.dumps(report | {"observed_config_digest": None}).encode(), IDENTITY, b"",
@@ -803,6 +835,8 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
          Identity("other-attempt", IDENTITY.board, IDENTITY.commit, IDENTITY.epoch, IDENTITY.input_sha256), b"", None),
         ("trailing data", 1, json.dumps(report).encode(), IDENTITY, marker.encode(), None),
         ("empty", 1, None, IDENTITY, b"", None),
+        *((case, code, json.dumps(row).encode(), identity, b"", row if valid else None)
+          for code in (0, 1) for case, row, identity, valid in process_cases),
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -814,7 +848,10 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
             base.touch()
             with wire.open("wb") as frame:
                 if data is not None:
-                    encode(frame, [("failure.json", data)], frame_identity)
+                    records = [("failure.json", data)]
+                    if case.startswith("command "):
+                        records.append(("build.log", marker.encode()))
+                    encode(frame, records, frame_identity)
                 frame.write(suffix)
             request = {"capsule": capsule, "base_sha256": "c" * 64,
                        "retained_bytes": 0, "deadline": time.monotonic() + 10, "payload": {
@@ -868,9 +905,16 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
             if expected is not None:
                 assert artifact.is_file(), (case, "validated diagnostic missing")
                 assert exact_json(json.loads(artifact.read_text()), expected), case
+                assert {path.name for path in artifact.parent.iterdir()} == {"failure.json"}, case
                 assert outcome["stop_reason"] == "StreamError", case
-                expected_message = ("guest builder check failed: builder_config_digest_mismatch"
-                                    if "failure_code" in expected else "guest reported a failure")
+                match expected["failure"]:
+                    case "CalledProcessError":
+                        expected_message = f"guest build command failed (exit {expected['exit']})"
+                    case "TimeoutExpired":
+                        expected_message = "guest command timed out"
+                    case _:
+                        expected_message = ("guest builder check failed: builder_config_digest_mismatch"
+                                            if "failure_code" in expected else "guest reported a failure")
                 assert messages == [expected_message], (case, messages)
             else:
                 assert not artifact.exists(), (case, "unvalidated diagnostics published")
@@ -883,6 +927,10 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
                 elif case == "nested JSON on zero exit":
                     assert messages in (["returned artifact set is incomplete"],
                                         ["invalid guest failure diagnostics"]), (case, messages)
+                elif case.startswith("command "):
+                    error = ("terminal manifest identity or inventory mismatch" if frame_identity != IDENTITY
+                             else "invalid guest failure diagnostics")
+                    assert messages == [error], (case, messages)
 
 
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:

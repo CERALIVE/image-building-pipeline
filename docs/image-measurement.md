@@ -317,17 +317,25 @@ local Docker export. It does not compare Docker's inspect `Id`, which may
 identify a manifest instead. After reaping QEMU, the host validates a returned
 failure frame against the same identity, digest, and size checks as a successful
 frame, regardless of QEMU's exit status. It writes only the validated failure
-record to `artifacts/failure.json`, including an allowlisted `failure_code` and
-the expected and observed config digests (observed may be `null`). It does not
-report raw engine output or accept the failed measurement. A JSON parse failure,
-including a parser depth limit, reports `returned artifact set is incomplete`
+record to `artifacts/failure.json`, never the guest build log. A
+`CalledProcessError` must carry an integer exit status from 1 to 255 and
+reports `guest build command failed (exit N)`. `TimeoutExpired` carries a null
+exit and reports `guest command timed out`; `StreamError` and other allowlisted
+guest I/O or input errors also carry a null exit. A `StreamError` or
+`CalledProcessError` may include a fixed `failure_code` with both expected and
+observed config digests (observed may be `null`). These are diagnostics only:
+the host does not report raw engine output or accept the failed measurement.
+
+A JSON parse failure, including a parser depth limit, reports
+`returned artifact set is incomplete`
 on zero QEMU exit. If the parser accepts a deeply nested array, the host
 rejects the non-object as `invalid guest failure diagnostics` on zero exit.
 On nonzero exit, both cases keep `image guest exited (N)`. Neither case
-publishes the receipt or echoes guest text or parser details. Cancellation and
-timeouts still propagate.
-This verifier is baked into the guest, so applying a change to it requires a
-rebuilt base and a new owner-approved base digest.
+publishes the receipt or echoes guest text or parser details. Host cancellation
+and host timeouts still propagate.
+
+Changes to the baked guest verifier require a rebuilt base and a new
+owner-approved digest. Host-only failure receipt validation does not.
 
 Both RAUC architectures and the mkosi builder must be present. Missing
 builders fail instead of starting a Docker build. Include the complete solved
