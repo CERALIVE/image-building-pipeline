@@ -7,6 +7,7 @@ launcher refusals, not from the scan.
 """
 
 import ast
+import fcntl
 import json
 import os
 from collections.abc import Iterator
@@ -16,6 +17,7 @@ import re
 import shlex
 import subprocess
 import sys
+import termios
 import tempfile
 from unittest import TestCase, main
 import yaml
@@ -26,6 +28,12 @@ SOCKET = "unix:///var/run/docker.sock"
 SESSION = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
            "DBUS_SESSION_BUS_ADDRESS", "SSH_TTY")
 CAPS = ("--cpus", "2", "--memory=1g")
+ACTION_REPO = "CERALIVE/image-building-pipeline"
+AUDIT_JOB = {
+    "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted", "GITHUB_REPOSITORY": ACTION_REPO,
+    "GITHUB_WORKFLOW_REF": f"{ACTION_REPO}/.github/workflows/real-build-audit.yml@refs/heads/master",
+    "GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/master", "DOCKER_CONTEXT": "default",
+}
 ENGINES = {"docker", "podman", "docker-compose", "podman-compose", "podman-docker", "nerdctl", "buildx"}
 VERBS = {"run", "exec", "create", "start", "build", "buildx", "compose", "up", "down", "restart",
          "pull", "push", "load", "save", "image", "container", "info", "ps", "inspect", "logs",
@@ -215,9 +223,20 @@ import json, os, sys
 args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as log:
     log.write(json.dumps(dict(argv=args, stdin=os.readlink('/proc/self/fd/0'),
-                              session=os.getsid(0) == os.getpid(), env=list(os.environ))) + '\\n')
+                              session=os.getsid(0) == os.getpid(), env=list(os.environ),
+                              buildkit=os.environ.get('DOCKER_BUILDKIT'))) + '\\n')
 if args[:2] == ['context', 'inspect']:
     print(os.environ['FAKE_CONTEXT'] + '|' + os.environ['FAKE_ENDPOINT'])
+elif args == ['--version']:
+    print('Docker version 29.7.2')
+elif args[2:3] == ['info']:
+    print(os.environ.get('FAKE_DAEMON_OS', 'Debian GNU/Linux'))
+elif args[2:5] == ['buildx', 'inspect', 'default']:
+    print('Driver:', os.environ.get('FAKE_BUILDX_DRIVER', 'docker'))
+    print('Endpoint:', os.environ.get('FAKE_BUILDX_ENDPOINT', 'default'))
+    print('BuildKit version:', os.environ.get('FAKE_BUILDKIT_VERSION', 'v0.32.2'))
+elif args[2:4] == ['image', 'inspect'] and os.environ.get('FAKE_COLD_CACHE') == '1':
+    sys.exit(1)
 elif args[2:4] == ['container', 'inspect']:
     print(json.dumps([dict(Id='a' * 64, Config=dict(Tty=False, OpenStdin=False), Mounts=[],
                            HostConfig=dict(NanoCpus=int(os.environ['FAKE_NANO_CPUS']),
@@ -333,6 +352,123 @@ elif args[2:4] == ['container', 'inspect']:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("use a prebuilt builder image", result.stderr)
         self.assertEqual([row["argv"][:2] for row in self.calls()], [["context", "inspect"]])
+
+    def test_protected_actions_jobs_build_cold_mkosi_and_rauc_images(self) -> None:
+        release_job = {**AUDIT_JOB, "GITHUB_REF": "refs/tags/v2026.11.3", "GITHUB_EVENT_NAME": "push",
+                       "GITHUB_TRIGGERING_ACTOR": "andrescera",
+                       "GITHUB_WORKFLOW_REF": f"{ACTION_REPO}/.github/workflows/release.yml@refs/tags/v2026.11.3"}
+        for job, kind, platform in ((AUDIT_JOB, "mkosi", None), (AUDIT_JOB, "rauc", "linux/arm64"),
+                                    (release_job, "rauc", "linux/amd64")):
+            with self.subTest(kind=kind, platform=platform):
+                script = """
+case "$2" in
+    mkosi)
+        source "$1/lib/common.sh"
+        source "$1/lib/stages/mkosi.sh"
+        MKOSI_BUILDER_IMAGE_OVERRIDDEN=0 MKOSI_BUILDER_IMAGE=fixture-mkosi
+        MKOSI_BUILDER_DOCKERFILE="$1/ci/Dockerfile"
+        MKOSI_VERSION_PIN=26 MKOSI_PYTHON_FLOOR=3.12
+        ensure_builder_image docker
+        ;;
+    rauc)
+        source "$1/lib/build-rauc.sh"
+        ensure_rauc_builder_image docker fixture-base fixture-rauc "$3"
+        ;;
+esac
+"""
+                result = subprocess.run(["bash", "-c", script, "fixture", str(ROOT), kind, platform or ""],
+                                        env={**self.headless_env(), **job, "FAKE_COLD_CACHE": "1",
+                                             "CERALIVE_APT_PROXY": "http://127.0.0.1:3142" if job == AUDIT_JOB else "off",
+                                             "BUILDX_BUILDER": "unexpected",
+                                             "BUILDKIT_HOST": "tcp://unexpected:1234"},
+                                        stdin=subprocess.DEVNULL, start_new_session=True,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = self.calls()
+                self.assertTrue(any(row["argv"][2:4] == ["image", "inspect"] for row in calls))
+                [build] = [row for row in calls if row["argv"][2:4] == ["buildx", "build"]]
+                expected = ["-H", SOCKET, "buildx", "build", "--builder=default", "--resource=cpu-period=100000",
+                            "--resource=cpu-quota=400000", "--resource=memory=16g", "--resource=memory-swap=16g"]
+                if platform:
+                    expected += ["--platform", platform, "--build-arg", "BASE_IMAGE=fixture-base"]
+                if job == AUDIT_JOB:
+                    expected += ["--add-host", "host.docker.internal:host-gateway",
+                                 "--build-arg", "APT_PROXY=http://host.docker.internal:3142"]
+                expected += ["-t", f"fixture-{kind}", "-f",
+                             str(ROOT / ("ci/Dockerfile.rauc" if platform else "ci/Dockerfile")), str(ROOT / "ci")]
+                self.assertEqual(build["argv"], expected)
+                self.assertEqual(build["buildkit"], "1")
+                self.assertEqual(build["stdin"], "/dev/null")
+                self.assertTrue(build["session"])
+                self.assertFalse(set(SESSION) & set(build["env"]))
+                self.assertFalse({"BUILDX_BUILDER", "BUILDKIT_HOST"} & set(build["env"]))
+                self.log.unlink()
+
+    def headless_env(self) -> dict[str, str]:
+        return {key: value for key, value in self.env.items() if key not in SESSION}
+
+    def test_cold_build_refuses_terminal_desktop_untrusted_job_and_unsafe_options(self) -> None:
+        command = [*WRAPPER, "docker", "build", "-t", "fixture", "."]
+        env = {**self.headless_env(), **AUDIT_JOB}
+        for overrides, options, reason in (
+            ({"DOCKER_HOST": "unix:///home/example/.docker/desktop/docker.sock"}, [], "system Docker socket"),
+            ({"DOCKER_CONTEXT": "desktop-linux"}, [], "system Docker socket"),
+            ({"GITHUB_WORKFLOW_REF": f"{ACTION_REPO}/.github/workflows/v2-ci.yml@refs/pull/300/merge"},
+             [], "use a prebuilt builder image"),
+            ({"GITHUB_ACTIONS": "", "RUNNER_ENVIRONMENT": "github-hosted"}, [], "use a prebuilt builder image"),
+            ({"DISPLAY": ":0"}, [], "headless"),
+            ({"WAYLAND_DISPLAY": "wayland-0"}, [], "headless"),
+            ({"FAKE_CONTEXT": "desktop-linux"}, [], "system Docker socket"),
+            ({}, ["--allow=security.insecure"], "unsupported"),
+            ({}, ["--privileged"], "unsupported"),
+            ({}, ["--device=/dev/kvm"], "unsupported"),
+            ({}, ["-v", "/dev/tty:/dev/tty"], "unsupported"),
+            ({}, ["--resource=memory=0"], "unsupported"),
+            ({}, ["--builder=remote"], "unsupported"),
+            ({}, ["--build-arg", "BUILDKIT_SYNTAX=remote"], "unsupported"),
+        ):
+            with self.subTest(overrides=overrides, options=options):
+                result = subprocess.run([*command[:-1], *options, "."], env={**env, **overrides},
+                                        stdin=subprocess.DEVNULL, start_new_session=True,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+        master, slave = pty.openpty()
+        try:
+            result = subprocess.run(command, env=env, stdin=slave, start_new_session=True,
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("headless", result.stderr)
+
+            def controlling_terminal() -> None:
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+            result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, start_new_session=True,
+                                    pass_fds=(slave,), preexec_fn=controlling_terminal,
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("headless", result.stderr)
+        finally:
+            os.close(slave)
+            os.close(master)
+        self.assertTrue(all(row["argv"][:2] == ["context", "inspect"] for row in self.calls()))
+
+    def test_cold_build_refuses_unbounded_or_nonlocal_builder(self) -> None:
+        env = {**self.headless_env(), **AUDIT_JOB}
+        for overrides, reason in (
+            ({"FAKE_DAEMON_OS": "Docker Desktop"}, "Docker Desktop"),
+            ({"FAKE_BUILDKIT_VERSION": "v0.30.0"}, "resource limits"),
+            ({"FAKE_BUILDX_DRIVER": "docker-container"}, "default Docker driver"),
+            ({"FAKE_BUILDX_ENDPOINT": "tcp://other:2375"}, "default Docker driver"),
+        ):
+            with self.subTest(overrides=overrides):
+                result = subprocess.run([*WRAPPER, "docker", "build", "-t", "fixture",
+                                         "-f", str(ROOT / "ci/Dockerfile"), str(ROOT / "ci")],
+                                        env={**env, **overrides}, stdin=subprocess.DEVNULL,
+                                        start_new_session=True, capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+        self.assertFalse(any(row["argv"][2:4] == ["buildx", "build"] for row in self.calls()))
 
     def test_legacy_builder_inspects_and_launches_through_the_guard(self) -> None:
         script = """

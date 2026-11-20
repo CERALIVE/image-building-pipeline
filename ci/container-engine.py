@@ -2,6 +2,7 @@
 """Run repository container commands against the system Docker socket only."""
 
 import csv
+import errno
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,10 @@ import subprocess
 import sys
 
 SOCKET = "unix:///var/run/docker.sock"
+REPOSITORY = "CERALIVE/image-building-pipeline"
+DISPOSABLE_GUEST = Path("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive")
+BUILD_LIMITS = ("--resource=cpu-period=100000", "--resource=cpu-quota=400000",
+                "--resource=memory=16g", "--resource=memory-swap=16g")
 SESSION = {"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "SSH_TTY"}
 ACCESS = {"--allow-privileged", "--allow-host-devices", "--allow-host-namespaces", "--allow-host-network"}
 VALUE_OPTIONS = {"--cpus", "--memory", "--platform", "--network", "--net", "--pid", "--ipc", "--device",
@@ -97,6 +102,71 @@ def launch_options(args: list[str], access: set[str], command: str) -> int:
     return i
 
 
+def protected_actions_job() -> bool:
+    env = os.environ
+    if env.get("GITHUB_ACTIONS") != "true" or env.get("GITHUB_REPOSITORY") != REPOSITORY:
+        return False
+    runner = env.get("RUNNER_ENVIRONMENT")
+    if runner == "github-hosted":
+        return True
+    if runner != "self-hosted":
+        return False
+    workflow, _, workflow_ref = env.get("GITHUB_WORKFLOW_REF", "").partition("@")
+    event, ref = env.get("GITHUB_EVENT_NAME"), env.get("GITHUB_REF", "")
+    owner = env.get("GITHUB_TRIGGERING_ACTOR") == "andrescera"
+    prefix = f"{REPOSITORY}/.github/workflows"
+    if workflow == f"{prefix}/real-build-audit.yml":
+        return (workflow_ref == ref == "refs/heads/master"
+                and (event == "schedule" or (event == "workflow_dispatch" and owner)))
+    return (event == "push" and owner and ref.startswith(("refs/heads/release/", "refs/tags/v"))
+            and ((workflow == f"{prefix}/release.yml" and workflow_ref == ref)
+                 or (workflow == f"{prefix}/release-candidate-build.yml" and workflow_ref == "refs/heads/master")))
+
+
+def check_headless_build() -> None:
+    if any(os.isatty(fd) for fd in (0, 1, 2)) or any(
+            name in os.environ for name in ("DISPLAY", "WAYLAND_DISPLAY")):
+        raise Refused("CI BuildKit requires a headless job without terminal streams or display variables")
+    try:
+        with open("/dev/tty", "rb"):
+            raise Refused("CI BuildKit requires a headless job without a controlling terminal")
+    except OSError as error:
+        if error.errno != errno.ENXIO:
+            raise
+
+
+def check_build_options(options: list[str]) -> None:
+    """Only accept the local recipe arguments passed by the repository builders."""
+    allowed = {"-t", "--tag", "-f", "--file", "--platform", "--build-arg", "--add-host"}
+    context = Path(__file__).resolve().parent
+    recipe = None
+    i = 0
+    while i < len(options) - 1:
+        flag, equal, value = options[i].partition("=")
+        if flag not in allowed:
+            raise Refused(f"unsupported BuildKit option {flag}")
+        if not equal:
+            i += 1
+            if i >= len(options) - 1:
+                raise Refused(f"missing value for BuildKit option {flag}")
+            value = options[i]
+        if (not value or value.startswith("-")
+                or (flag == "--build-arg" and value.partition("=")[0] not in {"BASE_IMAGE", "APT_PROXY"})
+                or (flag == "--platform" and value not in {"linux/amd64", "linux/arm64"})
+                or (flag == "--add-host" and value != "host.docker.internal:host-gateway")):
+            raise Refused(f"unsupported value for BuildKit option {flag}")
+        if flag in {"-f", "--file"}:
+            if recipe is not None:
+                raise Refused("BuildKit requires exactly one repository builder recipe")
+            recipe = Path(value).resolve()
+        i += 1
+    if not options or Path(options[-1]).resolve() != context or recipe not in {
+            context / "Dockerfile", context / "Dockerfile.rauc", context / "Dockerfile.kernel"}:
+        raise Refused("BuildKit requires a repository builder recipe and the local ci build context")
+    if re.search(r"(?im)^\s*#\s*syntax\s*=", recipe.read_text()):
+        raise Refused("BuildKit requires the bundled Dockerfile frontend for resource limits")
+
+
 def docker_command(args: list[str]) -> int:
     if len(args) < 2 or args[0] != "docker":
         raise Refused("only the system Docker socket is supported; native Podman is not supported")
@@ -160,11 +230,34 @@ def docker_command(args: list[str]) -> int:
         tails = {"up": ["up", "-d", "--wait"], "down": ["down"], "status": ["ps"]}
         command, options = "compose", ["-f", str(project), *tails[options[0]]]
     if command == "build":
-        # BuildKit schedules inside the daemon, not inside the Docker CLI cgroup.
-        if (env.get("RUNNER_ENVIRONMENT") != "github-hosted"
-                and not Path("/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive").is_dir()):
-            raise Refused("local BuildKit has no per-build CPU/memory caps; use a prebuilt builder image")
+        guest = DISPOSABLE_GUEST.is_dir()
+        if not guest:
+            if not protected_actions_job():
+                raise Refused("local BuildKit is not admitted; use a prebuilt builder image")
+            check_headless_build()
+        if access:
+            raise Refused("unsupported host-access opt-in for BuildKit")
+        check_build_options(options)
         env.pop("BUILDX_BUILDER", None)
+        env.pop("BUILDKIT_HOST", None)
+        env.pop("BUILDX_CONFIG", None)
+        env["DOCKER_BUILDKIT"] = "1"
+        # The guest already has VM limits. On CI the daemon, not the client,
+        # must cap RUN steps; never fall back to an uncapped build.
+        if not guest:
+            daemon = subprocess.run([*base, "info", "--format", "{{.OperatingSystem}}"],
+                                    capture_output=True, text=True, timeout=10, **child)
+            if daemon.returncode or not daemon.stdout.strip() or "Docker Desktop" in daemon.stdout:
+                raise Refused("BuildKit requires the native system Docker daemon, not Docker Desktop")
+            builder = subprocess.run([*base, "buildx", "inspect", "default"],
+                                     capture_output=True, text=True, timeout=10, **child)
+            version = re.search(r"(?m)^BuildKit version:[ \t]+v?(\d+)\.(\d+)\.\d+(?:[ \t]*)$",
+                                builder.stdout)
+            if (builder.returncode or not re.search(r"(?m)^Driver:[ \t]+docker[ \t]*$", builder.stdout)
+                    or re.findall(r"(?m)^Endpoint:[ \t]+(\S+)[ \t]*$", builder.stdout) not in (["default"], [SOCKET])
+                    or not version or tuple(map(int, version.groups())) < (0, 31)):
+                raise Refused("system BuildKit needs the default Docker driver and BuildKit 0.31+ for resource limits")
+            command, options = "buildx", ["build", "--builder=default", *BUILD_LIMITS, *options]
     if command in {"exec", "start"}:
         if command == "start" and len(options) != operand + 1:
             raise Refused("start requires exactly one container")

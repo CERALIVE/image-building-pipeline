@@ -144,11 +144,24 @@ opts into host networking only for the sealed mirror inside the disposable
 guest. These flags do not waive resource or terminal rules. Prefer a disposable
 guest to a privileged build on a workstation.
 
-Local BuildKit image creation is refused because a CPU or memory limit on the
-CLI does not limit daemon-side build steps. Use a prebuilt builder image.
-GitHub-hosted build jobs and the disposable runner guest retain their own
-BuildKit steps. Guest-only daemon commands baked into the approved base stay
-inside that VM. Existing inline workflow commands in `kernel-release.yml`,
+Developer shells cannot start BuildKit image creation, even with redirected
+input. Use prebuilt builder images. The disposable runner guest retains its
+own BuildKit path under the VM limits. On the host, a GitHub-hosted job for
+this repository or a protected self-hosted audit or release job may build a
+missing builder image only when it has no controlling TTY, no TTY on standard
+streams, and neither `DISPLAY` nor `WAYLAND_DISPLAY` set. `GITHUB_ACTIONS=true`
+by itself is not sufficient. The workflow-restricted runner group remains
+the authorization boundary; the environment checks are not authentication.
+
+A qualifying runner job on the owner's workstation may use only the native
+system socket and default Docker driver. Buildx 0.35+ and daemon BuildKit
+0.31+ are required for per-`RUN` limits of 4 CPUs and 16 GiB RAM with no
+additional swap. These limit build steps, not all daemon activity. The CLI
+runs detached with null stdin; the BuildKit path accepts no alternate builder,
+insecure entitlements, privileged flags, device or `/dev` mounts. The separate,
+existing privileged mkosi assembly opt-in does not apply to cold image builds.
+Guest-only daemon commands baked into the approved base stay inside that VM.
+Existing inline workflow commands in `kernel-release.yml`,
 `real-build-audit.yml`, `release-candidate-build.yml`, and `v2-ci.yml` under
 `.github/workflows/` are outside the local wrapper and unchanged.
 
