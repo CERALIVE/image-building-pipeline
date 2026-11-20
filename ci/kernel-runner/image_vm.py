@@ -252,7 +252,14 @@ def validate_verification(row, identity: Identity, inventory: dict) -> None:
 
 
 def failure_record(path: Path, identity: Identity) -> dict:
-    row = returned_json(path, private=True)
+    data = read_return_record(path, private=True)
+    try:
+        row = json.loads(data, object_pairs_hook=unique_object)
+    except (Cancelled, TimeoutError, subprocess.TimeoutExpired, InterruptedError):
+        raise
+    except Exception:
+        # The parser's diagnostics may include receipt data.
+        raise StreamError("returned artifact set is incomplete") from None
     base = {"schema": 1, "identity": asdict(identity), "failure": "StreamError", "exit": None}
     if exact_json(row, base):
         return base
@@ -304,6 +311,8 @@ def validate_return(job: ImageJob, verifier: bool, guest_exit: RuntimeError | No
                 failure = failure_record(staging / "failure.json", job.identity)
             elif guest_exit is not None or ids != expected:
                 raise StreamError("returned artifact set is incomplete")
+        except (TimeoutError, InterruptedError):
+            raise
         except (AdmissionError, OSError, ValueError, TypeError, StreamError):
             if guest_exit is not None:
                 raise RuntimeError(str(guest_exit)) from None

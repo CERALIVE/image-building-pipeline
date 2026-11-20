@@ -40,7 +40,7 @@ from image_capsule import unpack
 from image_policy import load_policy
 from image_verify import compare_slot
 from image_urls import InputURLError, canonical_url
-from vm_process import ChildStatusError, wait
+from vm_process import Cancelled, ChildStatusError, wait
 
 
 IDENTITY = Identity("fixture-attempt", "rock-5b-plus", "a" * 40, 123, "b" * 64)
@@ -781,6 +781,9 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
     report = failure | {"failure_code": "builder_config_digest_mismatch",
                         "expected_config_digest": "sha256:" + "a" * 64,
                         "observed_config_digest": "sha256:" + "b" * 64}
+    depth = max(100_000, sys.getrecursionlimit() + 1_000)
+    nested = b"[" * depth + json.dumps(marker).encode() + b"]" * depth
+    loads = json.loads
     for case, code, data, frame_identity, suffix, expected in (
         ("nonzero", 1, json.dumps(report).encode(), IDENTITY, b"", report),
         ("zero", 0, json.dumps(report | {"observed_config_digest": None}).encode(), IDENTITY, b"",
@@ -790,6 +793,9 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
         ("unknown code", 1, json.dumps(report | {"failure_code": marker}).encode(), IDENTITY, b"", None),
         ("invalid digest", 0, json.dumps(report | {"observed_config_digest": marker}).encode(), IDENTITY, b"", None),
         ("invalid JSON", 1, marker.encode(), IDENTITY, b"", None),
+        ("nested JSON on nonzero exit", 1, nested, IDENTITY, b"", None),
+        ("nested JSON on zero exit", 0, nested, IDENTITY, b"", None),
+        ("cancelled parse", 1, json.dumps(report).encode(), IDENTITY, b"", None),
         ("oversized", 1, b" " * (1024**2) + json.dumps(report).encode(), IDENTITY, b"", None),
         ("wrong frame identity", 1, json.dumps(report).encode(),
          Identity("other-attempt", IDENTITY.board, IDENTITY.commit, IDENTITY.epoch, IDENTITY.input_sha256), b"", None),
@@ -829,11 +835,17 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
                 image_vm.execute(base, output, request, cancellation, jobs)
                 raise AssertionError("failed guest reached the verifier")
 
+            def parse(value, **options):
+                if case == "cancelled parse" and value == data:
+                    raise Cancelled("runner cancelled")
+                return loads(value, **options)
+
             mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
             with patch.object(vm, "job_disk", disk), patch.object(vm, "spawn_qemu", spawn), \
                     patch.object(image_vm, "measure_image", measure), patch.object(image_vm, "disk_headroom"), \
                     patch.object(image_lifecycle, "disk_headroom"), \
                     patch.object(image_lifecycle, "process_priority", return_value={"nice": 9}), \
+                    patch.object(image_vm.json, "loads", side_effect=parse), \
                     patch.object(image_lifecycle, "report_error") as diagnostic:
                 try:
                     status = image_vm.run_image(SimpleNamespace(image_mode="measure"), None, vm.Cancellation())
@@ -857,8 +869,12 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
                 assert messages == [expected_message], (case, messages)
             else:
                 assert not artifact.exists(), (case, "unvalidated diagnostics published")
-                if code:
+                if case == "cancelled parse":
+                    assert messages == ["runner cancelled"] and outcome["stop_reason"] == "cancelled", (case, messages)
+                elif code:
                     assert messages == ["image guest exited (1)"], (case, messages)
+                elif case == "nested JSON on zero exit":
+                    assert messages == ["returned artifact set is incomplete"], (case, messages)
 
 
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:
