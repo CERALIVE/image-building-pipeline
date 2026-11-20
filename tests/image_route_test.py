@@ -806,9 +806,13 @@ def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics(
         ("command wrong record identity", command_failure | {"identity": asdict(wrong_identity)}, IDENTITY, False),
         ("command unknown failure kind", command_failure | {"failure": marker}, IDENTITY, False),
         ("command non-string failure kind", command_failure | {"failure": [marker]}, IDENTITY, False),
+        ("command unknown failure kind with null exit", failure | {"failure": marker}, IDENTITY, False),
+        ("command non-string failure kind with null exit", failure | {"failure": [marker]}, IDENTITY, False),
         ("command timeout", failure | {"failure": "TimeoutExpired"}, IDENTITY, True),
         ("command timeout with exit", command_failure | {"failure": "TimeoutExpired"}, IDENTITY, False),
+        ("command timeout with code", report | {"failure": "TimeoutExpired"}, IDENTITY, False),
         ("guest I/O error", failure | {"failure": "FileNotFoundError"}, IDENTITY, True),
+        ("command I/O error with code", report | {"failure": "FileNotFoundError"}, IDENTITY, False),
         ("guest value error", failure | {"failure": "JSONDecodeError"}, IDENTITY, True),
         ("guest missing field", failure | {"failure": "KeyError"}, IDENTITY, True),
     )
