@@ -9,8 +9,10 @@ refresh a baseline or qualify a board.
 
 No host directory, socket, agent, physical disk or credential service is
 attached. The only additional input is a typed read-only block capsule. An
-output-only virtio-serial channel returns data over QEMU stdout. The console has
-its own bounded pipe. Probe QEMU stderr and stdin go to `/dev/null`.
+output-only virtio-serial channel returns data over QEMU's private stdout pipe
+using a `file` chardev without an input path. This keeps EOF on QEMU's
+`/dev/null` stdin from closing the artifact port. The console has its own
+bounded pipe. Probe QEMU stderr also goes to `/dev/null`.
 Measurement and verification retain a bounded QEMU stderr log. Guest bytes are
 never rendered on the host terminal. Nested Docker mounts and privileged image
 operations belong entirely to the disposable guest.
