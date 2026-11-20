@@ -6,14 +6,44 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ci"))
-from pin_releases import Release, discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
+from catalog_expiry import expiry_report  # noqa: E402 - standalone CLI module path
+from pin_releases import Catalog, Release, discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
 from pin_versions import PinError, compare, release_version  # noqa: E402 - standalone CLI module path
+
+
+class CatalogExpiryTest(unittest.TestCase):
+    def test_report_across_warning_and_expiry_boundaries(self) -> None:
+        checked_at = datetime.fromisoformat("2026-11-19T13:14:00-05:00")
+        catalog = Catalog(checked_at, ())
+        for age, remaining, warn, expired in (
+            (0, "168.00", "false", "false"),
+            (120, "48.00", "false", "false"),
+            (120.25, "47.75", "true", "false"),
+            (168, "0.00", "true", "false"),
+            (168.25, "-0.25", "true", "true"),
+        ):
+            with self.subTest(age=age):
+                now = checked_at.astimezone(timezone.utc) + timedelta(hours=age)
+                outputs = dict(line.split("=", 1) for line in expiry_report(catalog, now).splitlines())
+                self.assertEqual(outputs, {
+                    "age_hours": f"{age:.2f}",
+                    "remaining_hours": remaining,
+                    "expires_at": "2026-11-26T18:14:00+00:00",
+                    "expired": expired,
+                    "warn": warn,
+                })
+
+    def test_future_timestamp_does_not_report_healthy(self) -> None:
+        now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+        catalog = Catalog(now + timedelta(seconds=1), ())
+        with self.assertRaises(PinError):
+            expiry_report(catalog, now)
 
 
 class PinCurrencyTest(unittest.TestCase):

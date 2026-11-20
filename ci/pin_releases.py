@@ -6,8 +6,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Final
 
 from pin_versions import APP_COMPONENTS, COMPONENT_REPOS, COMPONENTS, PLATFORM_COMPONENTS, PinError, compare, release_version
+
+DEFAULT_MAX_AGE_HOURS: Final = 168
 
 
 @dataclass(frozen=True, slots=True)
