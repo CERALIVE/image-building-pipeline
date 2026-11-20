@@ -1,4 +1,6 @@
 """Report committed release catalog freshness as GitHub Actions outputs."""
+import argparse
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final
@@ -26,6 +28,23 @@ def expiry_report(catalog: Catalog, now: datetime) -> str:
     ))
 
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--catalog", type=Path, default=Path(__file__).resolve().parents[1] / "manifests/first-party-releases.json")
+    parser.add_argument("--now", type=datetime.fromisoformat, help="override the clock with an ISO 8601 timestamp")
+    args = parser.parse_args()
+    now = args.now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        parser.error("--now must include timezone")
+    try:
+        report = expiry_report(parse_catalog(args.catalog.read_text(encoding="utf-8")), now)
+    except (OSError, ValueError, TypeError, OverflowError) as error:
+        detail = " ".join(str(error).splitlines())
+        print(f"Cannot check release catalog: {detail}", file=sys.stderr)
+        return 2
+    print(report)
+    return 0
+
+
 if __name__ == "__main__":
-    path = Path(__file__).resolve().parents[1] / "manifests/first-party-releases.json"
-    print(expiry_report(parse_catalog(path.read_text()), datetime.now(timezone.utc)))
+    sys.exit(main())

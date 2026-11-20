@@ -118,6 +118,12 @@ open the usual refresh PR. Close the issue after the refreshed catalog lands
 on `master`. The workflow only files the reminder. The freshness gate still
 fails on expired evidence.
 
+An unreadable or invalid catalog fails the scheduled check and reports the
+reason in the run log without publishing a freshness result. An invalid
+catalog does not open or update the issue. Check the failed run and use the
+same refresh procedure. `checked_at` must include a timezone and cannot be
+in the future.
+
 **Limit:** a release published after `checked_at` is invisible until refresh,
 up to the bounds above. The printed timestamp is the scope of the verdict;
 the output never calls a snapshot check a live lookup. This is the deliberate

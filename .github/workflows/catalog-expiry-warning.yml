@@ -26,6 +26,7 @@ jobs:
           persist-credentials: false
       - name: Check the committed catalog offline
         id: expiry
+        shell: bash
         run: |
           report=$(python3 ci/catalog_expiry.py)
           printf '%s\n' "$report" | tee -a "$GITHUB_OUTPUT"

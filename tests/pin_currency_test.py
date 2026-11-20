@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline CLI acceptance: release truth is independent of the pinned input."""
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,6 +46,92 @@ class CatalogExpiryTest(unittest.TestCase):
         catalog = Catalog(now + timedelta(seconds=1), ())
         with self.assertRaises(PinError):
             expiry_report(catalog, now)
+
+    def run_expiry_step(
+        self, catalog: Path, now: str,
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        import yaml
+
+        workflow = yaml.safe_load((ROOT / ".github/workflows/catalog-expiry-warning.yml").read_text())
+        step = next(s for s in workflow["jobs"]["check-catalog"]["steps"] if s.get("id") == "expiry")
+        output = catalog.parent / "output"
+        output.write_text("")
+        command = step["run"].replace(
+            "python3 ci/catalog_expiry.py",
+            shlex.join([sys.executable, "ci/catalog_expiry.py", "--catalog", str(catalog), "--now", now]),
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", command],
+            cwd=ROOT, env={**os.environ, "GITHUB_OUTPUT": str(output), "LC_ALL": "C"},
+            capture_output=True, text=True, check=False, timeout=20,
+        )
+        return result, output.read_text()
+
+    def test_command_rejects_invalid_catalog_without_workflow_outputs(self) -> None:
+        now = "2026-11-20T00:00:00+00:00"
+        invalid_timestamps = (
+            ("null", None, "checked_at must be a non-empty string"),
+            ("number", 123, "checked_at must be a non-empty string"),
+            ("empty timestamp", "", "checked_at must be a non-empty string"),
+            ("malformed timestamp", "tomorrow", "checked_at is not an ISO 8601 timestamp"),
+            ("timezone missing", "2026-11-19T18:14:00", "checked_at must include timezone"),
+        )
+        cases = (
+            ("missing", None, "No such file or directory"),
+            ("unreadable", None, "Is a directory"),
+            ("empty file", "", "invalid JSON"),
+            ("invalid JSON", '{"checked_at":', "invalid JSON"),
+            ("non-object", "[]", "invalid release catalog schema"),
+            ("missing checked_at", '{"schema_version":1,"releases":[]}', "checked_at must be a non-empty string"),
+            *((label, json.dumps({"schema_version": 1, "releases": [], "checked_at": value}), diagnostic)
+              for label, value, diagnostic in invalid_timestamps),
+        )
+        data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
+        data["checked_at"] = "2026-11-20T00:00:01+00:00"
+        for release in data["releases"]:
+            release["published_at"] = "2026-11-19T00:00:00+00:00"
+        cases += (("future", json.dumps(data), "checked_at is in the future"),)
+        for label, content, diagnostic in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                catalog = Path(directory) / "catalog.json"
+                if label == "unreadable":
+                    catalog.mkdir()
+                elif content is not None:
+                    catalog.write_text(content)
+
+                result, outputs = self.run_expiry_step(catalog, now)
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(outputs, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                self.assertTrue(result.stderr.startswith("Cannot check release catalog: "), result.stderr)
+                self.assertIn(diagnostic, result.stderr)
+
+    def test_command_publishes_exact_outputs_at_one_second_boundaries(self) -> None:
+        data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
+        data["checked_at"] = "2026-11-19T18:14:00+00:00"
+        for release in data["releases"]:
+            release["published_at"] = "2026-11-19T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            catalog.write_text(json.dumps(data))
+            for now, age, remaining, expired, warn in (
+                ("2026-11-24T18:14:00+00:00", "120.00", "48.00", "false", "false"),
+                ("2026-11-24T18:14:01+00:00", "120.00", "48.00", "false", "true"),
+                ("2026-11-26T18:14:01+00:00", "168.00", "-0.00", "true", "true"),
+            ):
+                with self.subTest(now=now):
+                    result, outputs = self.run_expiry_step(catalog, now)
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    expected = (
+                        f"age_hours={age}\nremaining_hours={remaining}\n"
+                        f"expires_at=2026-11-26T18:14:00+00:00\nexpired={expired}\nwarn={warn}\n"
+                    )
+                    self.assertEqual(outputs, expected)
+                    self.assertEqual(result.stdout, expected)
 
 
 class PinCurrencyTest(unittest.TestCase):
