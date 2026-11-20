@@ -70,23 +70,32 @@ includes the last complete QEMU observation of `nice`, the I/O class (via `iopri
 `cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
 is refused for the measurement guest.
 
-A host daemon can also lower the niceness of QEMU's short-lived launch
-wrapper. ananicy-cpp, for example, gives `sh` nice -4, which QEMU then
-inherits at exec. The first live sample therefore settles. If the exec'd
-QEMU process is below nice 9, the launcher raises it to nice 10 itself.
-Raising niceness needs no privilege, and the launcher never lowers it. The
-launcher then requires a conformant observation within 5 seconds and
-restarts the whole sample, every 0.1 s, while a sample is below the floor.
-The attempt is refused if any of these hold:
+A host daemon can lower the niceness of QEMU's short-lived launch wrapper.
+ananicy-cpp, for example, gives `sh` nice -4, which QEMU inherits at exec.
+The first live sample therefore settles within 5.0 seconds. The bound is
+measured on a monotonic clock from the start of that sample and checked
+before a sample is accepted, so a conforming sample taken later still
+refuses. Each settle iteration checks, in order:
 
-- a realtime policy (`SCHED_FIFO`, `SCHED_RR` or `SCHED_DEADLINE`) is in use
-- nice is still below 9 after the bound
-- the process state is unreadable, or another observation fails
-- the raise itself fails
+1. A child that has exited ends the settle as a guest exit, never as a
+   priority error.
+2. A realtime (`SCHED_FIFO`, `SCHED_RR`, `SCHED_DEADLINE`), unknown or
+   unreadable scheduling policy refuses before any priority write.
+3. The wrapper handoff is proven only when `/proc/<pid>/comm` is
+   `qemu-system-x86`, the kernel's 15-byte form of `qemu-system-x86_64`.
+   An empty, unreadable, `sh` or `setpriv` name keeps waiting.
+4. After the handoff, each existing QEMU thread below nice 9 is raised to
+   nice 10. Linux niceness is per thread, raising it needs no privilege, and
+   the launcher never lowers it. If that write fails with a permission error,
+   the launcher re-reads the value and accepts it when another actor has
+   already made it conform. Otherwise it refuses with the exact error.
+5. The leader's nice and policy, the cgroup limits and the I/O class must
+   all conform.
 
-Later samples only verify. A priority refusal records the observed nice and
-scheduling policy in its error and as `qemu_priority_refusal` in the
-receipts.
+Threads created later inherit their creating thread's raised niceness. The
+periodic samples about every five seconds verify the leader thread only and
+never renice. A priority refusal records the observed nice and scheduling
+policy in its error and as `qemu_priority_refusal` in the receipts.
 
 The sampler excludes the cgroup v2 mount root, where these per-cgroup
 controls can be absent. The workload and each non-root ancestor must expose

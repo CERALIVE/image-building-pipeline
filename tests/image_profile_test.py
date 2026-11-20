@@ -3,13 +3,13 @@
 
 from dataclasses import asdict, dataclass, replace
 import atexit
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 import dis
 import errno
 import fcntl
 import io
 import inspect
-from itertools import product
+from itertools import count, product
 import json
 import hashlib
 import os
@@ -502,7 +502,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
     def capture_priority(pid, cancellation, **options):
         with (root / "priority-calls").open("a") as calls:
-            print(json.dumps(options, sort_keys=True), file=calls)
+            print(json.dumps({"settle": options.get("settle") is not None}), file=calls)
         if mode in ("priority-failure", "priority-floor"):
             deadline = time.monotonic() + 2
             while not (root / "ready").exists():
@@ -2727,88 +2727,235 @@ def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
         spawn.assert_not_called()
 
 
-def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> None:
-    # The stand-in runs through the production parent-death wrapper and names itself like QEMU.
-    standin = ("import ctypes, sys\n"
-               "ctypes.CDLL(None).prctl(15, b'qemu-system-x86', 0, 0, 0)\n"
-               "sys.stdout.write('ready\\n'); sys.stdout.flush(); sys.stdin.read()\n")
+QEMU_STANDIN = '''import json, os, sys, threading
+early = threading.Thread(target=threading.Event().wait, daemon=True)
+early.start()
+if sys.argv[1:] and sys.argv[1].startswith("exit:"):
+    sys.exit(int(sys.argv[1][5:]))
+print("ready", flush=True)
+line = sys.stdin.readline()
+if line.startswith("exit"):
+    sys.exit(int(line.split()[1]))
+if line.startswith("threads"):
+    report = {"leader": os.getpriority(os.PRIO_PROCESS, 0), "early": os.getpriority(os.PRIO_PROCESS, early.native_id)}
+    late = threading.Thread(target=lambda: report.update(late=os.getpriority(os.PRIO_PROCESS, 0)))
+    late.start()
+    late.join()
+    print(json.dumps(report), flush=True)
+sys.stdin.read()
+'''
+
+
+def qemu_standin(directory: pathlib.Path) -> pathlib.Path:
+    """A script named like QEMU: exec through the wrapper gives it QEMU's kernel comm."""
+    script = directory / "qemu-system-x86_64"
+    script.write_text(f"#!{sys.executable}\n" + QEMU_STANDIN)
+    script.chmod(0o700)
+    return script
+
+
+def settle_sample(initial, *, settle=True, daemon=None, undo=0, race=None, set_error=None,
+                  policy=os.SCHED_OTHER, comm=None, clock=None, exit_code=None):
+    """Sample a stand-in through the production wrapper with a modelled unprivileged nice."""
     real_get, real_set, real_policy = os.getpriority, os.setpriority, os.sched_getscheduler
     read_text = pathlib.Path.read_text
+    with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
+            vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+        assert child.stdout.readline() == b"ready\n"
+        assert pathlib.Path(f"/proc/{child.pid}/comm").read_text() == "qemu-system-x86\n"
+        state = {"nice": initial, "reads": 0, "writes": [], "undo": undo}
 
-    def sample(initial, *, settle=True, daemon=None, undo=0, policy=os.SCHED_OTHER, set_error=None, comm_error=None):
-        """Model the kernel nice of one unprivileged child; a host daemon may renice it."""
-        with subprocess.Popen(vm.parent_bound([sys.executable, "-c", standin], os.getpid()),
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
-            assert child.stdout.readline() == b"ready\n"
-            state = {"nice": initial, "reads": 0, "sets": [], "undo": undo}
+        def exited():
+            return os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
 
-            def get(which, who):
-                if who != child.pid:
-                    return real_get(which, who)
-                state["reads"] += 1
-                nice = state["nice"]
-                if daemon is not None and state["reads"] == daemon[0]:
-                    state["nice"] = daemon[1]
-                return nice
+        def get(which, who):
+            if who != child.pid:
+                return real_get(which, who)
+            state["reads"] += 1
+            if exit_code is not None and state["reads"] == 1:
+                child.stdin.write(f"exit {exit_code}\n".encode())
+                child.stdin.flush()
+                os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+            nice = state["nice"]
+            if daemon is not None and state["reads"] == daemon[0]:
+                state["nice"] = daemon[1]
+            return nice
 
-            def put(which, who, value):
-                if who != child.pid:
-                    return real_set(which, who, value)
-                if set_error is not None:
-                    raise OSError(set_error, os.strerror(set_error))
-                assert value >= state["nice"], ("launcher lowered niceness", state["nice"], value)
-                state["sets"].append(value)
-                state["nice"] = initial if state["undo"] else value
-                state["undo"] = max(0, state["undo"] - 1)
+        def put(which, who, value):
+            state["writes"].append((who, value))
+            if who != child.pid:
+                return real_set(which, who, value)
+            if race is not None:
+                state["nice"] = race  # A host renice lands between the launcher's read and write.
+            if set_error is not None or value < state["nice"]:
+                code = set_error or errno.EACCES
+                raise OSError(code, os.strerror(code))
+            state["nice"] = initial if state["undo"] else value
+            state["undo"] = max(0, state["undo"] - 1)
 
-            def comm(path, *args, **kwargs):
-                if comm_error is not None and path == pathlib.Path(f"/proc/{child.pid}/comm"):
-                    raise comm_error
-                return read_text(path, *args, **kwargs)
+        def scheduler(who):
+            if who != child.pid:
+                return real_policy(who)
+            if isinstance(policy, BaseException):
+                raise policy
+            return policy
 
-            try:
-                with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
-                        patch.object(os, "sched_getscheduler",
-                                     lambda who: policy if who == child.pid else real_policy(who)), \
-                        patch.object(pathlib.Path, "read_text", comm), \
-                        patch.object(image_resources, "cgroup_limits", return_value=10), \
-                        patch.object(image_resources, "PRIORITY_SETTLE_SECONDS", 0.5):
-                    return image_resources.process_priority(child.pid, Cancellation(), settle=settle), state, child.pid
-            except (image_resources.AdmissionError, OSError) as error:
-                return error, state, child.pid
-            finally:
+        names = iter(comm or ())
+
+        def proc_text(path, *args, **kwargs):
+            if comm is not None and path == pathlib.Path(f"/proc/{child.pid}/comm"):
+                value = next(names, comm[-1])
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+            return read_text(path, *args, **kwargs)
+
+        ticks = iter(clock) if clock is not None else (n / 10 for n in count())
+        options = {"settle": image_resources.Settle(exited, clock=lambda: next(ticks), pause=lambda _seconds: None)
+                   } if settle else {}
+        try:
+            with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
+                    patch.object(os, "sched_getscheduler", scheduler), \
+                    patch.object(pathlib.Path, "read_text", proc_text), \
+                    patch.object(image_resources, "cgroup_limits", return_value=10):
+                return image_resources.process_priority(child.pid, Cancellation(), **options), state, child
+        except (image_resources.AdmissionError, OSError) as error:
+            return error, state, child
+        finally:
+            with suppress(BrokenPipeError):
                 child.stdin.close()
 
+
+def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> None:
+    leader = lambda state, child: [value for who, value in state["writes"] if who == child.pid]
     # The wrapper left -4 and no daemon follows up: the launcher itself restores nice 10.
-    row, state, _ = sample(-4)
-    assert type(row) is dict and row["nice"] == 10 and state["sets"] == [10], (row, state)
+    row, state, child = settle_sample(-4)
+    assert type(row) is dict and row["nice"] == 10 and leader(state, child) == [10], (row, state)
     # The daemon undoes the first raise, then renices QEMU to 9 shortly after start.
-    row, state, _ = sample(-4, daemon=(3, 9), undo=1)
+    row, state, _ = settle_sample(-4, daemon=(3, 9), undo=1)
     assert type(row) is dict and row["nice"] >= image_resources.MIN_NICE, (row, state)
     # Already within the floor: leave it.
-    row, state, _ = sample(12)
-    assert type(row) is dict and row["nice"] == 12 and state["sets"] == [], (row, state)
-    # Realtime classes refuse at once with the observed policy; niceness is not the remedy.
-    for policy, name in ((os.SCHED_FIFO, "SCHED_FIFO"), (os.SCHED_RR, "SCHED_RR"), (6, "SCHED_DEADLINE")):
-        error, state, _ = sample(12, policy=policy)
-        assert isinstance(error, image_resources.PriorityRefusal), error
-        assert error.observed == {"nice": 12, "policy": name} and state["sets"] == [], (error, state)
-    # A daemon that keeps lowering it exhausts the settle bound and refuses with the observed value.
-    error, state, _ = sample(-4, undo=100)
+    row, state, child = settle_sample(12)
+    assert type(row) is dict and row["nice"] == 12 and leader(state, child) == [], (row, state)
+    # A host renice to 12 lands between the read and the write: accept it, do not abort.
+    row, state, child = settle_sample(-4, race=12)
+    assert type(row) is dict and row["nice"] == 12 and leader(state, child) == [10], (row, state)
+    # A failed raise of a still-low child refuses with the exact error.
+    for code in (errno.EPERM, errno.ESRCH):
+        error, _, child = settle_sample(-4, set_error=code)
+        assert type(error) is image_resources.AdmissionError, error
+        assert str(error) == f"cannot raise QEMU PID {child.pid} to nice 10: {os.strerror(code)}", error
+    # Policy is checked first: realtime or unknown classes refuse before any priority write.
+    for nice, (policy, name) in product((5, 12), ((os.SCHED_FIFO, "SCHED_FIFO"), (os.SCHED_RR, "SCHED_RR"),
+                                                  (6, "SCHED_DEADLINE"), (7, "policy 7"))):
+        error, state, _ = settle_sample(nice, policy=policy)
+        assert isinstance(error, image_resources.PriorityRefusal) and state["writes"] == [], (error, state)
+        assert str(error) == f"image profile needs non-realtime scheduling and nice >= 9 (observed nice {nice}, {name})"
+    error, state, _ = settle_sample(5, policy=OSError(errno.EIO, "fixture policy"))
+    assert isinstance(error, OSError) and error.errno == errno.EIO and state["writes"] == [], (error, state)
+    # One monotonic bound, checked before a sample is accepted.
+    row, _, _ = settle_sample(12, clock=[0.0, 4.9])
+    assert type(row) is dict and row["nice"] == 12, row
+    error, _, _ = settle_sample(12, clock=[0.0, 5.1])
+    assert str(error) == "QEMU priority conformed after 5.100 s, beyond the 5.0 s settle bound", error
+    # Only QEMU's own name proves the wrapper handed over; empty or unreadable names keep waiting.
+    row, _, _ = settle_sample(12, comm=["", PermissionError(errno.EACCES, "fixture"), "sh", "setpriv", "qemu-system-x86\n"])
+    assert type(row) is dict and row["nice"] == 12, row
+    for names in ([""], [PermissionError(errno.EACCES, "fixture")], ["sh\n"], ["setpriv\n"]):
+        error, _, child = settle_sample(12, comm=names)
+        assert str(error) == f"QEMU PID {child.pid} did not hand over from its launch wrapper within 5.0 s", (names, error)
+    # A daemon that keeps lowering it exhausts the bound and refuses with the observed value.
+    error, _, _ = settle_sample(-4, undo=100)
     assert isinstance(error, image_resources.PriorityRefusal), error
     assert error.observed == {"nice": -4, "policy": "SCHED_OTHER"} and "observed nice -4, SCHED_OTHER" in str(error)
-    # Unreadable state and a failed raise are refusals, never a pass.
-    error, _, _ = sample(-4, comm_error=PermissionError(errno.EACCES, "fixture comm"))
-    assert isinstance(error, PermissionError), error
-    for code in (errno.EPERM, errno.ESRCH):
-        error, _, pid = sample(-4, set_error=code)
-        assert type(error) is image_resources.AdmissionError, error
-        assert str(error) == f"cannot raise QEMU PID {pid} to nice 10: {os.strerror(code)}", error
+    # A child that exits during the settle is reported as an exit, never as a priority error.
+    for code in (0, 37):
+        error, _, child = settle_sample(-4, exit_code=code)
+        assert type(error) is ProcessLookupError and "exited during the priority settle" in str(error), error
+        assert child.returncode == code
     # Periodic verification is unchanged: it never renices and still refuses below the floor.
-    row, state, _ = sample(9, settle=False)
-    assert type(row) is dict and row["nice"] == 9 and state["sets"] == [], (row, state)
-    error, state, _ = sample(-4, settle=False)
-    assert isinstance(error, image_resources.PriorityRefusal) and state["sets"] == [], (error, state)
+    row, state, _ = settle_sample(9, settle=False)
+    assert type(row) is dict and row["nice"] == 9 and state["writes"] == [], (row, state)
+    error, state, _ = settle_sample(-4, settle=False)
+    assert isinstance(error, image_resources.PriorityRefusal) and state["writes"] == [], (error, state)
+
+
+def test_settle_raises_every_qemu_thread_and_later_threads_inherit_it() -> None:
+    # Linux nice is per thread: the stand-in starts a thread before the settle and one after it.
+    real_get, real_set = os.getpriority, os.setpriority
+    with tempfile.TemporaryDirectory() as temporary, subprocess.Popen(
+            vm.parent_bound([str(qemu_standin(pathlib.Path(temporary)))], os.getpid()),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+        assert child.stdout.readline() == b"ready\n"
+        tids = {int(name) for name in os.listdir(f"/proc/{child.pid}/task")}
+        assert child.pid in tids and len(tids) == 2, tids
+        # Model every existing thread at the wrapper's -4; the real threads are raised too where needed.
+        nice = dict.fromkeys(tids, -4)
+
+        def get(which, who):
+            return nice[who] if who in nice else real_get(which, who)
+
+        def put(which, who, value):
+            if who not in nice:
+                return real_set(which, who, value)
+            nice[who] = value
+            if real_get(which, who) < value:
+                real_set(which, who, value)
+
+        exited = lambda: os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
+                patch.object(image_resources, "cgroup_limits", return_value=10):
+            row = image_resources.process_priority(
+                child.pid, Cancellation(), settle=image_resources.Settle(exited, pause=lambda _seconds: None))
+        child.stdin.write(b"threads\n")
+        child.stdin.flush()
+        report = json.loads(child.stdout.readline())
+        child.stdin.close()
+    assert row["nice"] == 10 and nice == dict.fromkeys(tids, 10), (row, nice)
+    # A thread created after the settle inherits its creator's raised niceness.
+    assert min(report.values()) >= image_resources.MIN_NICE, report
+
+
+def test_guest_exit_during_priority_settle_reports_the_exit() -> None:
+    real_popen, real_get, real_set = subprocess.Popen, os.getpriority, os.setpriority
+    for code in (0, 37):
+        owned = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            standin = qemu_standin(root)
+
+            def child(args, **options):
+                process = real_popen([*args[:9], str(standin), f"exit:{code}"], **options)
+                owned["pid"] = process.pid
+                return process
+
+            # The host keeps the stand-in below the floor, so only its exit can end the settle.
+            def get(which, who):
+                return -4 if who == owned.get("pid") else real_get(which, who)
+
+            def put(which, who, value):
+                return None if who == owned.get("pid") else real_set(which, who, value)
+
+            directory = root / "fixture/build"
+            directory.mkdir(parents=True)
+            capsule = root / "capsule"
+            capsule.write_bytes(b"fixture")
+            error = None
+            try:
+                with tempfile.TemporaryFile(dir=root) as overlay, \
+                        ImageJob(directory, IDENTITY, capsule, probe=True) as job:
+                    job.state.update(overlay_directory=str(root), retained_bytes=0)
+                    job.overlay_created(overlay.fileno())
+                    with patch.object(vm.subprocess, "Popen", child), patch.object(image_lifecycle, "disk_headroom"), \
+                            patch.object(image_resources, "cgroup_limits", return_value=10), \
+                            patch.object(os, "getpriority", get), patch.object(os, "setpriority", put):
+                        vm.boot(pathlib.Path("/unused"), b"{}", "image", 5, disk_fd=overlay.fileno(), image_job=job)
+            except RuntimeError as exc:
+                error = str(exc)
+            assert error == (None if code == 0 else "image guest exited (37)"), error
+            record = json.loads((directory / "teardown.json").read_text())
+            assert record["qemu_exit"] == code and "qemu_priority_refusal" not in record, record
 
 
 def test_priority_syscall_error_restarts_the_whole_observation() -> None:

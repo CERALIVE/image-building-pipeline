@@ -10,9 +10,9 @@ from pathlib import Path
 import re
 import resource
 import time
-from typing import Final, TypedDict
+from typing import Callable, Final, TypedDict
 
-from image_stream import retry_check
+from image_stream import list_directory, retry_check
 from vm_process import Cancellation
 
 GIB: Final = 1024**3
@@ -23,7 +23,8 @@ QEMU_NICE: Final = 10
 # A host daemon may renice the launch wrapper or QEMU just after exec; admission waits this long.
 PRIORITY_SETTLE_SECONDS: Final = 5.0
 PRIORITY_SETTLE_INTERVAL: Final = 0.1
-WRAPPER_COMMS: Final = frozenset(("setpriv", "sh"))
+# Proof of the wrapper handoff: the kernel keeps the first 15 bytes of qemu-system-x86_64.
+QEMU_COMM: Final = "qemu-system-x86"
 SCHEDULERS: Final = {os.SCHED_OTHER: "SCHED_OTHER", os.SCHED_BATCH: "SCHED_BATCH", os.SCHED_IDLE: "SCHED_IDLE"}
 REALTIME: Final = {os.SCHED_FIFO: "SCHED_FIFO", os.SCHED_RR: "SCHED_RR", 6: "SCHED_DEADLINE"}
 
@@ -211,42 +212,108 @@ class PriorityObservation(TypedDict):
     cpu_weight: int
 
 
-def process_priority(pid: int, cancellation: Cancellation, *, settle: bool = False) -> PriorityObservation:
+@dataclass(frozen=True, slots=True)
+class Settle:
+    """The first live sample's child-exit check and the clock of its bound."""
+
+    exited: Callable[[], bool]
+    clock: Callable[[], float] = time.monotonic
+    pause: Callable[[float], None] = time.sleep
+
+
+def process_priority(pid: int, cancellation: Cancellation, *, settle: Settle | None = None) -> PriorityObservation:
     """Observe the owned QEMU process, including containment after exec.
 
-    The first sample settles: it restores the launch niceness on the exec'd child and needs a
-    conformant observation within PRIORITY_SETTLE_SECONDS. Later samples verify only.
+    The first sample settles: it restores the launch niceness on the exec'd QEMU threads and
+    needs a conformant observation within PRIORITY_SETTLE_SECONDS. Later samples verify only.
     """
-    if settle:
-        return _settled_priority(pid, cancellation)
+    if settle is not None:
+        return _settled_priority(pid, cancellation, settle)
     try:
         return retry_check(_process_priority, pid, cancellation)
     except IOPrioritySyscallError as error:
         raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
 
 
-def _settled_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
-    """Raise, never lower, a below-floor nice; realtime and failed observations still refuse."""
-    deadline = time.monotonic() + PRIORITY_SETTLE_SECONDS
+def _settled_priority(pid: int, cancellation: Cancellation, settle: Settle) -> PriorityObservation:
+    """Check policy before any write; a child exit always wins over a priority error.
+
+    The bound runs from one monotonic start and is checked before a sample is accepted.
+    """
+    start = settle.clock()
     while True:
-        executed = Path(f"/proc/{pid}/comm").read_text().strip() not in WRAPPER_COMMS
-        if executed and os.getpriority(os.PRIO_PROCESS, pid) < MIN_NICE:
-            try:
-                os.setpriority(os.PRIO_PROCESS, pid, QEMU_NICE)
-            except (PermissionError, ProcessLookupError) as error:
-                raise AdmissionError(f"cannot raise QEMU PID {pid} to nice {QEMU_NICE}: {error.strerror}") from error
+        cancellation.check()
+        if settle.exited():
+            raise _settle_exit(pid)
+        handed_over, observation, below = False, None, None
         try:
+            policy = os.sched_getscheduler(pid)
+            if policy not in SCHEDULERS:
+                raise PriorityRefusal(os.getpriority(os.PRIO_PROCESS, pid), policy)
+            handed_over = _comm(pid) == QEMU_COMM
+            if handed_over:
+                _raise_threads(pid)
             observation = process_priority(pid, cancellation)
         except PriorityRefusal as error:
-            if error.realtime or time.monotonic() >= deadline:
+            if settle.exited():
+                raise _settle_exit(pid) from error
+            if error.realtime:
                 raise
-        else:
-            if executed:
-                return observation
-            if time.monotonic() >= deadline:
-                raise AdmissionError(f"QEMU PID {pid} was still in its launch wrapper after "
-                                     f"{PRIORITY_SETTLE_SECONDS} s")
-        time.sleep(PRIORITY_SETTLE_INTERVAL)
+            below = error
+        except (OSError, AdmissionError) as error:
+            if settle.exited():
+                raise _settle_exit(pid) from error
+            raise
+        if settle.exited():
+            raise _settle_exit(pid)
+        elapsed = settle.clock() - start
+        if elapsed > PRIORITY_SETTLE_SECONDS:
+            if below is not None:
+                raise below
+            if not handed_over:
+                raise AdmissionError(f"QEMU PID {pid} did not hand over from its launch wrapper "
+                                     f"within {PRIORITY_SETTLE_SECONDS} s")
+            raise AdmissionError(f"QEMU priority conformed after {elapsed:.3f} s, beyond the "
+                                 f"{PRIORITY_SETTLE_SECONDS} s settle bound")
+        if observation is not None and handed_over:
+            return observation
+        settle.pause(PRIORITY_SETTLE_INTERVAL)
+
+
+def _settle_exit(pid: int) -> ProcessLookupError:
+    return ProcessLookupError(errno.ESRCH, f"QEMU PID {pid} exited during the priority settle")
+
+
+def _comm(pid: int) -> str:
+    """An empty or unreadable name is inconclusive, never proof of the handoff."""
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _raise_threads(pid: int) -> None:
+    """Raise, never lower, each existing QEMU thread below the floor; Linux nice is per thread."""
+    for name in list_directory(Path(f"/proc/{pid}/task")):
+        tid = int(name)
+        try:
+            if os.getpriority(os.PRIO_PROCESS, tid) >= MIN_NICE:
+                continue
+            os.setpriority(os.PRIO_PROCESS, tid, QEMU_NICE)
+        except PermissionError as error:
+            # Another actor reniced it between the read and this write: accept a conformant value.
+            if os.getpriority(os.PRIO_PROCESS, tid) >= MIN_NICE:
+                continue
+            raise AdmissionError(_raise_failure(pid, tid, error)) from error
+        except ProcessLookupError as error:
+            if tid != pid:
+                continue  # A worker thread exited after the listing.
+            raise AdmissionError(_raise_failure(pid, tid, error)) from error
+
+
+def _raise_failure(pid: int, tid: int, error: OSError) -> str:
+    thread = "" if tid == pid else f" thread {tid}"
+    return f"cannot raise QEMU PID {pid}{thread} to nice {QEMU_NICE}: {error.strerror}"
 
 
 def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:

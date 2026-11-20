@@ -20,7 +20,7 @@ import tempfile
 from typing import TextIO
 import uuid
 
-from image_resources import CAPS, GIB, AdmissionError, PriorityRefusal, disk_headroom, process_priority
+from image_resources import CAPS, GIB, AdmissionError, PriorityRefusal, Settle, disk_headroom, process_priority
 from image_stream import (
     CONTROL_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, checked_open, list_directory,
     retry_check, unique_object, write_all,
@@ -387,8 +387,8 @@ class ImageJob:
                         raise subprocess.TimeoutExpired("image guest", seconds)
                     if now >= next_priority_check and poll_owned(process) is None:
                         try:
-                            self.state["qemu_priority"] = process_priority(
-                                process.pid, self.cancellation, settle=next_priority_check == 0.0)
+                            first = Settle(lambda: poll_owned(process) is not None) if next_priority_check == 0.0 else None
+                            self.state["qemu_priority"] = process_priority(process.pid, self.cancellation, settle=first)
                         except PriorityRefusal as error:
                             self.state["qemu_priority_refusal"] = error.observed
                             raise
