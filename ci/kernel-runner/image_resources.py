@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import time
 from typing import Final, TypedDict
 
 from image_stream import retry_check
@@ -18,6 +19,13 @@ GIB: Final = 1024**3
 MIN_NICE: Final = 9
 MAX_CPU_WEIGHT: Final = 10
 MAX_IO_WEIGHT: Final = 10
+QEMU_NICE: Final = 10
+# A host daemon may renice the launch wrapper or QEMU just after exec; admission waits this long.
+PRIORITY_SETTLE_SECONDS: Final = 5.0
+PRIORITY_SETTLE_INTERVAL: Final = 0.1
+WRAPPER_COMMS: Final = frozenset(("setpriv", "sh"))
+SCHEDULERS: Final = {os.SCHED_OTHER: "SCHED_OTHER", os.SCHED_BATCH: "SCHED_BATCH", os.SCHED_IDLE: "SCHED_IDLE"}
+REALTIME: Final = {os.SCHED_FIFO: "SCHED_FIFO", os.SCHED_RR: "SCHED_RR", 6: "SCHED_DEADLINE"}
 
 SYS_IOPRIO_GET: Final = 252
 IOPRIO_WHO_PROCESS: Final = 1
@@ -28,6 +36,17 @@ _LIBC.syscall.restype = ctypes.c_long
 
 class AdmissionError(Exception):
     """An image attempt cannot fit its approved resource envelope."""
+
+
+class PriorityRefusal(AdmissionError):
+    """A sampled process is outside the low-priority, non-realtime floor."""
+
+    def __init__(self, nice: int, policy: int) -> None:
+        name = SCHEDULERS.get(policy) or REALTIME.get(policy) or f"policy {policy}"
+        self.realtime = policy not in SCHEDULERS
+        self.observed = {"nice": nice, "policy": name}
+        super().__init__(f"image profile needs non-realtime scheduling and nice >= {MIN_NICE} "
+                         f"(observed nice {nice}, {name})")
 
 
 class IOPriorityError(AdmissionError):
@@ -180,9 +199,9 @@ def cgroup_limits(pid: int | str) -> int:
 def require_process_priority(pid: int) -> int:
     """Admit only low-priority, non-realtime CPU scheduling."""
     nice = os.getpriority(os.PRIO_PROCESS, pid)
-    if (nice < MIN_NICE or os.sched_getscheduler(pid) not in
-            (os.SCHED_OTHER, os.SCHED_BATCH, os.SCHED_IDLE)):
-        raise AdmissionError(f"image profile needs non-realtime scheduling and nice >= {MIN_NICE}")
+    policy = os.sched_getscheduler(pid)
+    if nice < MIN_NICE or policy not in SCHEDULERS:
+        raise PriorityRefusal(nice, policy)
     return nice
 
 
@@ -192,12 +211,42 @@ class PriorityObservation(TypedDict):
     cpu_weight: int
 
 
-def process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
-    """Observe the owned QEMU process, including containment after exec."""
+def process_priority(pid: int, cancellation: Cancellation, *, settle: bool = False) -> PriorityObservation:
+    """Observe the owned QEMU process, including containment after exec.
+
+    The first sample settles: it restores the launch niceness on the exec'd child and needs a
+    conformant observation within PRIORITY_SETTLE_SECONDS. Later samples verify only.
+    """
+    if settle:
+        return _settled_priority(pid, cancellation)
     try:
         return retry_check(_process_priority, pid, cancellation)
     except IOPrioritySyscallError as error:
         raise IOPriorityError(f"ioprio_get failed: {error.strerror}") from error
+
+
+def _settled_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:
+    """Raise, never lower, a below-floor nice; realtime and failed observations still refuse."""
+    deadline = time.monotonic() + PRIORITY_SETTLE_SECONDS
+    while True:
+        executed = Path(f"/proc/{pid}/comm").read_text().strip() not in WRAPPER_COMMS
+        if executed and os.getpriority(os.PRIO_PROCESS, pid) < MIN_NICE:
+            try:
+                os.setpriority(os.PRIO_PROCESS, pid, QEMU_NICE)
+            except (PermissionError, ProcessLookupError) as error:
+                raise AdmissionError(f"cannot raise QEMU PID {pid} to nice {QEMU_NICE}: {error.strerror}") from error
+        try:
+            observation = process_priority(pid, cancellation)
+        except PriorityRefusal as error:
+            if error.realtime or time.monotonic() >= deadline:
+                raise
+        else:
+            if executed:
+                return observation
+            if time.monotonic() >= deadline:
+                raise AdmissionError(f"QEMU PID {pid} was still in its launch wrapper after "
+                                     f"{PRIORITY_SETTLE_SECONDS} s")
+        time.sleep(PRIORITY_SETTLE_INTERVAL)
 
 
 def _process_priority(pid: int, cancellation: Cancellation) -> PriorityObservation:

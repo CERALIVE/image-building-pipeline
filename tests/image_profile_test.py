@@ -458,7 +458,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
                         and not mode.startswith(("stderr-flood:", "probe-invalid:"))
-                        and mode != "priority-failure"
+                        and mode not in ("priority-failure", "priority-floor")
                         and mode not in SUCCESS_GUEST_MODES and not sent):
                     until = time.monotonic() + 5
                     while not (root / "ready").exists():
@@ -500,14 +500,24 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             return
         return capture(job, process, seconds)
 
-    def capture_priority(pid, cancellation):
-        if mode == "priority-failure":
+    def capture_priority(pid, cancellation, **options):
+        with (root / "priority-calls").open("a") as calls:
+            print(json.dumps(options, sort_keys=True), file=calls)
+        if mode in ("priority-failure", "priority-floor"):
             deadline = time.monotonic() + 2
             while not (root / "ready").exists():
                 assert time.monotonic() < deadline, "fixture guest never reached live priority check"
                 time.sleep(0.005)
             assert pathlib.Path("/proc/thread-self/children").read_text().split() == [str(pid)]
             (root / "priority-failed").touch()
+            if mode == "priority-floor":
+                # As with the failed ioprio sample, refuse once the stand-in has written its frame and exited.
+                exited = os.pidfd_open(pid)
+                try:
+                    assert select.select([exited], [], [], 5)[0], "fixture guest did not exit"
+                finally:
+                    os.close(exited)
+                raise image_resources.PriorityRefusal(-4, os.SCHED_OTHER)
             with patch.object(image_resources._LIBC, "syscall", return_value=-1), \
                     patch.object(image_resources.ctypes, "get_errno", return_value=errno.EPERM):
                 return image_resources.process_priority(pid, cancellation)
@@ -515,7 +525,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             children = pathlib.Path("/proc/thread-self/children").read_text().split()
             assert children == [str(pid)], ("children during capture", children)
             (root / "sole-child").touch()
-        return image_resources.process_priority(pid, cancellation) if inherited else FIXTURE_PRIORITY
+        return image_resources.process_priority(pid, cancellation, **options) if inherited else FIXTURE_PRIORITY
 
     if mode.startswith("stderr-flood:"):
         def audit_capture_spawns(event, args):
@@ -745,7 +755,7 @@ if not mode.startswith("pair:"):
 with (root / "children").open("a") as logged:
     print(os.getpid(), file=logged)
 (root / "ready").touch()
-if mode == "priority-failure":
+if mode in ("priority-failure", "priority-floor"):
     while not (root / "priority-failed").exists():
         time.sleep(0.005)
     os.write(1, (root / "probe.frame").read_bytes())
@@ -860,7 +870,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         launcher.communicate()
 
         directory = root / "returns/fixture/build"
-        if mode == "priority-failure":
+        if mode in ("priority-failure", "priority-floor"):
             terminal = directory / "exit.json"
             assert terminal.is_file(), stderr
             marker = json.loads(terminal.read_text())
@@ -868,8 +878,14 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert (root / "priority-failed").exists()
             assert marker["qemu"].split(":")[0] == pid and marker["qemu_reaped"] is True
             assert not pathlib.Path(f"/proc/{pid}").exists()
+            # The first live sample settles; later ones verify only.
+            assert (root / "priority-calls").read_text().splitlines()[0] == '{"settle": true}'
+            if mode == "priority-floor":
+                text = stderr.decode() if isinstance(stderr, bytes) else stderr
+                assert marker["qemu_priority_refusal"] == {"nice": -4, "policy": "SCHED_OTHER"}, marker
+                assert "observed nice -4, SCHED_OTHER" in text, text
             assert launcher.returncode == marker["launcher_exit"] == 1, (stderr, marker)
-            assert marker["stop_reason"] == "IOPriorityError"
+            assert marker["stop_reason"] == ("PriorityRefusal" if mode == "priority-floor" else "IOPriorityError")
             assert marker["input_descriptor_closed"] and marker["overlay_descriptor_closed"]
             assert not (directory / "transport-validation.json").exists()
             assert not (root / "returns/active.json").exists(), (mode, entry_setup, stderr.decode())
@@ -2711,6 +2727,90 @@ def test_io_priority_is_sampled_in_process_and_fails_closed() -> None:
         spawn.assert_not_called()
 
 
+def test_first_qemu_priority_sample_restores_launch_nice_and_fails_closed() -> None:
+    # The stand-in runs through the production parent-death wrapper and names itself like QEMU.
+    standin = ("import ctypes, sys\n"
+               "ctypes.CDLL(None).prctl(15, b'qemu-system-x86', 0, 0, 0)\n"
+               "sys.stdout.write('ready\\n'); sys.stdout.flush(); sys.stdin.read()\n")
+    real_get, real_set, real_policy = os.getpriority, os.setpriority, os.sched_getscheduler
+    read_text = pathlib.Path.read_text
+
+    def sample(initial, *, settle=True, daemon=None, undo=0, policy=os.SCHED_OTHER, set_error=None, comm_error=None):
+        """Model the kernel nice of one unprivileged child; a host daemon may renice it."""
+        with subprocess.Popen(vm.parent_bound([sys.executable, "-c", standin], os.getpid()),
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+            assert child.stdout.readline() == b"ready\n"
+            state = {"nice": initial, "reads": 0, "sets": [], "undo": undo}
+
+            def get(which, who):
+                if who != child.pid:
+                    return real_get(which, who)
+                state["reads"] += 1
+                nice = state["nice"]
+                if daemon is not None and state["reads"] == daemon[0]:
+                    state["nice"] = daemon[1]
+                return nice
+
+            def put(which, who, value):
+                if who != child.pid:
+                    return real_set(which, who, value)
+                if set_error is not None:
+                    raise OSError(set_error, os.strerror(set_error))
+                assert value >= state["nice"], ("launcher lowered niceness", state["nice"], value)
+                state["sets"].append(value)
+                state["nice"] = initial if state["undo"] else value
+                state["undo"] = max(0, state["undo"] - 1)
+
+            def comm(path, *args, **kwargs):
+                if comm_error is not None and path == pathlib.Path(f"/proc/{child.pid}/comm"):
+                    raise comm_error
+                return read_text(path, *args, **kwargs)
+
+            try:
+                with patch.object(os, "getpriority", get), patch.object(os, "setpriority", put), \
+                        patch.object(os, "sched_getscheduler",
+                                     lambda who: policy if who == child.pid else real_policy(who)), \
+                        patch.object(pathlib.Path, "read_text", comm), \
+                        patch.object(image_resources, "cgroup_limits", return_value=10), \
+                        patch.object(image_resources, "PRIORITY_SETTLE_SECONDS", 0.5):
+                    return image_resources.process_priority(child.pid, Cancellation(), settle=settle), state, child.pid
+            except (image_resources.AdmissionError, OSError) as error:
+                return error, state, child.pid
+            finally:
+                child.stdin.close()
+
+    # The wrapper left -4 and no daemon follows up: the launcher itself restores nice 10.
+    row, state, _ = sample(-4)
+    assert type(row) is dict and row["nice"] == 10 and state["sets"] == [10], (row, state)
+    # The daemon undoes the first raise, then renices QEMU to 9 shortly after start.
+    row, state, _ = sample(-4, daemon=(3, 9), undo=1)
+    assert type(row) is dict and row["nice"] >= image_resources.MIN_NICE, (row, state)
+    # Already within the floor: leave it.
+    row, state, _ = sample(12)
+    assert type(row) is dict and row["nice"] == 12 and state["sets"] == [], (row, state)
+    # Realtime classes refuse at once with the observed policy; niceness is not the remedy.
+    for policy, name in ((os.SCHED_FIFO, "SCHED_FIFO"), (os.SCHED_RR, "SCHED_RR"), (6, "SCHED_DEADLINE")):
+        error, state, _ = sample(12, policy=policy)
+        assert isinstance(error, image_resources.PriorityRefusal), error
+        assert error.observed == {"nice": 12, "policy": name} and state["sets"] == [], (error, state)
+    # A daemon that keeps lowering it exhausts the settle bound and refuses with the observed value.
+    error, state, _ = sample(-4, undo=100)
+    assert isinstance(error, image_resources.PriorityRefusal), error
+    assert error.observed == {"nice": -4, "policy": "SCHED_OTHER"} and "observed nice -4, SCHED_OTHER" in str(error)
+    # Unreadable state and a failed raise are refusals, never a pass.
+    error, _, _ = sample(-4, comm_error=PermissionError(errno.EACCES, "fixture comm"))
+    assert isinstance(error, PermissionError), error
+    for code in (errno.EPERM, errno.ESRCH):
+        error, _, pid = sample(-4, set_error=code)
+        assert type(error) is image_resources.AdmissionError, error
+        assert str(error) == f"cannot raise QEMU PID {pid} to nice 10: {os.strerror(code)}", error
+    # Periodic verification is unchanged: it never renices and still refuses below the floor.
+    row, state, _ = sample(9, settle=False)
+    assert type(row) is dict and row["nice"] == 9 and state["sets"] == [], (row, state)
+    error, state, _ = sample(-4, settle=False)
+    assert isinstance(error, image_resources.PriorityRefusal) and state["sets"] == [], (error, state)
+
+
 def test_priority_syscall_error_restarts_the_whole_observation() -> None:
     for error, failures in product((errno.EINTR, errno.EAGAIN, errno.EIO, errno.EPERM), (1, 3)):
         steps = []
@@ -2928,6 +3028,10 @@ def test_full_launcher_probe_stderr_flood() -> None:
 
 def test_launcher_refuses_and_reaps_after_failed_live_priority_sample() -> None:
     cancelled_fixture("priority-failure")
+
+
+def test_priority_refusal_records_the_observed_nice_and_policy() -> None:
+    cancelled_fixture("priority-floor")
 
 
 def test_probe_exact_result_types_never_commit_success() -> None:

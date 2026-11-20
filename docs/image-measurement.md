@@ -70,6 +70,24 @@ includes the last complete QEMU observation of `nice`, the I/O class (via `iopri
 `cpu_weight` when a live sample was available. Realtime CPU or I/O scheduling
 is refused for the measurement guest.
 
+A host daemon can also lower the niceness of QEMU's short-lived launch
+wrapper. ananicy-cpp, for example, gives `sh` nice -4, which QEMU then
+inherits at exec. The first live sample therefore settles. If the exec'd
+QEMU process is below nice 9, the launcher raises it to nice 10 itself.
+Raising niceness needs no privilege, and the launcher never lowers it. The
+launcher then requires a conformant observation within 5 seconds and
+restarts the whole sample, every 0.1 s, while a sample is below the floor.
+The attempt is refused if any of these hold:
+
+- a realtime policy (`SCHED_FIFO`, `SCHED_RR` or `SCHED_DEADLINE`) is in use
+- nice is still below 9 after the bound
+- the process state is unreadable, or another observation fails
+- the raise itself fails
+
+Later samples only verify. A priority refusal records the observed nice and
+scheduling policy in its error and as `qemu_priority_refusal` in the
+receipts.
+
 The sampler excludes the cgroup v2 mount root, where these per-cgroup
 controls can be absent. The workload and each non-root ancestor must expose
 `memory.max`, `memory.swap.max`, `cpu.max` and `io.weight`. The workload also
