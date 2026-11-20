@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pin_releases import DEFAULT_MAX_AGE_HOURS, Catalog, parse_catalog, refresh_catalog, require_fresh, unique_object
+from pin_releases import Catalog, parse_catalog, refresh_catalog, require_fresh, unique_object
 from pin_versions import Pin, PinError, compare, image_pins, release_version
 
 
@@ -95,7 +95,7 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path)
     parser.add_argument("--overrides", type=Path)
     parser.add_argument("--refresh", action="store_true", help="refresh only release evidence through authenticated gh; never edit pins")
-    parser.add_argument("--max-age-hours", type=int, default=DEFAULT_MAX_AGE_HOURS)
+    parser.add_argument("--max-age-hours", type=int, default=168)
     parser.add_argument("--installed", type=Path, help="report saved dpkg-query TSV; never connects to a board")
     args = parser.parse_args()
     path = args.catalog or args.root / "manifests/first-party-releases.json"

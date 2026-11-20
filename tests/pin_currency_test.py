@@ -134,6 +134,39 @@ class CatalogExpiryTest(unittest.TestCase):
                     self.assertEqual(result.stdout, expected)
 
 
+class GateCatalogDiagnosticTest(unittest.TestCase):
+    def test_invalid_catalog_preserves_master_exit_and_stderr(self) -> None:
+        # Captured from the unmodified master gate at 9d74a7dee0c9.
+        cases = (
+            ("missing checked_at", '{"schema_version":1,"releases":[]}',
+             b"invalid release catalog schema"),
+            ("null", '{"schema_version":1,"releases":[],"checked_at":null}',
+             b"fromisoformat: argument must be str"),
+            ("number", '{"schema_version":1,"releases":[],"checked_at":123}',
+             b"fromisoformat: argument must be str"),
+            ("empty", '{"schema_version":1,"releases":[],"checked_at":""}',
+             b"Invalid isoformat string: ''"),
+            ("malformed timestamp", '{"schema_version":1,"releases":[],"checked_at":"tomorrow"}',
+             b"Invalid isoformat string: 'tomorrow'"),
+            ("invalid JSON", '{"checked_at":',
+             b"Expecting value: line 1 column 15 (char 14)"),
+            ("wrong schema", '{"schema_version":2,"releases":[],"checked_at":"2026-11-19T00:00:00+00:00"}',
+             b"invalid release catalog schema"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            for label, content, diagnostic in cases:
+                with self.subTest(label=label):
+                    catalog.write_text(content)
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / "ci/check-first-party-pins.py"), "--catalog", str(catalog)],
+                        capture_output=True, check=False, timeout=20,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, b"")
+                    self.assertEqual(result.stderr, b"UNVERIFIABLE: " + diagnostic + b"\n")
+
+
 class PinCurrencyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="pin-currency-")

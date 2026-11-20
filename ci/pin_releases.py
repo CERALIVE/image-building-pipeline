@@ -6,11 +6,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Final
 
 from pin_versions import APP_COMPONENTS, COMPONENT_REPOS, COMPONENTS, PLATFORM_COMPONENTS, PinError, compare, release_version
-
-DEFAULT_MAX_AGE_HOURS: Final = 168
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,21 +34,10 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def parse_catalog(text: str, *, require_complete: bool = True) -> Catalog:
-    try:
-        data = json.loads(text, object_pairs_hook=unique_object)
-    except json.JSONDecodeError as error:
-        raise PinError(f"invalid JSON: {error}") from error
-    if not isinstance(data, dict):
+    data = json.loads(text, object_pairs_hook=unique_object)
+    if not isinstance(data, dict) or set(data) != {"schema_version", "checked_at", "releases"} or data["schema_version"] != 1:
         raise PinError("invalid release catalog schema")
-    timestamp = data.get("checked_at")
-    if not isinstance(timestamp, str) or not timestamp:
-        raise PinError("catalog checked_at must be a non-empty string")
-    if set(data) != {"schema_version", "checked_at", "releases"} or data["schema_version"] != 1:
-        raise PinError("invalid release catalog schema")
-    try:
-        checked_at = datetime.fromisoformat(timestamp)
-    except ValueError as error:
-        raise PinError("catalog checked_at is not an ISO 8601 timestamp") from error
+    checked_at = datetime.fromisoformat(data["checked_at"])
     if checked_at.tzinfo is None:
         raise PinError("catalog checked_at must include timezone")
     releases: list[Release] = []
