@@ -453,6 +453,31 @@ esac
             os.close(master)
         self.assertTrue(all(row["argv"][:2] == ["context", "inspect"] for row in self.calls()))
 
+    def test_cold_build_refuses_wrong_repository_or_non_owner(self) -> None:
+        release_ref = "refs/tags/v2026.11.3"
+        for case, overrides in (
+            ("wrong repository", {"GITHUB_REPOSITORY": "fixture/other-repo"}),
+            ("non-owner release", {
+                "GITHUB_EVENT_NAME": "push", "GITHUB_REF": release_ref,
+                "GITHUB_WORKFLOW_REF": f"{ACTION_REPO}/.github/workflows/release.yml@{release_ref}",
+                "GITHUB_TRIGGERING_ACTOR": "fixture-contributor",
+            }),
+            ("non-owner manual audit", {
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_TRIGGERING_ACTOR": "fixture-contributor",
+            }),
+        ):
+            with self.subTest(case=case):
+                self.log.unlink(missing_ok=True)
+                result = subprocess.run([*WRAPPER, "docker", "build", "-t", "fixture",
+                                         "-f", str(ROOT / "ci/Dockerfile"), str(ROOT / "ci")],
+                                        env={**self.headless_env(), **AUDIT_JOB, **overrides},
+                                        stdin=subprocess.DEVNULL, start_new_session=True,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertFalse(any(row["argv"][2:4] == ["buildx", "build"] for row in self.calls()),
+                                 "unauthorized job reached BuildKit dispatch")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("use a prebuilt builder image", result.stderr)
+
     def test_cold_build_refuses_unbounded_or_nonlocal_builder(self) -> None:
         env = {**self.headless_env(), **AUDIT_JOB}
         for overrides, reason in (
