@@ -311,10 +311,28 @@ APT index, and its authenticated digest must equal the released metadata.
 Missing ceralive8 fails; there is no source compile or pin change.
 
 Each `builder_images` row has an archive `object` digest, exact local `tag`,
-approved Docker `image_id`, and `arch`. Both RAUC architectures and the mkosi
-builder must be present. Missing builders fail instead of starting a Docker
-build. Include the complete solved Debian/BSP/first-party dependency closure,
-bootstrap metadata, RAUC upstream/Debian source inputs and the recipe-pinned
+approved image config SHA-256 in `image_id`, and `arch`. The guest checks the
+loaded tag's Linux platform and hashes the raw config from a platform-specific
+local Docker export. It does not compare Docker's inspect `Id`, which may
+identify a manifest instead. After reaping QEMU, the host validates a returned
+failure frame against the same identity, digest, and size checks as a successful
+frame, regardless of QEMU's exit status. It writes only the validated failure
+record to `artifacts/failure.json`, including an allowlisted `failure_code` and
+the expected and observed config digests (observed may be `null`). It does not
+report raw engine output or accept the failed measurement. A JSON parse failure,
+including a parser depth limit, reports `returned artifact set is incomplete`
+on zero QEMU exit. If the parser accepts a deeply nested array, the host
+rejects the non-object as `invalid guest failure diagnostics` on zero exit.
+On nonzero exit, both cases keep `image guest exited (N)`. Neither case
+publishes the receipt or echoes guest text or parser details. Cancellation and
+timeouts still propagate.
+This verifier is baked into the guest, so applying a change to it requires a
+rebuilt base and a new owner-approved base digest.
+
+Both RAUC architectures and the mkosi builder must be present. Missing
+builders fail instead of starting a Docker build. Include the complete solved
+Debian/BSP/first-party dependency closure, bootstrap metadata, RAUC
+upstream/Debian source inputs and the recipe-pinned
 MediaMTX payload. The latter uses the existing checksum-checked local-tarball
 path inside the guest source mount.
 

@@ -402,10 +402,12 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             fail_sync = False
             raise OSError(errno.EIO, "fixture exit directory sync")
         for location, stage in ((root, "parent-sync"), (directory / "stream.partial", "capture-sync"),
-                                (directory / "artifacts/verification.json", "artifact-sync"),
                                 (directory / "artifacts", "artifact-dir-sync")):
             if path == location:
                 fault_at(stage)
+        if (path.name == "verification.json" and path.parent.name.startswith(".return-")
+                and path.parent.parent == directory):
+            fault_at("artifact-sync")
         final = (terminal_entered and path == directory.parent and pair
                  and (directory.parent / "exit.json").exists())
         if final and mask_mutation:

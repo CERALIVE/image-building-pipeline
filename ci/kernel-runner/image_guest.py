@@ -6,21 +6,26 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import socket
 import subprocess
 import selectors
 import signal
+import tarfile
+from tempfile import TemporaryFile
 import time
+from typing import Literal
 
 from image_capsule import Capsule, unpack
 from image_stream import (
     BUILD_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, encode, list_directory, listed_entry,
-    retry_check, retry_io, write_all,
+    retry_check, retry_io, unique_object, write_all,
 )
 from vm_process import child_pipes, poll_owned, reset_child_status, run as run_gate, spawn_gate, wait
 
@@ -29,6 +34,18 @@ MIRROR_READY_SECONDS = 600
 MIRROR_STOP_SECONDS = 20
 MIRROR_RETRY = RETRYABLE_IO | {errno.EINTR}
 UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
+BuilderFailureCode = Literal["builder_engine_inspect_error", "builder_engine_export_error",
+                             "builder_config_unavailable", "builder_platform_mismatch",
+                             "builder_config_digest_mismatch"]
+
+
+class BuilderImageError(StreamError):
+    """Carry only an allowlisted failure code and digests into the failure frame."""
+
+    def __init__(self, code: BuilderFailureCode, expected: str, observed: str | None = None) -> None:
+        super().__init__(code)
+        self.diagnostics = {"failure_code": code, "expected_config_digest": expected,
+                            "observed_config_digest": observed}
 
 
 def command(args: list[str], env: dict[str, str]) -> str:
@@ -163,6 +180,61 @@ def resolve(source: Path, board: str, env: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def check_builder_config(tag: str, arch: str, expected: str, env: dict[str, str]) -> None:
+    """Hash the engine-exported config bytes, not an inspect ID or reserialized JSON."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected):
+        raise StreamError("invalid approved builder config digest")
+    try:
+        inspected, = json.loads(command(["docker", "image", "inspect", "--", tag], env),
+                                object_pairs_hook=unique_object)
+        platform = inspected["Os"], inspected["Architecture"]
+        if not all(isinstance(part, str) and part for part in platform):
+            raise ValueError
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, StreamError):
+        raise BuilderImageError("builder_engine_inspect_error", expected) from None
+    if platform != ("linux", arch):
+        raise BuilderImageError("builder_platform_mismatch", expected)
+
+    observed = None
+    with TemporaryFile(dir=HOME) as exported:
+        try:
+            run_gate(["docker", "image", "save", "--platform", f"linux/{arch}", "--", tag],
+                     env=env, timeout=180, stdout=exported, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            raise BuilderImageError("builder_engine_export_error", expected) from None
+        exported.seek(0)
+        try:
+            with tarfile.open(fileobj=exported, mode="r:") as archive:
+                members = archive.getmembers()
+
+                def metadata(name: str) -> bytes:
+                    member, = (item for item in members if item.name == name)
+                    if not member.isfile() or not 0 < member.size <= 1024**2:
+                        raise ValueError
+                    contents = archive.extractfile(member)
+                    if contents is None:
+                        raise ValueError
+                    with contents:
+                        return contents.read()
+
+                entry, = json.loads(metadata("manifest.json"), object_pairs_hook=unique_object)
+                config_name = entry["Config"]
+                if not re.fullmatch(r"blobs/sha256/[0-9a-f]{64}", config_name):
+                    raise ValueError
+                raw = metadata(config_name)
+                observed = "sha256:" + hashlib.sha256(raw).hexdigest()
+                config = json.loads(raw, object_pairs_hook=unique_object)
+                platform = config["os"], config["architecture"]
+                if not all(isinstance(part, str) and part for part in platform):
+                    raise ValueError
+        except (OSError, tarfile.TarError, ValueError, KeyError, TypeError, StreamError):
+            raise BuilderImageError("builder_config_unavailable", expected, observed) from None
+    if platform != ("linux", arch):
+        raise BuilderImageError("builder_platform_mismatch", expected, observed)
+    if observed != expected:
+        raise BuilderImageError("builder_config_digest_mismatch", expected, observed)
+
+
 def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     directory = capsule.directory
     env = {"PATH": os.environ["PATH"], "HOME": str(HOME), "LANG": "C.UTF-8",
@@ -211,9 +283,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
             raise StreamError("missing reviewed builder archive")
         run_gate(["docker", "load", "-i", str(archive)], env=env, timeout=600,
                  stdout=subprocess.DEVNULL)
-        inspected = json.loads(command(["docker", "image", "inspect", builder["tag"]], env))[0]
-        if (inspected["Id"], inspected["Architecture"]) != (builder["image_id"], builder["arch"]):
-            raise StreamError("loaded builder image differs from approved closure")
+        check_builder_config(builder["tag"], builder["arch"], builder["image_id"], env)
     params = resolve(source, capsule.board, env)
     swap = HOME / "swap"
     run_gate(["fallocate", "-l", "4G", str(swap)], env=env, timeout=60)
@@ -326,9 +396,11 @@ def main() -> None:
     except (OSError, ValueError, KeyError, StreamError, subprocess.SubprocessError) as error:
         failure = error
         report = HOME / "failure.json"
-        report.write_text(json.dumps({"schema": 1, "identity": asdict(identity),
-                                     "failure": type(error).__name__,
-                                     "exit": getattr(error, "returncode", None)}) + "\n")
+        payload = {"schema": 1, "identity": asdict(identity), "failure": type(error).__name__,
+                   "exit": getattr(error, "returncode", None)}
+        if isinstance(error, BuilderImageError):
+            payload.update(failure="StreamError", **error.diagnostics)
+        report.write_text(json.dumps(payload) + "\n")
         records = [("failure.json", report)]
         log = HOME / "build.log"
         if log.is_file():

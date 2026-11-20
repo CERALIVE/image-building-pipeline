@@ -573,7 +573,14 @@ ensure_rauc_builder_image "$2" fixture-base fixture-tag linux/amd64
             "ci/kernel-runner/provision.sh": ("docker buildx version",),
             "ci/kernel-runner/image_guest.py": (
                 'run_gate(["docker", "load", "-i", str(archive)], env=env, timeout=600,',
-                'inspected = json.loads(command(["docker", "image", "inspect", builder["tag"]], env))[0]',
+                'inspected, = json.loads(command(["docker", "image", "inspect", "--", tag], env),',
+                'run_gate(["docker", "image", "save", "--platform", f"linux/{arch}", "--", tag],',
+            ),
+            # These literals match calls intercepted by the fake engine.
+            "tests/image_route_test.py": (
+                'if args[:2] == ["docker", "load"]:',
+                'if args in (["docker", "image", "inspect", tag], ["docker", "image", "inspect", "--", tag]):',
+                'assert args == ["docker", "image", "save", "--platform", "linux/arm64", "--", tag]',
             ),
         }
         unexpected = []
