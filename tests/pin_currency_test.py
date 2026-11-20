@@ -1,19 +1,181 @@
 #!/usr/bin/env python3
 """Offline CLI acceptance: release truth is independent of the pinned input."""
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ci"))
-from pin_releases import Release, discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
+from catalog_expiry import expiry_report  # noqa: E402 - standalone CLI module path
+from pin_releases import Catalog, Release, discover_release, github, refresh_catalog  # noqa: E402 - standalone CLI module path
 from pin_versions import PinError, compare, release_version  # noqa: E402 - standalone CLI module path
+
+
+class CatalogExpiryTest(unittest.TestCase):
+    def test_report_across_warning_and_expiry_boundaries(self) -> None:
+        checked_at = datetime.fromisoformat("2026-11-19T13:14:00-05:00")
+        catalog = Catalog(checked_at, ())
+        for age, remaining, warn, expired in (
+            (0, "168.00", "false", "false"),
+            (120, "48.00", "false", "false"),
+            (120.25, "47.75", "true", "false"),
+            (168, "0.00", "true", "false"),
+            (168.25, "-0.25", "true", "true"),
+        ):
+            with self.subTest(age=age):
+                now = checked_at.astimezone(timezone.utc) + timedelta(hours=age)
+                outputs = dict(line.split("=", 1) for line in expiry_report(catalog, now).splitlines())
+                self.assertEqual(outputs, {
+                    "age_hours": f"{age:.2f}",
+                    "remaining_hours": remaining,
+                    "expires_at": "2026-11-26T18:14:00+00:00",
+                    "expired": expired,
+                    "warn": warn,
+                })
+
+    def test_future_timestamp_does_not_report_healthy(self) -> None:
+        now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+        catalog = Catalog(now + timedelta(seconds=1), ())
+        with self.assertRaises(PinError):
+            expiry_report(catalog, now)
+
+    def run_expiry_step(
+        self, catalog: Path, now: str,
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        import yaml
+
+        workflow = yaml.safe_load((ROOT / ".github/workflows/catalog-expiry-warning.yml").read_text())
+        step = next(s for s in workflow["jobs"]["check-catalog"]["steps"] if s.get("id") == "expiry")
+        output = catalog.parent / "output"
+        output.write_text("")
+        command = step["run"].replace(
+            "python3 ci/catalog_expiry.py",
+            shlex.join([sys.executable, "ci/catalog_expiry.py", "--catalog", str(catalog), "--now", now]),
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", command],
+            cwd=ROOT, env={**os.environ, "GITHUB_OUTPUT": str(output), "LC_ALL": "C"},
+            capture_output=True, text=True, check=False, timeout=20,
+        )
+        return result, output.read_text()
+
+    def test_command_rejects_invalid_catalog_without_workflow_outputs(self) -> None:
+        now = "2026-11-20T00:00:00+00:00"
+        invalid_timestamps = (
+            ("null", None, "catalog checked_at must be a non-empty string"),
+            ("number", 123, "catalog checked_at must be a non-empty string"),
+            ("empty timestamp", "", "catalog checked_at must be a non-empty string"),
+            ("malformed timestamp", "tomorrow", "catalog checked_at is not an ISO 8601 timestamp"),
+            ("timezone missing", "2026-11-19T18:14:00", "catalog checked_at must include timezone"),
+        )
+        cases = (
+            ("missing", None, "catalog file is missing"),
+            ("unreadable", None, "catalog file is unreadable"),
+            ("empty file", "", "invalid JSON"),
+            ("invalid JSON", '{"checked_at":', "invalid JSON"),
+            ("non-object", "[]", "invalid release catalog schema"),
+            ("missing checked_at", '{"schema_version":1,"releases":[]}', "catalog checked_at must be a non-empty string"),
+            *((label, json.dumps({"schema_version": 1, "releases": [], "checked_at": value}), diagnostic)
+              for label, value, diagnostic in invalid_timestamps),
+        )
+        data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
+        data["checked_at"] = "2026-11-20T00:00:01+00:00"
+        for release in data["releases"]:
+            release["published_at"] = "2026-11-19T00:00:00+00:00"
+        cases += (("future", json.dumps(data), "release catalog checked_at is in the future"),)
+        for label, content, diagnostic in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                catalog = Path(directory) / "catalog.json"
+                if label == "unreadable":
+                    catalog.mkdir()
+                elif content is not None:
+                    catalog.write_text(content)
+
+                result, outputs = self.run_expiry_step(catalog, now)
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(outputs, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                # The remaining detail may be supplied by Python or the OS.
+                self.assertTrue(result.stderr.startswith(f"Cannot check release catalog: {diagnostic}"), result.stderr)
+
+    def test_command_publishes_exact_outputs_at_one_second_boundaries(self) -> None:
+        data = json.loads((ROOT / "manifests/first-party-releases.json").read_text())
+        data["checked_at"] = "2026-11-19T18:14:00+00:00"
+        for release in data["releases"]:
+            release["published_at"] = "2026-11-19T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            catalog.write_text(json.dumps(data))
+            for now, age, remaining, expired, warn in (
+                ("2026-11-24T18:14:00+00:00", "120.00", "48.00", "false", "false"),
+                ("2026-11-24T18:14:01+00:00", "120.00", "48.00", "false", "true"),
+                ("2026-11-26T18:14:01+00:00", "168.00", "-0.00", "true", "true"),
+            ):
+                with self.subTest(now=now):
+                    result, outputs = self.run_expiry_step(catalog, now)
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    expected = (
+                        f"age_hours={age}\nremaining_hours={remaining}\n"
+                        f"expires_at=2026-11-26T18:14:00+00:00\nexpired={expired}\nwarn={warn}\n"
+                    )
+                    self.assertEqual(outputs, expected)
+                    self.assertEqual(result.stdout, expected)
+
+
+class GateCatalogDiagnosticTest(unittest.TestCase):
+    @staticmethod
+    def runtime_catalog_diagnostic(content: str) -> bytes:
+        """Get the runtime-owned suffix directly from Python's parsers."""
+        try:
+            timestamp = json.loads(content)["checked_at"]
+        except json.JSONDecodeError as error:
+            return str(error).encode("utf-8")
+        try:
+            datetime.fromisoformat(timestamp)
+        except (TypeError, ValueError) as error:
+            return str(error).encode("utf-8")
+        raise AssertionError("expected the fixture to fail in a Python parser")
+
+    def test_invalid_catalog_preserves_master_exit_and_stderr(self) -> None:
+        # Gate-owned strings come from master at 9d74a7dee0c9. Normalize only
+        # the Python exception suffix by obtaining it from this interpreter.
+        cases = (
+            ("missing checked_at", '{"schema_version":1,"releases":[]}',
+             b"invalid release catalog schema"),
+            ("null", '{"schema_version":1,"releases":[],"checked_at":null}', None),
+            ("number", '{"schema_version":1,"releases":[],"checked_at":123}', None),
+            ("empty", '{"schema_version":1,"releases":[],"checked_at":""}', None),
+            ("malformed timestamp", '{"schema_version":1,"releases":[],"checked_at":"tomorrow"}', None),
+            ("invalid JSON", '{"checked_at":', None),
+            ("wrong schema", '{"schema_version":2,"releases":[],"checked_at":"2026-11-19T00:00:00+00:00"}',
+             b"invalid release catalog schema"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            for label, content, diagnostic in cases:
+                with self.subTest(label=label):
+                    catalog.write_text(content)
+                    result = subprocess.run(
+                        [sys.executable, str(ROOT / "ci/check-first-party-pins.py"), "--catalog", str(catalog)],
+                        capture_output=True, check=False, timeout=20,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, b"")
+                    if diagnostic is None:
+                        diagnostic = self.runtime_catalog_diagnostic(content)
+                    self.assertEqual(result.stderr, b"UNVERIFIABLE: " + diagnostic + b"\n")
 
 
 class PinCurrencyTest(unittest.TestCase):

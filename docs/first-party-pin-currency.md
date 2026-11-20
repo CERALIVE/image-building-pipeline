@@ -105,9 +105,24 @@ builds (`release.yml`) and the weekly `real-build-audit.yml` refresh the evidenc
 themselves in the job (`--refresh --max-age-hours 24`), so they no longer depend on a
 manual refresh commit: they use the optional read-only secret
 `FIRST_PARTY_RELEASE_READ_TOKEN`, and without it `gh` falls back to the runner user's
-login. The refresh never edits pins, so a pin behind a newer first-party release still
-fails the build, and there is no bot and no warning-only bypass. The committed
-snapshot used by PR CI still needs a reviewed refresh at least weekly.
+login. The refresh never edits pins, so a pin behind a newer first-party release
+still fails the build. The committed snapshot used by PR CI still needs a
+reviewed refresh at least weekly.
+
+The daily **First-party release catalog expiry warning** workflow checks the
+committed snapshot on `master`. With fewer than **48 hours** left in its
+**168-hour** freshness window, or after expiry, it opens or updates one
+**First-party release catalog needs refresh** issue. Run
+`python3 ci/check-first-party-pins.py --refresh` with your local `gh` login and
+open the usual refresh PR. Close the issue after the refreshed catalog lands
+on `master`. The workflow only files the reminder. The freshness gate still
+fails on expired evidence.
+
+An unreadable or invalid catalog fails the scheduled check and reports the
+reason in the run log without publishing a freshness result. An invalid
+catalog does not open or update the issue. Check the failed run and use the
+same refresh procedure. `checked_at` must include a timezone and cannot be
+in the future.
 
 **Limit:** a release published after `checked_at` is invisible until refresh,
 up to the bounds above. The printed timestamp is the scope of the verdict;
