@@ -44,6 +44,10 @@ def die_with_parent(parent: int) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+class ImageGuestExit(RuntimeError):
+    """The image child was reaped with a nonzero status after capture."""
+
+
 def boot(disk: Path, payload: bytes, kind: str, seconds: int,
          seed: Path | None = None, source_bundle: Path | None = None,
          disk_fd: int | None = None, image_job=None, image_base: bool = False,
@@ -125,7 +129,7 @@ def boot(disk: Path, payload: bytes, kind: str, seconds: int,
         cancellation.check()
         if image_job:
             if code != 0:
-                raise RuntimeError(f"image guest exited ({code})")
+                raise ImageGuestExit(f"image guest exited ({code})")
             return
         # Never relay runner logs: an untrusted job could print the JIT credential.
         expected = b"CERALIVE_BASE_READY" if seed else b"CERALIVE_JOB_DONE=0"

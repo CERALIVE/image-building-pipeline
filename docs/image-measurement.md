@@ -314,9 +314,13 @@ Each `builder_images` row has an archive `object` digest, exact local `tag`,
 approved image config SHA-256 in `image_id`, and `arch`. The guest checks the
 loaded tag's Linux platform and hashes the raw config from a platform-specific
 local Docker export. It does not compare Docker's inspect `Id`, which may
-identify a manifest instead. A failed check returns a fixed `failure_code`
-and the expected and observed config digests in `artifacts/failure.json`;
-the observed digest is `null` if unavailable. Engine output is not included.
+identify a manifest instead. After reaping QEMU, the host validates a returned
+failure frame against the same identity, digest, and size checks as a successful
+frame, regardless of QEMU's exit status. It writes only the validated failure
+record to `artifacts/failure.json`, including an allowlisted `failure_code` and
+the expected and observed config digests (observed may be `null`). It does not
+report raw engine output or accept the failed measurement. A nonzero exit
+without a valid failure frame keeps the original exit message.
 This verifier is baked into the guest, so applying a change to it requires a
 rebuilt base and a new owner-approved base digest.
 

@@ -15,9 +15,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tarfile
+from tempfile import TemporaryDirectory
 import time
 
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
@@ -25,8 +27,8 @@ from image_lifecycle import ImageJob, create_directory, receipt, reconcile, repo
 from image_policy import load_policy
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import (
-    Identity, StreamError, checked_open, decode, exact_json, list_directory, listed_entry, retry_check,
-    unique_object, verify_sidecar,
+    BUILD_LOG_LIMIT, HEADER_LIMIT, MAGIC, MANIFEST_LIMIT, Identity, StreamError, checked_open, decode, exact_json,
+    list_directory, listed_entry, read_header, retry_check, unique_object, verify_sidecar,
 )
 from vm_process import Cancelled, Cancellation, run
 
@@ -249,12 +251,31 @@ def validate_verification(row, identity: Identity, inventory: dict) -> None:
         raise StreamError("missing or duplicate verifier slot")
 
 
-def validate_return(job: ImageJob, verifier: bool) -> None:
+def failure_record(path: Path, identity: Identity) -> dict:
+    row = returned_json(path, private=True)
+    base = {"schema": 1, "identity": asdict(identity), "failure": "StreamError", "exit": None}
+    if exact_json(row, base):
+        return base
+    fields = {"failure_code", "expected_config_digest", "observed_config_digest"}
+    if (type(row) is not dict or set(row) != set(base) | fields
+            or not exact_json({key: row[key] for key in base}, base)):
+        raise StreamError("invalid guest failure diagnostics")
+    code, expected, observed = (row[key] for key in
+                                ("failure_code", "expected_config_digest", "observed_config_digest"))
+    digest = r"sha256:[0-9a-f]{64}"
+    if (type(code) is not str or code not in (
+            "builder_engine_inspect_error", "builder_engine_export_error", "builder_config_unavailable",
+            "builder_platform_mismatch", "builder_config_digest_mismatch")
+            or type(expected) is not str or not re.fullmatch(digest, expected)
+            or (observed is not None and (type(observed) is not str or not re.fullmatch(digest, observed)))):
+        raise StreamError("invalid guest failure diagnostics")
+    return base | {"failure_code": code, "expected_config_digest": expected,
+                   "observed_config_digest": observed}
+
+
+def validate_return(job: ImageJob, verifier: bool, guest_exit: RuntimeError | None = None) -> None:
     target = job.directory / "artifacts"
-    create_directory(target)
     envelope = job.directory / "stream.partial"
-    with envelope.open("rb") as source:
-        members = decode(source, target, job.identity, job.cancellation.check)
     expected = {"verification.json"} if verifier else {
         "rootfs.tar", "rootfs.tar.sha256", "rootfs_a.ext4", "rootfs_b.ext4",
         "measurement.json", "packages.lock.json", "fetch.jsonl", "sealed-delivery.json",
@@ -262,8 +283,39 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
         "kernel.SHA256SUMS", "boot.scr", "boot.scr.sha256", "build.log",
         "rootfs_a.reserve", "rootfs_b.reserve", "rootfs_a.header", "rootfs_b.header",
     }
-    if {member.id for member in members} != expected:
-        raise StreamError("returned artifact set is incomplete")
+    failure = None
+    # Never publish a decoded failure record before the terminal frame and its schema are checked.
+    with TemporaryDirectory(dir=job.directory, prefix=".return-") as staged:
+        staging = Path(staged)
+        try:
+            with envelope.open("rb") as source:
+                if guest_exit is not None:
+                    # A failure can contain only its receipt, a build log, and the terminal manifest.
+                    limit = len(MAGIC) + 3 * HEADER_LIMIT + MANIFEST_LIMIT + 1024**2 + BUILD_LOG_LIMIT
+                    if os.fstat(source.fileno()).st_size > limit:
+                        raise StreamError("oversized guest failure frame")
+                    if source.read(len(MAGIC)) != MAGIC or read_header(source).id != "failure.json":
+                        raise StreamError("no guest failure frame")
+                    source.seek(0)
+                    disk_headroom(((job.directory, 16 * GIB),))
+                members = decode(source, staging, job.identity, job.cancellation.check)
+            ids = {member.id for member in members}
+            if ids in ({"failure.json"}, {"failure.json", "build.log"}):
+                failure = failure_record(staging / "failure.json", job.identity)
+            elif guest_exit is not None or ids != expected:
+                raise StreamError("returned artifact set is incomplete")
+        except (AdmissionError, OSError, ValueError, TypeError, StreamError):
+            if guest_exit is not None:
+                raise RuntimeError(str(guest_exit)) from None
+            raise
+        if failure is None:
+            staging.rename(target)
+            sync_directory(job.directory)
+    if failure is not None:
+        create_directory(target)
+        receipt(target / "failure.json", failure)
+        code = failure.get("failure_code")
+        raise StreamError(f"guest builder check failed: {code}" if code else "guest reported a failure")
     if not verifier:
         stages = measurement_stages(returned_json(target / "measurement.json"), job.identity,
                                     job.state["public_root_der_sha256"], members)
@@ -281,7 +333,7 @@ def validate_return(job: ImageJob, verifier: bool) -> None:
 def execute(base: Path, directory: Path, request: dict, cancellation: Cancellation,
             jobs: list[ImageJob]) -> Path:
     """One owned overlay, exit receipt and independent host transport validation."""
-    from vm import boot, job_disk
+    from vm import ImageGuestExit, boot, job_disk
     identity = Identity(**request["payload"]["identity"])
     create_directory(directory)
     with ImageJob(directory, identity, request["capsule"], cancellation,
@@ -300,12 +352,20 @@ def execute(base: Path, directory: Path, request: dict, cancellation: Cancellati
             payload = json.dumps(request["payload"]).encode()
             if len(payload) > 1024 * 1024:
                 raise AdmissionError("image job public metadata exceeds 1 MiB")
-            boot(overlay, payload, "image", seconds,
-                 disk_fd=disk_fd, image_job=job)
+            guest_exit = None
+            try:
+                boot(overlay, payload, "image", seconds,
+                     disk_fd=disk_fd, image_job=job)
+            except ImageGuestExit as error:
+                guest_exit = error
         job.outputs.close()
         cancellation.check()
+        verifier = request["payload"]["operation"] != "measure"
+        if guest_exit is not None:
+            validate_return(job, verifier, guest_exit)
+            raise RuntimeError(str(guest_exit))
         disk_headroom(((directory, 16 * GIB),))
-        validate_return(job, request["payload"]["operation"] != "measure")
+        validate_return(job, verifier)
         job.state["stop_reason"] = "guest exited; transport validated"
     return directory / "artifacts"
 

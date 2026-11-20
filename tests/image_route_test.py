@@ -19,6 +19,7 @@ import tempfile
 import tarfile
 import time
 import threading
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from bootstrap_metadata_test import PACKAGE_URL, bootstrap_fixture
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 import image_guest
+import image_lifecycle
 import image_resources
 import image_verify
 import image_vm
@@ -771,6 +773,92 @@ def test_measure_checks_loaded_platform_config_and_returns_safe_failure_frame() 
                     "schema": 1, "identity": asdict(IDENTITY), "failure": "StreamError", "exit": None,
                     "failure_code": code, "expected_config_digest": config_id, "observed_config_digest": observed,
                 }), (shape, case)
+
+
+def test_host_rejects_failed_measurement_and_records_only_validated_diagnostics() -> None:
+    marker = "/private/credential-fixture"
+    failure = {"schema": 1, "identity": asdict(IDENTITY), "failure": "StreamError", "exit": None}
+    report = failure | {"failure_code": "builder_config_digest_mismatch",
+                        "expected_config_digest": "sha256:" + "a" * 64,
+                        "observed_config_digest": "sha256:" + "b" * 64}
+    for case, code, data, frame_identity, suffix, expected in (
+        ("nonzero", 1, json.dumps(report).encode(), IDENTITY, b"", report),
+        ("zero", 0, json.dumps(report | {"observed_config_digest": None}).encode(), IDENTITY, b"",
+         report | {"observed_config_digest": None}),
+        ("legacy", 0, json.dumps(failure).encode(), IDENTITY, b"", failure),
+        ("unlisted field", 1, json.dumps(report | {"extra": marker}).encode(), IDENTITY, b"", None),
+        ("unknown code", 1, json.dumps(report | {"failure_code": marker}).encode(), IDENTITY, b"", None),
+        ("invalid digest", 0, json.dumps(report | {"observed_config_digest": marker}).encode(), IDENTITY, b"", None),
+        ("invalid JSON", 1, marker.encode(), IDENTITY, b"", None),
+        ("oversized", 1, b" " * (1024**2) + json.dumps(report).encode(), IDENTITY, b"", None),
+        ("wrong frame identity", 1, json.dumps(report).encode(),
+         Identity("other-attempt", IDENTITY.board, IDENTITY.commit, IDENTITY.epoch, IDENTITY.input_sha256), b"", None),
+        ("trailing data", 1, json.dumps(report).encode(), IDENTITY, marker.encode(), None),
+        ("empty", 1, None, IDENTITY, b"", None),
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            attempt = root / IDENTITY.attempt
+            attempt.mkdir()
+            output = attempt / "build"
+            capsule, base, wire = (root / name for name in ("capsule", "base", "wire"))
+            capsule.touch()
+            base.touch()
+            with wire.open("wb") as frame:
+                if data is not None:
+                    encode(frame, [("failure.json", data)], frame_identity)
+                frame.write(suffix)
+            request = {"capsule": capsule, "base_sha256": "c" * 64,
+                       "retained_bytes": 0, "deadline": time.monotonic() + 10, "payload": {
+                           "identity": asdict(IDENTITY), "operation": "measure",
+                           "trust": {"root_der_sha256": "d" * 64}}}
+
+            @contextmanager
+            def disk(_base, job, _cancel):
+                with tempfile.TemporaryFile() as overlay:
+                    job.overlay_created(overlay.fileno())
+                    yield root / "overlay", overlay.fileno()
+
+            def spawn(_argv, **_options):
+                return subprocess.Popen([sys.executable, "-c",
+                                         "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read());"
+                                         "raise SystemExit(int(sys.argv[2]))", str(wire), str(code)],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            def measure(_args, _parser, cancellation, jobs):
+                image_vm.execute(base, output, request, cancellation, jobs)
+                raise AssertionError("failed guest reached the verifier")
+
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            with patch.object(vm, "job_disk", disk), patch.object(vm, "spawn_qemu", spawn), \
+                    patch.object(image_vm, "measure_image", measure), patch.object(image_vm, "disk_headroom"), \
+                    patch.object(image_lifecycle, "disk_headroom"), \
+                    patch.object(image_lifecycle, "process_priority", return_value={"nice": 9}), \
+                    patch.object(image_lifecycle, "report_error") as diagnostic:
+                try:
+                    status = image_vm.run_image(SimpleNamespace(image_mode="measure"), None, vm.Cancellation())
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+            outcome = json.loads((attempt / "exit.json").read_text())
+            teardown = json.loads((output / "teardown.json").read_text())
+            assert teardown["qemu_exit"] == code and teardown["qemu_reaped"] is True, case
+            assert status == outcome["launcher_exit"] == 1 and outcome["pair_complete"] is False, case
+            assert not (output / "transport-validation.json").exists(), case
+            assert not (attempt / "acceptance.json").exists(), case
+            artifact = output / "artifacts/failure.json"
+            messages = [str(call.args[0]) for call in diagnostic.call_args_list]
+            assert all(marker not in message for message in messages), (case, messages)
+            if expected is not None:
+                assert artifact.is_file(), (case, "validated diagnostic missing")
+                assert exact_json(json.loads(artifact.read_text()), expected), case
+                assert outcome["stop_reason"] == "StreamError", case
+                expected_message = ("guest builder check failed: builder_config_digest_mismatch"
+                                    if "failure_code" in expected else "guest reported a failure")
+                assert messages == [expected_message], (case, messages)
+            else:
+                assert not artifact.exists(), (case, "unvalidated diagnostics published")
+                if code:
+                    assert messages == ["image guest exited (1)"], (case, messages)
 
 
 def test_mirror_never_accepts_exit_without_a_shutdown_acknowledgement() -> None:
