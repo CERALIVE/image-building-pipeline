@@ -38,8 +38,16 @@ PORT="${CERALIVE_TYPEC_PORT:-port0}"
 WAIT_SECONDS="${CERALIVE_TYPEC_WAIT:-10}"
 POLL_INTERVAL="${CERALIVE_TYPEC_POLL:-0.25}"
 
-log() { printf 'ceralive-typec-policy: %s\n' "$*"; }
-die() { printf 'ceralive-typec-policy: %s\n' "$*" >&2; exit 1; }
+# Journal priority from the message's own tag: ERROR -> err, WARNING -> warning,
+# everything else -> notice. The ten-second recheck unit caps its journal at
+# notice (LogLevelMax) so systemd's per-tick start/finish lines are dropped; the
+# lines this script prints are state changes and must stay above that cap.
+log() {
+  local prio=5
+  case "$*" in ERROR:*) prio=3 ;; WARNING:*) prio=4 ;; esac
+  printf '<%s>ceralive-typec-policy: %s\n' "${prio}" "$*"
+}
+die() { printf '<3>ceralive-typec-policy: %s\n' "$*" >&2; exit 1; }
 
 [[ "${WAIT_SECONDS}" =~ ^[0-9]+$ ]] || die "CERALIVE_TYPEC_WAIT must be an unsigned integer"
 NOPARTNER_MAX="${CERALIVE_TYPEC_NOPARTNER_MAX:-3}"

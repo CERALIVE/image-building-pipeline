@@ -67,6 +67,9 @@ CALL_TIMEOUT="${CERALIVE_HOSTNAME_CALL_TIMEOUT:-3}"
 LOCK_WAIT="${CERALIVE_HOSTNAME_LOCK_WAIT:-10}"
 CONTENTION_RETRIES="${CERALIVE_HOSTNAME_CONTENTION_RETRIES:-4}"
 CONTENTION_BACKOFF_MAX="${CERALIVE_HOSTNAME_CONTENTION_BACKOFF_MAX:-4}"
+REGISTERING_NOTE_AFTER=300
+UPTIME_FILE="${CERALIVE_UPTIME_FILE:-/proc/uptime}"
+REGISTERING_FILE="$(dirname -- "$LOCK_FILE")/registering-since"
 CLAIM_CONFLICT=10
 CONSUMER_UNITS=(
     ceralive-tls-firstboot.service
@@ -77,7 +80,7 @@ CONSUMER_UNITS=(
 )
 
 die() {
-    printf 'ceralive-set-hostname: %s\n' "$*" >&2
+    printf '<3>ceralive-set-hostname: %s\n' "$*" >&2
     exit 1
 }
 
@@ -127,9 +130,12 @@ candidate_for_index() {
     fi
 }
 
+# 0: a publishable address is up; 1: the query worked and found none;
+# 2: the address query itself failed (its stderr reaches the journal).
 publishable_address_present() {
-    "$IP_BIN" -o addr show up 2>/dev/null \
-        | awk -v ap_iface="$AP_IFACE" -v ap_address="$AP_ADDRESS" '
+    local addresses
+    addresses="$("$IP_BIN" -o addr show up)" || return 2
+    awk -v ap_iface="$AP_IFACE" -v ap_address="$AP_ADDRESS" '
             $2 == "lo" { next }
             $3 == "inet" {
                 split($4, parts, "/")
@@ -144,7 +150,80 @@ publishable_address_present() {
                 found = 1
             }
             END { exit !found }
-        '
+        ' <<<"$addresses"
+}
+
+uptime_seconds() {
+    local up rest
+    read -r up rest <"$UPTIME_FILE" || return 1
+    up="${up%%.*}"
+    [[ "$up" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$up"
+}
+
+# A registering Avahi publication defers each reconcile tick quietly. If it is
+# still registering REGISTERING_NOTE_AFTER seconds after the first deferral,
+# say so once at warning. The marker in the lock directory under /run holds
+# "<uptime seconds> [reported]", or "unclocked" once an unreadable clock has
+# been reported.
+read_registering_marker() {
+    marker_since=""
+    marker_flag=""
+    if [ -L "$REGISTERING_FILE" ] || { [ -e "$REGISTERING_FILE" ] && [ ! -f "$REGISTERING_FILE" ]; }; then
+        printf '<4>ceralive-set-hostname: removing unexpected non-file at %s\n' "$REGISTERING_FILE" >&2
+        rm -f -- "$REGISTERING_FILE" || true
+        return 0
+    fi
+    [ -f "$REGISTERING_FILE" ] || return 0
+    read -r marker_since marker_flag <"$REGISTERING_FILE" || true
+}
+
+write_registering_marker() {
+    printf '%s\n' "$1" >"$REGISTERING_FILE"
+}
+
+note_registering_deferral() {
+    local now
+    read_registering_marker
+    if ! now="$(uptime_seconds)"; then
+        if [[ "$marker_since" != unclocked ]]; then
+            write_registering_marker unclocked || true
+            printf '<5>ceralive-set-hostname: publication is still registering; cannot read %s, so a long deferral will not be reported\n' \
+                "$UPTIME_FILE"
+        else
+            printf '<6>ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
+        fi
+        return 0
+    fi
+    if [[ ! "$marker_since" =~ ^[0-9]+$ ]] || (( now < marker_since )); then
+        if ! write_registering_marker "$now"; then
+            printf '<4>ceralive-set-hostname: publication is still registering; cannot record when the deferral started, so a long deferral will not be reported\n' >&2
+            return 0
+        fi
+        marker_since="$now"
+        marker_flag=""
+    fi
+    if [[ "$marker_flag" != reported ]] && (( now - marker_since >= REGISTERING_NOTE_AFTER )); then
+        if ! write_registering_marker "$marker_since reported"; then
+            # Without the flag the warning would repeat on every tick; start
+            # the timer again instead.
+            rm -f -- "$REGISTERING_FILE" || true
+        fi
+        printf '<4>ceralive-set-hostname: publication has been registering for %s s; still deferring reconciliation\n' \
+            "$((now - marker_since))" >&2
+        return 0
+    fi
+    printf '<6>ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
+}
+
+# $1: the notice to give if a long deferral had been reported.
+clear_registering_deferral() {
+    { [ -e "$REGISTERING_FILE" ] || [ -L "$REGISTERING_FILE" ]; } || return 0
+    read_registering_marker
+    rm -f -- "$REGISTERING_FILE" || true
+    if [[ "$marker_flag" = reported ]]; then
+        printf '<5>ceralive-set-hostname: %s\n' "$1"
+    fi
 }
 
 avahi_call() {
@@ -261,7 +340,7 @@ claim_candidate() {
                     if candidate_has_stable_owner "$candidate"; then
                         return "$CLAIM_CONFLICT"
                     fi
-                    printf 'ceralive-set-hostname: %s.local has no stable owner; retrying the same deterministic candidate\n' \
+                    printf '<5>ceralive-set-hostname: %s.local has no stable owner; retrying the same deterministic candidate\n' \
                         "$candidate" >&2
                     retry=1
                     break
@@ -409,40 +488,52 @@ if [[ "$MODE" = reconcile ]]; then
 fi
 
 candidate="$(candidate_for_index "$index")"
-if ! publishable_address_present; then
+address_rc=0
+publishable_address_present || address_rc=$?
+if [[ "$address_rc" = 2 ]]; then
+    printf '<4>ceralive-set-hostname: cannot list network addresses (ip -o addr show up failed); treating the device as offline\n' >&2
+fi
+if [[ "$address_rc" != 0 ]]; then
+    clear_registering_deferral "the registration deferral ended; no publishable LAN address"
+    wrote_provisional=0
     if ! { [ -e "$INDEX_FILE" ] && local_identity_matches "$candidate"; }; then
         if [[ "$MODE" = reconcile ]]; then
             atomic_write "$RESTART_PENDING_FILE" 0600 "$candidate" \
                 || die "failed to persist identity-consumer restart marker"
         fi
         commit_identity "$index" "$candidate" || die "failed to persist provisional hostname identity"
+        wrote_provisional=1
     fi
     if [[ "$MODE" = reconcile && -e "$RESTART_PENDING_FILE" ]]; then
         restart_identity_consumers || die "failed to requeue identity consumers"
         clear_restart_pending || die "failed to clear identity-consumer restart marker"
-        printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+        printf '<5>ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
     fi
-    printf 'ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
+    if [[ "$wrote_provisional" = 1 ]]; then
+        printf '<5>ceralive-set-hostname: persisted provisional identity %s.local; no publishable LAN address, deferring publication claim\n' "$candidate"
+    else
+        printf '<6>ceralive-set-hostname: provisional identity %s.local unchanged; no publishable LAN address, deferring publication claim\n' "$candidate"
+    fi
     exit 0
 fi
 
 if [[ "$MODE" = reconcile ]]; then
 
-    state="$(read_avahi_state)" \
-        && published="$(read_avahi_hostname)" \
-        || die "cannot read a strict Avahi publication snapshot"
+    state="$(read_avahi_state)" || die "cannot read a strict Avahi publication snapshot"
+    [[ "$state" = 1 ]] || clear_registering_deferral "publication is no longer registering (Avahi state $state)"
+    published="$(read_avahi_hostname)" || die "cannot read a strict Avahi publication snapshot"
     if local_identity_matches "$candidate"; then
         if [[ "$state" = 2 && "$published" = "$candidate" ]]; then
             if [ -e "$RESTART_PENDING_FILE" ]; then
                 restart_identity_consumers || die "failed to requeue identity consumers"
                 clear_restart_pending || die "failed to clear identity-consumer restart marker"
-                printf 'ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
+                printf '<5>ceralive-set-hostname: completed pending consumer restart for %s.local\n' "$candidate"
             fi
-            printf 'ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
+            printf '<6>ceralive-set-hostname: identity already aligned at %s.local\n' "$candidate"
             exit 0
         fi
         if [[ "$state" = 1 ]]; then
-            printf 'ceralive-set-hostname: publication is still registering; deferring reconciliation\n'
+            note_registering_deferral
             exit 0
         fi
     fi
@@ -450,7 +541,7 @@ if [[ "$MODE" = reconcile ]]; then
         || die "Avahi is not able to establish hostname ownership (state $state)"
     [[ "$state" != 1 ]] \
         || die "local identity diverged while Avahi is still registering"
-    printf 'ceralive-set-hostname: publication diverged (expected=%s state=%s published=%s); reclaiming deterministically\n' \
+    printf '<5>ceralive-set-hostname: publication diverged (expected=%s state=%s published=%s); reclaiming deterministically\n' \
         "$candidate" "$state" "$published" >&2
 fi
 
@@ -467,16 +558,16 @@ while (( index <= MAX_INDEX )); do
         if [[ "$MODE" = reconcile ]]; then
             restart_identity_consumers || die "failed to requeue identity consumers"
             clear_restart_pending || die "failed to clear identity-consumer restart marker"
-            printf 'ceralive-set-hostname: reconciled and established %s.local\n' "$candidate"
+            printf '<5>ceralive-set-hostname: reconciled and established %s.local\n' "$candidate"
         else
-            printf 'ceralive-set-hostname: established %s.local\n' "$candidate"
+            printf '<5>ceralive-set-hostname: established %s.local\n' "$candidate"
         fi
         exit 0
     else
         rc=$?
     fi
     if [[ "$rc" = "$CLAIM_CONFLICT" ]]; then
-        printf 'ceralive-set-hostname: %s.local conflicted; trying next deterministic candidate\n' "$candidate" >&2
+        printf '<5>ceralive-set-hostname: %s.local conflicted; trying next deterministic candidate\n' "$candidate" >&2
         index=$((index + 1))
         continue
     fi
@@ -526,6 +617,14 @@ After=ceralive-hostname.service NetworkManager.service avahi-daemon.service
 Type=oneshot
 ExecStart=/usr/local/sbin/ceralive-set-hostname reconcile
 TimeoutStartSec=150
+# Every 30 s tick otherwise journals four info lines (start, "identity already
+# aligned", deactivated, finished) whether or not anything changed. Actions and
+# failures are logged at notice or above, so they still reach the journal.
+# Output without a priority prefix (stderr from a failed mkdir, chmod or lock
+# redirection, or a tool's own error output) defaults to notice and passes the
+# filter; the helper tags its routine lines <6> itself.
+LogLevelMax=notice
+SyslogLevel=notice
 EOF
 
   cat >/etc/systemd/system/ceralive-hostname-reconcile.timer <<'EOF'
