@@ -53,7 +53,10 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
         package = "linux-image-7.2.0-ceralive-rk3588"
         deb_name = f"{package}_{version}_arm64.deb"
         payloads = (deb_name, *CANDIDATE_META)
-        producer = "2" * 40
+        producer = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
+            env=os.environ | {"GIT_MASTER": "1", "GIT_NO_LAZY_FETCH": "1"}, text=True, timeout=10,
+        ).strip()
         subprocess.run([
             "bash", "-euo", "pipefail", "-c",
             'ROOT="$1"; WORK="$2"; source "$ROOT/tests/lib/kernel-release-fixtures.sh"; '
@@ -330,6 +333,33 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
         coherently_replace("deb control differs despite all matching hashes", changed,
                            proof(receipt, authorization | {"deb_sha256": wrong_deb_hash}, changed),
                            "deb control identity")
+
+        unpacked = work / "unpacked-kernel"
+        subprocess.run(["dpkg-deb", "-R", str(bundle / deb_name), str(unpacked)],
+                       capture_output=True, check=True, timeout=30)
+        for board, dtb_name in (("orange-pi-5-plus", "rk3588-orangepi-5-plus.dtb"),
+                                ("rock-5b-plus", "rk3588-rock-5b-plus.dtb")):
+            dtb, = unpacked.rglob(dtb_name)
+            payload = dtb.read_bytes()
+            dtb.unlink()
+            repacked = work / "repacked.deb"
+            try:
+                subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(unpacked), str(repacked)],
+                               capture_output=True, check=True, timeout=30)
+                changed = content | {deb_name: repacked.read_bytes()}
+            finally:
+                dtb.write_bytes(payload)
+            deb_hash = pin(changed[deb_name])["sha256"]
+            changed["kernel-artifact.json"] = json.dumps(metadata | {"deb_sha256": deb_hash}).encode()
+            changed["SHA256SUMS"] = sums({k: v for k, v in changed.items() if k != "SHA256SUMS"})
+            coherently_replace(f"deb missing DTB for {board}", changed,
+                               proof(receipt, authorization | {"deb_sha256": deb_hash}, changed),
+                               f"kernel deb board check failed: {board}; DTB presence pinned=present observed=unverified")
+
+        absent_commit = "f" * 40
+        coherently_replace("producer commit not in local repository", content,
+                           proof(receipt | {"commit": absent_commit}, authorization | {"commit": absent_commit}, content),
+                           "producer commit is not a local commit", producer_commit=absent_commit)
 
         rc, error = invoke()
         if rc != 0:

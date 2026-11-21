@@ -180,14 +180,20 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
     if record.fingerprint != fp:
         raise StreamError(f"{KIND} artifact fingerprint mismatch; "
                           f"SHA-256 (first 16) pinned={fp[:16]} observed={record.fingerprint[:16]}")
-    def run(*args: str, extra_env: dict[str, str] | None = None) -> str:
+    def run(*args: str, extra_env: dict[str, str] | None = None,
+            failure: str = "measurement-candidate package or family fingerprint check failed") -> str:
         try:
             return run_gate(list(args), cwd=ROOT, env=env if extra_env is None else env | extra_env,
                             stdin=subprocess.DEVNULL, capture_output=True, check=True, text=True,
                             timeout=180).stdout.strip()
         except (OSError, ValueError, subprocess.SubprocessError):
-            raise StreamError("measurement-candidate package or family fingerprint check failed") from None
+            raise StreamError(failure) from None
 
+    commit_error = f"{KIND} producer commit is not a local commit"
+    if run("git", "-c", "protocol.allow=never", "cat-file", "-t", selected["producer_commit"],
+           extra_env={"GIT_MASTER": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
+           failure=commit_error) != "commit":
+        raise StreamError(commit_error)
     expected = (selected["package"], selected["version"], selected["arch"])
     fields = ("Package", "Version", "Architecture")
     actual = run("dpkg-deb", "-f", str(work / candidate.deb), *fields).splitlines()
@@ -204,6 +210,12 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
             params[key] = shlex.split(value)[0]
         if (params["KERNEL_PACKAGES"], params["KERNEL_SOURCE_PACKAGE_VERSION"], params["ARCH"]) != expected:
             raise StreamError("measurement-candidate shipping manifest identity differs from policy")
+        dtb_path = f"{params['KERNEL_SOURCE_DTB_DEB_DIR']}/{params['DTB_NAME']}"
+        run("bash", "-euo", "pipefail", "-c",
+            'source "$1/lib/common.sh"; source "$1/lib/kernel/package.sh"; '
+            'shift; validate_built_kernel_deb "$@"',
+            "_", str(ROOT), str(work / candidate.deb), *expected, dtb_path,
+            failure=f"{KIND} kernel deb board check failed: {target}; DTB presence pinned=present observed=unverified")
         params.pop("KERNEL_VARIANT", None)  # Match the producer's fingerprint input frame.
         observed = run("bash", str(ROOT / "lib/kernel/released.sh"), "--board", target,
                        "--fingerprint-from", str(metadata), extra_env=params)

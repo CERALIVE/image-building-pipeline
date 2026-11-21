@@ -607,9 +607,9 @@ inventory's normal object and package lists.
 | Policy field | Independent producer or source check |
 |---|---|
 | `package`, `version`, `arch` | Debian control and artifact identity; match the shipping manifest for both RK3588 boards. |
-| `validated_boards` | Exact family board set and the artifact's two validated-board entries (`orange-pi-5-plus`, `rock-5b-plus`). |
+| `validated_boards` | Exact family board set, the producer's two validated-board entries, and a fresh run of the producer's deb validator against each board's resolved DTB path. This checks DTB presence, not payload contents. |
 | `input_fingerprint` | Artifact metadata and fresh fingerprint-only recomputation using both boards resolved in the trusted host checkout. |
-| `producer_commit`, `candidate_run_id` | Original `candidate.json` and `publish-authorization.inputs.json`; both must match policy. The authorization inputs must also identify the exact package, version, tag and deb SHA-256, and must not authorize publication. |
+| `producer_commit`, `candidate_run_id` | Original `candidate.json` and `publish-authorization.inputs.json`; both must match policy. The commit must exist locally as a Git commit; no fetch is attempted. The authorization inputs must also identify the exact package, version, tag and deb SHA-256, and must not authorize publication. |
 | `payloads` | Map the exact `<package>_<version>_<arch>.deb`, `kernel-artifact.json`, `resolved.config`, `built-modules.txt` and `SHA256SUMS` to individual `{"sha256": "<64 hex>", "length": <bytes>}` pins. The snapshot and producer envelope must match all five; the inner checksum list must match the deb and three metadata files. |
 | `proof` | Map `candidate.json`, `publish-authorization.inputs.json` and `BUNDLE.SHA256SUMS` to the same pin shape. The envelope has exactly one entry for each payload and the two receipt files. |
 
