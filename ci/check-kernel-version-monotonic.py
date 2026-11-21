@@ -17,7 +17,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from kernel_release import (
     KernelIdentity, KernelReleaseError, artifact, command, compare, metadata,
-    published_versions, sidecar, tag_versions, version,
+    local_status, published_versions, read_kernel_json, sidecar, tag_versions, version,
 )
 
 
@@ -28,7 +28,9 @@ def parameters(repo: Path, board: str, variant: str) -> dict[str, str]:
 
 
 def candidate_identity(lock: Path) -> KernelIdentity:
-    rows = [r for r in json.loads(lock.read_text())["packages"]
+    contents = read_kernel_json(lock)
+    local_status(contents)
+    rows = [r for r in contents["packages"]
             if r["name"].startswith("linux-image-")]
     if len(rows) != 1:
         raise KernelReleaseError("candidate must contain exactly one installed kernel")
@@ -64,13 +66,15 @@ def main() -> int:
         if args.out is None or args.version is None:
             parser.error("--sidecar requires --out and --version (OS CalVer)")
         identity = candidate_identity(args.sidecar)
+        candidate_artifact = args.sidecar.parent / "kernel-artifact.json"
+        if candidate_artifact.exists():
+            local_status(read_kernel_json(candidate_artifact))
         with tempfile.TemporaryDirectory() as temp:
             released = metadata(identity.version, Path(temp))
         if identity != released.identity:
             raise KernelReleaseError("candidate kernel digest differs from released artifact")
         if args.board not in released.boards:
             raise KernelReleaseError("candidate board absent from released validated_boards")
-        candidate_artifact = args.sidecar.parent / "kernel-artifact.json"
         if candidate_artifact.exists() and artifact(candidate_artifact).identity != identity:
             raise KernelReleaseError("candidate package lock/artifact identity mismatch")
         output = {"schema": 1, "board": args.board, "os_version": args.version,

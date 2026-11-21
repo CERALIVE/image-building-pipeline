@@ -208,7 +208,8 @@ python3 ci/kernel-release.py rk3588 \
 | `family` (positional) | Family to build, for example `rk3588`. |
 | `--candidate-run-id N` | Required positive decimal local candidate ID. It is not, and does not claim to be, an Actions run. |
 | `--channel beta\|stable` | Channel recorded in the authorization inputs. Default `beta`. |
-| `--os-releases DIR` | Required authenticated snapshot of published OS kernel sidecars across boards and channels, used for the floor. An empty directory claims no OS kernel publication. |
+| `--os-releases DIR` | Required for a normal candidate. Authenticated snapshot of published OS kernel sidecars across boards and channels, used for the floor. An empty directory claims no OS kernel publication. |
+| `--local-unpublishable` | Contributor build for sealed measurement only. Use instead of `--os-releases`, never with `--publish` or `--bench-report`. |
 | `--output-dir DIR` | Optional repo-local bundle store. Default `mkosi/build/kernel-releases`. |
 | `--bench-report FILE` | Optional report bound to this candidate; see step 4. |
 | `--publish` | Refuses outside the exact approved workflow context; see step 5. |
@@ -227,6 +228,18 @@ capsule digest are separate decisions. Measurement approval is not release
 authorization: full-image and release jobs still require the exact signed
 first-party APT kernel and reject sealed candidate input even if that kernel is
 available.
+
+Contributors without access to the OS release store can run
+`python3 ci/kernel-release.py rk3588 --candidate-run-id 12345 --local-unpublishable`.
+This still runs the kernel build, local tag and both-board gates, but
+intentionally skips the OS floor and marks the bundle `local-unpublishable`.
+If `CERALIVE_KERNEL_HISTORY_DIR` points to a local GitHub Release metadata
+snapshot, it also checks that history; otherwise the receipt records that check
+as skipped and the producer does not fall back to `gh`. This is not an offline
+build mode: pinned source, build tools, and firmware still need their usual
+inputs. A local bundle is not eligible for GitHub Release, APT, or OS
+publication or promotion. Make a new candidate through the approved workflow
+for release.
 
 `--published` and `--floor` read published kernel versions and their metadata
 through `gh`. Set `CERALIVE_KERNEL_HISTORY_DIR` to a local directory of

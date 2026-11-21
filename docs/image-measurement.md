@@ -639,6 +639,14 @@ launcher requires an independent policy and approved capsule digest. Both guests
 revalidate the five payloads; the verifier independently checks the installed
 kernel and lock. The lock and candidate verifier receipt record
 `measurement-candidate` and the exact deb digest, never `ceralive-kernel`.
+Contributors can produce a private bundle with
+[`--local-unpublishable`](kernel-release.md#2-create-the-local-candidate) without
+OS release store access. That mode intentionally skips the OS kernel floor.
+The sealer checks its status against the pinned producer receipt and kernel
+metadata. The host's `acceptance.json` records `publication: local-unpublishable`
+and `kernel_floor: skipped-local` for that kernel; neither this receipt nor
+measurement approval makes the kernel publishable. The guest keeps the same
+`measurement-candidate` protocol and does not need a new base.
 Released receipts keep their existing fields. A local path or environment
 variable is not approval. Full image and release entry points reject sealed
 candidate input before signer selection or APT access, even when the same version

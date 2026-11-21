@@ -21,7 +21,7 @@ from vm_process import run as run_gate
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "lib"))
-from kernel_release import KernelIdentity, KernelReleaseError, VERSION, verified_metadata
+from kernel_release import KernelIdentity, KernelReleaseError, VERSION, local_status, read_kernel_json, verified_metadata
 
 LABELS = dict(zip((*METADATA, *PROOF), ("artifact metadata", "resolved config", "module list",
                                         "payload checksums", "producer receipt", "producer authorization inputs",
@@ -107,15 +107,24 @@ def read_record(path: Path, fields: set[str], role: str) -> dict:
 
 
 def check_producer(work: Path, selected: dict, deb_digest: str) -> None:
-    receipt = read_record(work / PROOF[0], {"schema", "family", "commit", "candidate_run_id",
-                                           "kernel_floor", "publication"}, "producer receipt")
+    try:
+        status = local_status(read_kernel_json(work / METADATA[0]), measurement=True)
+    except KernelReleaseError:
+        raise StreamError("invalid measurement-candidate artifact status") from None
+    fields = {"schema", "family", "commit", "candidate_run_id", "kernel_floor", "publication"}
+    receipt = read_record(work / PROOF[0], fields if status is None else fields | status.keys(), "producer receipt")
     auth = read_record(work / PROOF[1], {"mode", "publish_run_id", "run_attempt", "candidate_run_id", "tag", "commit",
                                         "package", "version", "deb_sha256", "channel", "bench_report_sha256"},
                        "producer authorization inputs")
+    if status:
+        state_ok = all(receipt[key] == value for key, value in status.items())
+    else:
+        floor = receipt["kernel_floor"]
+        state_ok = (receipt["publication"] == "blocked-pending-owner" and type(floor) is str
+                    and (floor == "none" or VERSION.fullmatch(floor)))
     if (type(receipt["schema"]) is not int or receipt["schema"] != 1 or receipt["family"] != "rk3588"
-            or receipt["publication"] != "blocked-pending-owner" or type(receipt["kernel_floor"]) is not str
-            or (receipt["kernel_floor"] != "none" and not VERSION.fullmatch(receipt["kernel_floor"]))
-            or auth["mode"] != "apt-publish" or auth["publish_run_id"] is not None or auth["run_attempt"] is not None
+            or not state_ok or auth["mode"] != ("apt-publish" if status is None else status["publication"])
+            or auth["publish_run_id"] is not None or auth["run_attempt"] is not None
             or auth["channel"] not in ("stable", "beta") or auth["bench_report_sha256"] is not None):
         raise StreamError("invalid measurement-candidate producer receipt state")
     for field, expected, values in (
@@ -139,7 +148,7 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str], *,
     # Use the existing checksum and metadata parser on private snapshots.
     json.loads(metadata.read_text(), object_pairs_hook=unique_object)
     try:
-        record = verified_metadata(selected["version"], work)
+        record = verified_metadata(selected["version"], work, measurement=True)
     except (KernelReleaseError, KeyError, TypeError, ValueError):
         raise StreamError("invalid measurement-candidate payload checksum or metadata") from None
     if record.identity != KernelIdentity(selected["package"], selected["version"], deb_digest):

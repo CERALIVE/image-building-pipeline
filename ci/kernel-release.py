@@ -27,14 +27,35 @@ def main() -> int:
     parser.add_argument("--candidate-run-id", required=True,
                         help="positive decimal local candidate ID, not an Actions run")
     parser.add_argument("--channel", choices=("beta", "stable"), default="beta")
-    parser.add_argument("--os-releases", type=Path, required=True,
-                        help="already authenticated snapshot of published OS kernel sidecars")
+    floor = parser.add_mutually_exclusive_group(required=True)
+    floor.add_argument("--os-releases", type=Path,
+                       help="already authenticated snapshot of published OS kernel sidecars")
+    floor.add_argument("--local-unpublishable", action="store_true",
+                       help="build for local measurement without an OS release snapshot; cannot publish")
     parser.add_argument("--output-dir", type=Path,
                         help="repo-local bundle store (default: mkosi/build/kernel-releases)")
     parser.add_argument("--bench-report", type=Path)
     parser.add_argument("--publish", action="store_true",
                         help="always refuses until the owner resolves publisher authorization")
     args = parser.parse_args()
+    if args.publish:
+        parser.error("publication requires the approved workflow")
+    if args.local_unpublishable and args.bench_report:
+        parser.error("--local-unpublishable cannot carry a publication bench report")
+    if not args.local_unpublishable:
+        return build_candidate(args)
+    history = os.environ.get("CERALIVE_KERNEL_HISTORY_DIR")
+    if history:
+        os.environ["CERALIVE_KERNEL_HISTORY_DIR"] = str(Path(history).resolve())
+        return build_candidate(args, "checked-local-snapshot")
+    # The nested kernel-only gate also reads this value. An empty private
+    # directory keeps all three layers from falling back to credentialed gh.
+    with tempfile.TemporaryDirectory(prefix="empty-kernel-history-") as empty:
+        os.environ["CERALIVE_KERNEL_HISTORY_DIR"] = str(Path(empty).resolve())
+        return build_candidate(args, "skipped-local")
+
+
+def build_candidate(args: argparse.Namespace, local_history: str | None = None) -> int:
     repo = Path(__file__).resolve().parents[1]
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", args.family):
         raise KernelReleaseError("invalid family")
@@ -75,7 +96,8 @@ def main() -> int:
     command(["bash", str(repo / "ci/check-release-variant.sh"), "--variant", "default"], repo)
     command([*gate, "--candidate"], repo)
     command([*gate, "--published"], repo)
-    floor = command([*gate, "--floor", "--os-releases", str(args.os_releases.resolve())], repo)
+    if args.os_releases is not None:
+        command([*gate, "--floor", "--os-releases", str(args.os_releases.resolve())], repo)
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if os.path.lexists(destination):
@@ -123,7 +145,8 @@ def main() -> int:
                     raise KernelReleaseError("kernel candidate input fingerprint mismatch")
                 command([*gate, "--candidate", "--artifact", str(snapshot / "kernel-artifact.json")], repo)
                 command([*gate, "--published"], repo)
-                floor = command([*gate, "--floor", "--os-releases", str(args.os_releases.resolve())], repo)
+                floor = ("skipped-local" if local_history is not None else
+                         command([*gate, "--floor", "--os-releases", str(args.os_releases.resolve())], repo))
                 if command(["git", "rev-parse", "HEAD"], repo) != commit or command(
                     ["git", "status", "--porcelain", "--untracked-files=normal"], repo
                 ):
@@ -139,8 +162,20 @@ def main() -> int:
                     ], repo)
                     bench_digest = hashlib.sha256(bench.read_bytes()).hexdigest()
                 # These are publisher inputs, NOT a valid Actions authorization.
+                local = {} if local_history is None else {
+                    "publication": "local-unpublishable", "kernel_floor": floor,
+                    "github_release_history": local_history,
+                }
+                if local:
+                    metadata = snapshot / "kernel-artifact.json"
+                    metadata.write_text(json.dumps(json.loads(metadata.read_text()) | local,
+                                                   indent=2, sort_keys=True) + "\n")
+                    sums = snapshot / "SHA256SUMS"
+                    sums.write_text("".join(
+                        f"{hashlib.sha256((snapshot / name).read_bytes()).hexdigest()}  {name}\n"
+                        for name in (deb, "resolved.config", "built-modules.txt", metadata.name)))
                 inputs = {
-                    "mode": "apt-publish", "publish_run_id": None, "run_attempt": None,
+                    "mode": local.get("publication", "apt-publish"), "publish_run_id": None, "run_attempt": None,
                     "candidate_run_id": args.candidate_run_id, "tag": tag, "commit": commit,
                     "package": record.identity.package, "version": selected,
                     "deb_sha256": record.identity.deb_sha256, "channel": args.channel,
@@ -151,7 +186,7 @@ def main() -> int:
                 (snapshot / "candidate.json").write_text(json.dumps({
                     "schema": 1, "family": args.family, "commit": commit,
                     "candidate_run_id": args.candidate_run_id, "kernel_floor": floor,
-                    "publication": "blocked-pending-owner",
+                    "publication": "blocked-pending-owner", **local,
                 }, indent=2, sort_keys=True) + "\n")
                 names = sorted(p.name for p in snapshot.iterdir())
                 (snapshot / "BUNDLE.SHA256SUMS").write_text("".join(
@@ -187,6 +222,8 @@ def main() -> int:
 if __name__ == "__main__":
     # Refuse before loading repository code, parsing inputs or creating any file.
     workflow_publish = "--publish" in sys.argv[1:]
+    if workflow_publish and "--local-unpublishable" in sys.argv[1:]:
+        sys.exit("kernel release: --local-unpublishable cannot be used with --publish")
     workflow_context = (
         os.environ.get("GITHUB_ACTIONS") == "true"
         and os.environ.get("GITHUB_REPOSITORY") == "CERALIVE/image-building-pipeline"

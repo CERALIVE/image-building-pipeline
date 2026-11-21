@@ -86,6 +86,50 @@ refuse() {
   elif grep -Fq -- "${diagnostic}" "${WORK}/refused"; then ok "${label}"
   else bad "${label}: wrong guard"; cat "${WORK}/refused"; fi
 }
+invoke_local() {
+  python3 "${repo}/ci/kernel-release.py" rk3588 --candidate-run-id 12345 \
+    --local-unpublishable --output-dir "${store}" "$@"
+}
+choose storage-free
+env -u CERALIVE_KERNEL_HISTORY_DIR python3 "${repo}/ci/kernel-release.py" \
+  rk3588 --candidate-run-id 12345 --local-unpublishable --output-dir "${store}"
+local_bundle="${store}/${selected}"
+(
+  cd "${local_bundle}"
+  sha256sum -c SHA256SUMS
+  sha256sum -c BUNDLE.SHA256SUMS
+)
+python3 - "${local_bundle}" "${commit}" <<'PY'
+import json, pathlib, sys
+bundle = pathlib.Path(sys.argv[1])
+status = {'publication': 'local-unpublishable', 'kernel_floor': 'skipped-local',
+          'github_release_history': 'skipped-local'}
+assert json.loads((bundle/'candidate.json').read_bytes()) == {
+    'schema': 1, 'family': 'rk3588', 'commit': sys.argv[2], 'candidate_run_id': '12345', **status}
+artifact = json.loads((bundle/'kernel-artifact.json').read_bytes())
+assert {field: artifact[field] for field in status} == status
+authorization = json.loads((bundle/'publish-authorization.inputs.json').read_bytes())
+assert (authorization['mode'], authorization['publish_run_id'], authorization['run_attempt']) == (
+    'local-unpublishable', None, None)
+PY
+if grep -qx -- '--floor' "${KERNEL_CLI_LOG}" || [[ -e "${KERNEL_CLI_NETWORK}" ]]; then
+  bad 'storage-free producer accessed a floor or network gate'
+fi
+ok 'storage-free candidate marks skipped history and cannot supply publication authorization'
+choose local-history
+mkdir "${WORK}/history/7.2.0-ceralive2"
+if invoke_local >"${WORK}/refused" 2>&1; then bad 'local candidate ignored supplied release history'; fi
+grep -q 'does not exceed published 7.2.0-ceralive2\|immutable identity.*refused' "${WORK}/refused"
+[[ ! -e "${store}" ]]
+rmdir "${WORK}/history/7.2.0-ceralive2"
+ok 'local candidate still refuses a lower version with supplied release history'
+choose mode-conflict
+refuse 'floor snapshot and local build are mutually exclusive' 'not allowed with argument' --local-unpublishable
+[[ ! -e "${KERNEL_CLI_LOG}" ]]
+if invoke_local --publish >"${WORK}/refused" 2>&1; then bad 'local flag allowed publication'; fi
+assert_contains 'explicit local publication refusal' "${WORK}/refused" \
+  '--local-unpublishable cannot be used with --publish'
+[[ ! -e "${KERNEL_CLI_LOG}" ]]
 choose happy
 invoke
 bundle="${store}/${selected}"

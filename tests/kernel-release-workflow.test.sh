@@ -164,6 +164,25 @@ refuse() {
   if invoke "$@" >"${WORK}/refused" 2>&1; then bad "${label}: accepted"; else ok "${label}"; fi
   [[ ! -e "${WF_STATE}/dispatch.json" ]] && ok "${label}: zero dispatches" || bad "${label}: dispatched"
 }
+normal_candidate="${WF_CANDIDATE}"
+install -d -m 0700 "${WORK}/local-candidate"
+for input in "${normal_candidate}/"*; do
+  install -m 0600 "${input}" "${WORK}/local-candidate/${input##*/}"
+done
+export WF_CANDIDATE="${WORK}/local-candidate"
+jq '. + {publication:"local-unpublishable",kernel_floor:"skipped-local",
+          github_release_history:"skipped-local"}' "${normal_candidate}/kernel-artifact.json" \
+  >"${WF_CANDIDATE}/kernel-artifact.json"
+(cd "${WF_CANDIDATE}"; sha256sum ./*.deb resolved.config built-modules.txt kernel-artifact.json >SHA256SUMS)
+for mode in release prepare authorize dispatch; do
+  GITHUB_ACTOR=andrescera KERNEL_BOOTSTRAP_OWNER=andrescera refuse "local candidate blocks ${mode}" "${mode}"
+  assert_contains "${mode} refuses on the local marker" "${WORK}/refused" \
+    'local candidate metadata is not publishable or released'
+  if [[ -e "${WORK}/publish-authorization.json" || -e "${WF_STATE}/release" ]]; then
+    bad "${mode} created publication state for a local candidate"
+  fi
+done
+export WF_CANDIDATE="${normal_candidate}"
 refuse 'APT refuses a missing identity Release' authorize
 invoke release
 [[ -d "${WF_STATE}/release" && ! -e "${WF_STATE}/dispatch.json" ]] \

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner")
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
 from image_candidate import FIELD as CANDIDATE_FIELD, KIND as CANDIDATE_KIND
 from image_candidate import check_sealed_candidate_archive, select_candidate, stage_candidate
+from kernel_release import KernelReleaseError, local_status, read_kernel_json
 from image_policy import parse_policy, read_policy
 from image_stream import Identity, StreamError
 from image_transport import (INDEX_LIMIT, SEALED, TransportParser, copy_local, fetch, metadata_base,
@@ -202,6 +203,11 @@ def prepare(args: argparse.Namespace) -> str:
                     f"size (bytes) pinned={pinned_size} observed={observed_size}; "
                     f"SHA-256 (first 16) pinned={digest[:16]} observed={observed_digest[:16]}"
                 )
+            if not candidate and digest == policy.kernel_metadata["kernel-artifact.json"]:
+                try:
+                    local_status(read_kernel_json(target))
+                except KernelReleaseError as error:
+                    raise StreamError(str(error)) from error
         rows = [{key: item[key] for key in ("sha256", "length", "kind", "urls")}
                 for item in objects.values()]
         inventory = {key: reviewed[key] for key in

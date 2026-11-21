@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+import sys
 import tarfile
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
@@ -19,6 +20,9 @@ from image_candidate_policy import FIELD, INPUT_LIMIT, KIND, parse_approval
 from image_capsule import object_id
 from image_stream import Identity, StreamError, exact_json, unique_object
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+from kernel_release import KernelReleaseError, LocalStatus, local_status, read_kernel_json
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseEvidence:
@@ -26,6 +30,7 @@ class ReleaseEvidence:
     deb_sha256: str
     validity: dict
     origin: str = "ceralive-kernel"
+    local: LocalStatus | None = None
 
 
 def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: Path,
@@ -70,7 +75,9 @@ def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: P
                         or any(sum(exact_json(row, pin | {"kind": KIND, "urls": []}) for row in candidate_rows) != 1
                                for pin in pins.values())):
                     raise StreamError("candidate capsule differs from independently approved policy")
+                kernel_object = pins["kernel-artifact.json"]["sha256"]
                 expected = {pin["sha256"]: (KIND, INPUT_LIMIT) for pin in pins.values()}
+                expected[kernel_object] = (KIND, 16 * 1024**2)
             for repo in inventory["repositories"].values():
                 for field, kind, limit in (("inrelease", "apt-metadata", 16 * 1024**2),
                                            ("index", "apt-metadata", 256 * 1024**2),
@@ -91,7 +98,8 @@ def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: P
                     raise StreamError("invalid released capsule evidence object")
                 observed = hashlib.sha256()
                 with archive.extractfile(entry) as stream, (
-                        nullcontext() if kind == KIND else (work / digest).open("xb")) as output:
+                        nullcontext() if kind == KIND and digest != kernel_object
+                        else (work / digest).open("xb")) as output:
                     while chunk := stream.read(1024 * 1024):
                         checkpoint()
                         observed.update(chunk)
@@ -103,11 +111,15 @@ def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: P
             (work / "trust.json").write_text(json.dumps(trust))
             scripts["mirror_validities"](work, purpose="rootfs-measurement")
             validity = json.loads((work / "metadata-validity.json").read_text(), object_pairs_hook=unique_object)
+            kernel = read_kernel_json(work / kernel_object)
+            try:
+                status = local_status(kernel, measurement=approval is not None)
+            except KernelReleaseError as error:
+                raise StreamError(str(error)) from error
             if approval is not None:
                 package, version, arch = (approval[key] for key in ("package", "version", "arch"))
                 deb = approval["payloads"][f"{package}_{version}_{arch}.deb"]
-                return ReleaseEvidence((package, version, arch), deb["sha256"], validity, KIND)
-            kernel = json.loads((work / kernel_object).read_text(), object_pairs_hook=unique_object)
+                return ReleaseEvidence((package, version, arch), deb["sha256"], validity, KIND, status)
             package, version, arch = (kernel[field] for field in ("package", "version", "arch"))
             if (type(package) is not str or type(version) is not str or arch != "arm64"
                     or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*", version)
@@ -116,6 +128,6 @@ def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: P
                     or identity.board not in kernel["validated_boards"]):
                 raise StreamError("invalid approved released kernel evidence")
             return ReleaseEvidence((package, version, arch), object_id(kernel["deb_sha256"]), validity)
-    except (KeyError, OSError, TypeError, ValueError, subprocess.SubprocessError, tarfile.TarError,
+    except (KeyError, KernelReleaseError, OSError, TypeError, ValueError, subprocess.SubprocessError, tarfile.TarError,
             scripts["SealedError"]):
         raise StreamError("could not authenticate released capsule evidence") from None
