@@ -106,7 +106,9 @@ def prepare(args: argparse.Namespace) -> str:
                     or objects[digest]["urls"][0] not in
                     {original_url(base + "/" + suffix) for suffix in suffixes}):
                 raise StreamError("metadata URL is outside the exact approved repository objects")
-            previous = allowed.setdefault(digest, name)
+            # Use the validated inventory role, never a URL or filename, in diagnostics.
+            role = "InRelease" if key == "inrelease" else "index"
+            previous, _ = allowed.setdefault(digest, (name, role))
             if (previous == "bsp") != (name == "bsp"):
                 raise StreamError(f"conflicting BSP transport requirements for metadata object {digest}")
         if objects[record["inrelease"]]["length"] > 16 * 1024**2:
@@ -154,20 +156,29 @@ def prepare(args: argparse.Namespace) -> str:
                 continue
             target = data / digest
             if "path" in item:
+                label = item["kind"]
                 source = Path(item["path"])
                 if not source.is_absolute():
                     source = args.inventory.parent / source
                 copy_local(source, target, item["length"])
             else:
-                name = allowed[digest]
+                name, role = allowed[digest]
+                label = f"{name} {role}"
                 repo = policy.repositories[name]
                 transfer = fetch(item["urls"][0], target, item["length"], clients.get(repo.origin),
                                  args.ca_file, args.object_timeout, env, name, repo.max_redirects)
                 if transfer:
                     transfers.append({"sha256": digest} | transfer)
             target.chmod(0o600)
-            if target.stat().st_size != item["length"] or digest_file(target) != digest:
-                raise StreamError("prefetched object size or digest mismatch")
+            pinned_size = item["length"]
+            observed_size = target.stat().st_size
+            observed_digest = digest_file(target)
+            if observed_size != pinned_size or observed_digest != digest:
+                raise StreamError(
+                    f"prefetched object size or digest mismatch: {label}; "
+                    f"size (bytes) pinned={pinned_size} observed={observed_size}; "
+                    f"SHA-256 (first 16) pinned={digest[:16]} observed={observed_digest[:16]}"
+                )
         rows = [{key: item[key] for key in ("sha256", "length", "kind", "urls")}
                 for item in objects.values()]
         inventory = {key: reviewed[key] for key in

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Real local HTTPS/mTLS and archive signatures; no external connections or credentials."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import lzma
 import os
@@ -34,6 +35,116 @@ from image_capsule import unpack
 from image_stream import Identity
 from image_stream import StreamError
 from image_transport import identity_config
+
+
+def assert_prefetch_mismatch(repository: str, role: str, label: str, *, size_only: bool = False) -> None:
+    """Exercise the producer CLI with real inventory validation and inert transport bytes."""
+    with tempfile.TemporaryDirectory(prefix="capsule-mismatch-") as temporary:
+        work = Path(temporary)
+        (work / "private").mkdir()
+        objects = []
+        responses: dict[str, bytes] = {}
+
+        def store(payload: bytes, kind: str, url: str = "") -> str:
+            digest = hashlib.sha256(payload).hexdigest()
+            row = {"sha256": digest, "length": len(payload), "kind": kind, "urls": [url] if url else []}
+            if url:
+                responses[url] = payload
+            else:
+                path = work / "private" / ("client-key-canary-" + digest)
+                path.write_bytes(payload)
+                row["path"] = str(path)
+            objects.append(row)
+            return digest
+
+        source = store(b"source bundle fixture", "source-bundle")
+        root = store(b"public root fixture", "public-trust")
+        keyring = store(b"archive keyring fixture", "apt-metadata")
+        builder = store(b"builder fixture", "builder-image")
+        kernel = {name: store(name.encode(), "kernel-metadata") for name in
+                  ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")}
+        policies = {}
+        repositories = {}
+        for name, origin in (("firstparty", "https://apt.ceralive.tv"),
+                             ("bsp", "https://repo.example"),
+                             ("debian-source", "https://deb.debian.org/debian"),
+                             ("debian-security", "https://deb.debian.org/debian-security")):
+            suite = "stable-security" if name == "debian-security" else "stable"
+            base = f"{origin}/dists/{suite}" + ("/binary-arm64" if name == "firstparty" else "")
+            index_path = "token-canary/Packages.gz"
+            repo = {"origin": origin, "keyring": keyring, "fingerprints": ["A" * 40],
+                    "suite": suite, "component": "main", "arch": "arm64", "index_path": index_path}
+            policies[name] = repo | {"max_age_seconds": 86400}
+            repositories[name] = repo | {
+                "inrelease": store(f"{name} release".encode(), "apt-metadata", f"{base}/InRelease"),
+                "index": store(f"{name} index".encode(), "apt-metadata", f"{base}/{index_path}"),
+            }
+        package = store(b"package fixture", "deb", "https://apt.ceralive.tv/fixture.deb")
+        reviewed = {"schema": 1, "source_commit": "a" * 40, "epoch": 1234, "board": "rock-5b-plus",
+                    "source_bundle": source, "device_root": root, "objects": objects,
+                    "repositories": repositories, "packages": [
+                        {"repository": "firstparty", "name": "fixture", "version": "1",
+                         "arch": "arm64", "sha256": package}]}
+        policy = {"schema": 1, "root_der_sha256": "1" * 64, "repositories": policies,
+                  "kernel_metadata": kernel, "builder_images": [
+                      {"object": builder, "tag": "fixture", "image_id": "sha256:" + "2" * 64, "arch": "arm64"}]}
+        pinned_hash = repositories[repository][role]
+        row = next(row for row in objects if row["sha256"] == pinned_hash)
+        url, = row["urls"]
+        payload = responses[url]
+        if size_only:
+            row["length"] += 1
+        else:
+            responses[url] = b"Bearer secret-canary"[:len(payload)].ljust(len(payload), b"!")
+        observed_hash = hashlib.sha256(responses[url]).hexdigest()
+        pinned_size, observed_size = row["length"], len(responses[url])
+
+        inventory, trust, output = (work / name for name in ("reviewed.json", "policy.json", "capsule.tar"))
+        inventory.write_text(json.dumps(reviewed))
+        trust.write_text(json.dumps(policy))
+        ca = work / "private" / "password-canary.pem"
+        script = ROOT / "ci/prepare-image-capsule.py"
+        argv = [str(script), "--inventory", str(inventory), "--trust-policy", str(trust),
+                "--output", str(output), "--ca-file", str(ca)]
+        stdout, stderr = io.StringIO(), io.StringIO()
+
+        def fetch_bytes(url: str, target: Path, *_args: object) -> None:
+            target.write_bytes(responses[url])
+
+        with patch.object(sys, "argv", argv), patch("image_transport.fetch", side_effect=fetch_bytes), \
+                patch("image_transport.shell", side_effect=AssertionError("mismatch reached signature checks")), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                runpy.run_path(str(script), run_name="__main__")
+            except SystemExit as exc:
+                assert exc.code == 1, exc.code
+            else:
+                raise AssertionError("mismatch must exit with status 1")
+
+        assert not output.exists()
+        assert not list(work.glob(".prefetch-*"))
+        assert stdout.getvalue() == ""
+        diagnostic = stderr.getvalue()
+        prefix = "capsule preparation rejected: prefetched object size or digest mismatch"
+        assert diagnostic.startswith(prefix), diagnostic
+        for marker in ("/", "://", "?", "@", "deb.debian.org", "apt.ceralive.tv",
+                       "token-canary", "client-key-canary", "password-canary", "Bearer secret",
+                       pinned_hash, observed_hash):
+            assert marker not in diagnostic, (marker, diagnostic)
+        assert diagnostic == (f"{prefix}: {label}; size (bytes) pinned={pinned_size} observed={observed_size}; "
+                              f"SHA-256 (first 16) pinned={pinned_hash[:16]} observed={observed_hash[:16]}\n"), diagnostic
+
+
+def test_prefetch_mismatch_reports_public_debian_release() -> None:
+    assert_prefetch_mismatch("debian-security", "inrelease", "debian-security InRelease")
+
+
+def test_prefetch_mismatch_reports_firstparty_index() -> None:
+    assert_prefetch_mismatch("firstparty", "index", "firstparty index")
+
+
+def test_prefetch_mismatch_reports_size_only_and_equal_digest_prefixes() -> None:
+    assert_prefetch_mismatch("debian-security", "index", "debian-security index", size_only=True)
 
 
 def command(args: list[str], work: Path) -> bytes:
