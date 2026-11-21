@@ -172,7 +172,8 @@ def decompress_index(source: Path, destination: Path, index_path: str) -> None:
         raise SealedError("invalid or oversized compressed package index") from exc
 
 
-def valid_release(path: Path, max_age: int, require_until: bool = True) -> ReleaseValidity:
+def valid_release(path: Path, max_age: int, require_until: bool = True, *,
+                  purpose: str | None = None) -> ReleaseValidity:
     """Only verified plaintext supplies the signed validity window."""
     dates: dict[str, list[str]] = {"Date": [], "Valid-Until": [], "Origin": []}
     for line in path.read_text().splitlines():
@@ -189,7 +190,9 @@ def valid_release(path: Path, max_age: int, require_until: bool = True) -> Relea
         raise SealedError("signed metadata Date has no timezone")
     debian = dates["Origin"] == ["Debian"]
     if not dates["Valid-Until"] and require_until:
-        if debian and os.environ.get("CERALIVE_BUILD_PURPOSE") == "rootfs-measurement":
+        if purpose is None:
+            purpose = os.environ.get("CERALIVE_BUILD_PURPOSE", "full")
+        if debian and purpose == "rootfs-measurement":
             return ReleaseValidity(date, None)
         raise SealedError("missing or ambiguous signed metadata validity")
     if not 0 <= (now - date).total_seconds() <= max_age:
@@ -204,9 +207,11 @@ def valid_release(path: Path, max_age: int, require_until: bool = True) -> Relea
     return ReleaseValidity(date, deadline, until)
 
 
-def mirror_validities(directory: Path) -> tuple[ReleaseValidity, ...]:
+def mirror_validities(directory: Path, *, purpose: str | None = None) -> tuple[ReleaseValidity, ...]:
     """Authenticate every original repository before mkosi can consume its bytes."""
     data = inventory(directory)
+    if purpose is None:
+        purpose = os.environ.get("CERALIVE_BUILD_PURPOSE", "full")
     with (directory / "trust.json").open() as source:
         policies = json.load(source)["repositories"]
     if not data["repositories"] or set(data["repositories"]) != set(policies):
@@ -240,7 +245,7 @@ index_verify_digest "$9" "$expected" sealed-mirror
             except subprocess.SubprocessError as exc:
                 raise SealedError(f"sealed {name} signature/index/identity verification rejected") from exc
             validity = valid_release(release, repo.max_age_seconds,
-                                     require_until=name not in ("firstparty", "bsp"))
+                                     require_until=name not in ("firstparty", "bsp"), purpose=purpose)
             windows.append(validity)
             records.append({
                 "repository": name, "release_date": validity.date.isoformat(),
@@ -257,7 +262,7 @@ index_verify_digest "$9" "$expected" sealed-mirror
                 if not any(canonical.startswith(origin + "/") for origin in origins):
                     raise SealedError("mirror metadata has no authenticated repository policy")
     (directory / "metadata-validity.json").write_text(json.dumps({
-        "schema": 1, "purpose": os.environ.get("CERALIVE_BUILD_PURPOSE", "full"),
+        "schema": 1, "purpose": purpose,
         "repositories": records,
     }, sort_keys=True) + "\n")
     return tuple(windows)

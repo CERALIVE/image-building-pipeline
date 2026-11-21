@@ -729,6 +729,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
         patches.enter_context(patch.object(vm_startup, "verify_startup", fixture_verify))
+        if pair:
+            # This lifecycle fixture substitutes the signed input and measured artifacts.
+            patches.enter_context(patch.multiple(
+                image_vm, released_evidence=lambda *_args: SimpleNamespace(),
+                verify_released_receipts=lambda *_args: dict.fromkeys(("rootfs_a", "rootfs_b"), "reserve")))
         if mode == "ignore":
             patches.enter_context(fixture_wait_bounds(FIXTURE_PHASE_SECONDS))
             # image_vm calls boot() in the already-imported vm module.
@@ -1791,7 +1796,10 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                 try:
                     with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                                         validate_base=lambda *_args: None, disk_admission=lambda *_args: None,
-                                        load_policy=lambda *_args: FixturePolicy(), execute=execute), \
+                                        load_policy=lambda *_args: FixturePolicy(), execute=execute,
+                                        released_evidence=lambda *_args: SimpleNamespace(),
+                                        verify_released_receipts=lambda *_args: dict.fromkeys(
+                                            ("rootfs_a", "rootfs_b"), "reserve")), \
                             patch.object(image_resources.ImageCaps, "qemu_limit"), \
                             patch.object(os, "open", open_file), patch.object(tarfile.TarFile, "addfile", addfile), \
                             patch.object(image_vm, "returned_json", read_result), \
