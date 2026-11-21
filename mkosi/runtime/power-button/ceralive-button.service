@@ -1,0 +1,22 @@
+[Unit]
+Description=Power button gestures and local confirmation requests
+After=systemd-logind.service systemd-udev-trigger.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+RuntimeDirectory=ceralive-button
+RuntimeDirectoryMode=0700
+# The daemon holds a releasable inhibitor child; input failure hands it to logind.
+ExecStart=/usr/bin/python3 /usr/local/lib/ceralive-button/button.py
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
