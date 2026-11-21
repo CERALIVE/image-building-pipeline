@@ -33,6 +33,99 @@ load manifest-helpers
   [ "$status" -eq 0 ]
 }
 
+# Exercise the real harness and its extracted allocator without starting daemons
+# or namespaces. Only the device commands and the poll cadence are substituted.
+run_real_avahi_stub_claim() (
+  set -euo pipefail
+  local root="$1" scenario="$2"
+  # shellcheck source=tests/real-avahi-hostname-contract.sh
+  source "$BATS_TEST_DIRNAME/real-avahi-hostname-contract.sh"
+  mkdir -m 0700 "$root" "$root/run" "$root/state"
+  install -m 0600 /dev/null "$root/device"
+  cat >"$root/device" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" = -n ]]; then shift; fi
+case "$1" in
+  env)
+    if [[ "${2:-}" = DBUS_SYSTEM_BUS_ADDRESS=* ]]; then
+      if [[ -s "$REAL_DEVICE_ROOT/subscribed" ]]; then
+        printf 'observer-first\n' >"$REAL_DEVICE_ROOT/claim-order"
+      fi
+      exit 0
+    fi
+    exec "$@"
+    ;;
+  /usr/bin/ip) printf '2: eth0 inet 10.245.1.2/24\n'; exit 0 ;;
+esac
+case "${!#}" in
+  monitor)
+    [[ "$*" = *"member='StateChanged'"* && "$*" = *"member='NameOwnerChanged'"* ]]
+    printf 'subscribed\n' >"$REAL_DEVICE_ROOT/subscribed"
+    printf 'Monitoring bus message stream.\n' >&2
+    printf 'Member=StateChanged\nMember=NameOwnerChanged\n'
+    ;;
+  GetState)
+    if (( $(<"$REAL_DEVICE_ROOT/probes") == 0 )); then
+      printf 'i 2\n'
+    elif [[ "$REAL_SCENARIO" = no-reply ]]; then
+      exit 124
+    elif (( $(<"$REAL_DEVICE_ROOT/probes") < 61 )); then
+      printf 'i 1\n'
+    else
+      printf 'i 2\n'
+    fi
+    ;;
+  GetHostName)
+    [[ "$REAL_SCENARIO" != no-reply ]] || exit 124
+    printf 's "ceralive"\n'
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod 0700 "$root/device"
+  local file
+  for file in hostname hosts system-hostname calls machine-id subscribed claim-order avahi.log dbus.log ceralive-set-hostname; do
+    install -m 0600 /dev/null "$root/$file"
+  done
+  printf '0123456789abcdef0123456789abcdef\n' >"$root/machine-id"
+  printf 'avahi-tail-witness\n' >"$root/avahi.log"
+  printf 'dbus-tail-witness\n' >"$root/dbus.log"
+  extract_hostname_script >"$root/ceralive-set-hostname"
+  write_device_wrappers "$root"
+  local fixture_sudo="$root/device" fixture_busctl="$root/device"
+  export REAL_DEVICE_ROOT="$root" REAL_SCENARIO="$scenario"
+  observe_allocator "$root" a
+  REAL_POLL_INTERVAL=0 REAL_MACHINE_ID_FILE="$root/machine-id" \
+    run_allocator "$root" stub a &
+  collect_allocator "$root" a "$!"
+)
+
+@test "hostname: real Avahi fixture can finish a claim after probe 60" {
+  local root="$BATS_TEST_TMPDIR/delayed-claim"
+  run run_real_avahi_stub_claim "$root" delayed
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [ "$(<"$root/state/host_index")" = 1 ]
+  [ "$(<"$root/hostname")" = ceralive ]
+}
+
+@test "hostname: real Avahi fixture preserves failure and reports bounded claim diagnostics" {
+  local root="$BATS_TEST_TMPDIR/no-reply"
+  run run_real_avahi_stub_claim "$root" no-reply
+  printf '%s\n' "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ceralive-set-hostname: could not establish Avahi ownership of ceralive.local within the bounded wait"* ]]
+  [[ "$output" =~ AVAHI_SET_HOSTNAME\ device=a\ at=[0-9]+\.[0-9]+\ name=ceralive\ rc=0 ]]
+  [[ "$output" == *"AVAHI_FINAL device=a probes=120 state=unavailable name=unavailable"* ]]
+  [[ "$output" == *"AVAHI_OBSERVER device=a subscribed=1"* ]]
+  [[ "$output" == *"Member=StateChanged"* && "$output" == *"Member=NameOwnerChanged"* ]]
+  [[ "$output" == *"AVAHI_LOG device=a source=avahi.log"* && "$output" == *"avahi-tail-witness"* ]]
+  [[ "$output" == *"AVAHI_LOG device=a source=dbus.log"* && "$output" == *"dbus-tail-witness"* ]]
+  [ "$(<"$root/claim-order")" = observer-first ]
+  [ ! -e "$root/state/host_index" ]
+}
+
 @test "hostname: no collision commits and publishes ceralive" {
   local root="$BATS_TEST_TMPDIR/no-collision"
   make_hostname_fixture "$root"
