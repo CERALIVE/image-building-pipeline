@@ -526,8 +526,11 @@ respective guest consumers. The producer rechecks staged bytes at preparation;
 discovery does not freeze or replace the caller's files.
 The producer intentionally fetches metadata again from the exact approved URLs
 and requires these reviewed hashes and sizes; upstream changes fail instead of
-silently selecting newer bytes. Discovery does not authorize that payload-fetch
-operation or prove that the submitted dependency closure is complete.
+silently selecting newer bytes. A `prefetched object size or digest mismatch`
+reports only the inventory label (repository and metadata role, or local object
+kind), pinned and observed byte counts, and the first 16 hex characters of each
+SHA-256 on stderr. Discovery does not authorize that payload-fetch operation
+or prove that the submitted dependency closure is complete.
 
 ### Host package capsule preparation [EXISTS: fixture-qualified]
 
