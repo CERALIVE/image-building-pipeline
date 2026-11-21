@@ -346,8 +346,18 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         terminate(process)
         if process is resistant:
             assert time.monotonic() - float((root / "sent").read_text()) < RESISTANT_REAP_SECONDS
-            assert process.returncode == -signal.SIGKILL
-            report_phase(b"K")
+            # A wait status alone can leave a zombie until this launcher exits.
+            try:
+                pathlib.Path(f"/proc/{process.pid}/stat").stat()
+            except FileNotFoundError:
+                assert process.returncode == -signal.SIGKILL
+                (root / "reap-observer-pid").write_text(str(os.getpid()))
+                report_phase(b"K")
+                # Keep the launcher alive until the test has observed the reap.
+                assert select.select([0], [], [], FIXTURE_PHASE_SECONDS)[0], "reap acknowledgement timed out"
+                assert os.read(0, 1) == b"A", "reap was not acknowledged"
+            else:
+                report_phase(b"U")
 
     def fault_at(step: str) -> None:
         if fault is None or fault[1] != step or (root / "injected").exists():
@@ -515,7 +525,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 if resistant is not None:
                     ready = epoll.poll(*args)
                     if not sent and any(fd == resistant.stdout.fileno() for fd, _flags in ready):
-                        assert os.read(resistant.stdout.fileno(), 1) == b"R", "stand-in exited before readiness"
+                        ready_byte = os.read(resistant.stdout.fileno(), 1)
+                        if ready_byte != b"R":
+                            report_phase(b"E")
+                        assert ready_byte == b"R", "stand-in exited before readiness"
                         cancel()
                         report_phase(b"C")
                     return ready
@@ -731,7 +744,10 @@ def expect_phase(channel: int, launcher_fd: int, phase: bytes, seconds: int, lab
     ready, _, _ = select.select([channel, launcher_fd], [], [], seconds)
     assert ready, f"deadline expired waiting for {label}"
     assert channel in ready, f"launcher exited before {label}"
-    assert os.read(channel, 1) == phase, f"unexpected phase while waiting for {label}"
+    observed = os.read(channel, 1)
+    assert observed != b"U", "owned child still has a /proc entry after termination (not reaped)"
+    assert observed != b"E", "stand-in exited before readiness"
+    assert observed == phase, f"unexpected phase {observed!r} while waiting for {label}"
 
 
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
@@ -923,6 +939,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
         with subprocess.Popen(
             command,
             env={"PATH": f"{root}:/usr/bin:/bin", "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1"},
+            stdin=subprocess.PIPE if mode == "ignore" else None,
             start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         ) as launcher:
             seconds = FIXTURE_PHASE_SECONDS
@@ -933,6 +950,13 @@ os.execvp(sys.argv[1], sys.argv[1:])
                     # Keep startup and durable receipt I/O out of the child-reap budget.
                     expect_phase(channel, launcher_fd, b"C", seconds, "selector cancellation")
                     expect_phase(channel, launcher_fd, b"K", RESISTANT_REAP_SECONDS, "owned child reap")
+                    observer_fd = os.pidfd_open(int((root / "reap-observer-pid").read_text()))
+                    phases.callback(os.close, observer_fd)
+                    pid = (root / "pid").read_text()
+                    assert not pathlib.Path(f"/proc/{pid}/stat").exists(), "owned child was not reaped before teardown"
+                    assert not select.select([observer_fd], [], [], 0)[0], "launcher exited before reap acknowledgement"
+                    assert launcher.stdin is not None
+                    assert os.write(launcher.stdin.fileno(), b"A") == 1
                 _, stderr = launcher.communicate(timeout=seconds)
             except subprocess.TimeoutExpired as error:
                 if mode == "ignore":
@@ -1227,7 +1251,16 @@ os.execvp(sys.argv[1], sys.argv[1:])
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:
-    cancelled_fixture("ignore")
+    wait = select.select
+
+    def bounded_wait(readers: list[int], writers: list[int], errors: list[int], timeout: float) -> tuple:
+        # A successful exchange alone cannot distinguish a finite wait from an infinite one.
+        assert isinstance(timeout, (int, float)) and 0 <= timeout <= RESISTANT_REAP_SECONDS, (
+            "lifecycle phase wait must have a finite deadline", timeout)
+        return wait(readers, writers, errors, timeout)
+
+    with patch.object(select, "select", bounded_wait):
+        cancelled_fixture("ignore")
 
 
 def test_inherited_blocked_and_ignored_signals_do_not_reach_children() -> None:
