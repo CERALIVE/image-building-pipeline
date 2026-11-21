@@ -144,20 +144,34 @@ def test_measure_populates_only_manifest_selected_release_history() -> None:
 
 
 def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roots() -> None:
-    for revision, fault in ((8, ""), (9, ""), (9, "unused-nvidia"), (8, "missing-nvidia"),
-                            (9, "missing-builtin"), (9, "preserved"), (9, "incomplete")):
+    for revision, case, failure in (
+        (8, "missing-nvidia-unshipped-ref", "removed a referenced candidate: nvidia"),
+        (8, "", ""), (9, "", ""), (9, "unused-nvidia", "unreferenced candidate: nvidia"),
+        (8, "missing-nvidia", "removed a referenced candidate: nvidia"),
+        (8, "never-shipped-nvidia", ""),
+        (9, "missing-builtin", "removed a referenced candidate: tegra"),
+        (9, "preserved", "preserved firmware directory is absent: iwlwifi"),
+        (9, "incomplete", "firmware_sweep_module_refs"),
+        (9, "no-refs", "found no installed-module or built-in firmware references"),
+        (9, "only-noncandidate-refs", ""),
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             firmware = root / "usr/lib/firmware"
             modules = root / "usr/lib/modules/7.2.0-ceralive-rk3588"
             modules.mkdir(parents=True)
             (modules / "modules.builtin").write_text("kernel/drivers/fixture.ko\n")
+            builtin_ref = ("brcm/fixture.bin" if case in ("no-refs", "only-noncandidate-refs")
+                           else "tegra/retained.bin")
             (modules / "modules.builtin.modinfo").write_bytes(
-                b"fixture.file=drivers/fixture\0fixture.firmware=tegra/retained.bin\0")
+                b"fixture.file=drivers/fixture\0" +
+                (f"fixture.firmware={builtin_ref}\0".encode() if case != "no-refs" else b""))
             if revision == 8:
                 (modules / "nouveau.ko").touch()
             modinfo = root / "modinfo"
-            modinfo.write_text("#!/bin/sh\ncase \"$3\" in */nouveau.ko) printf 'nvidia/retained.bin\\n';; *) exit 1;; esac\n")
+            nvidia_ref = ("nvidia/never-shipped.bin" if case in ("missing-nvidia-unshipped-ref", "never-shipped-nvidia")
+                          else "nvidia/retained.bin")
+            modinfo.write_text(f"#!/bin/sh\ncase \"$3\" in */nouveau.ko) printf '{nvidia_ref}\\n';; *) exit 1;; esac\n")
             modinfo.chmod(0o755)
             policy = root / "manifests/rk3588-bluetooth-firmware-roots.txt"
             policy.parent.mkdir()
@@ -166,19 +180,21 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             roots = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "iwlwifi", "mrvl/prestera")
             supplied = ("tegra/retained.bin", "nvidia/retained.bin", "intel/ibt-fixture",
                         *(name + "/fixture.bin" for name in roots))
+            if case == "never-shipped-nvidia":
+                supplied = tuple(name for name in supplied if not name.startswith("nvidia/"))
             claims = root / "var/lib/dpkg/info/armbian-firmware-full.list"
             claims.parent.mkdir(parents=True)
             claims.write_text("".join(f"/usr/lib/firmware/{name}\n" for name in supplied))
             for name in supplied:
-                if ((name.startswith("nvidia/") and revision == 9 and fault != "unused-nvidia")
-                        or (fault == "missing-nvidia" and name.startswith("nvidia/"))
-                        or (fault == "missing-builtin" and name.startswith("tegra/"))
-                        or (fault == "preserved" and name.startswith("iwlwifi/"))):
+                if ((name.startswith("nvidia/") and revision == 9 and case != "unused-nvidia")
+                        or (case in ("missing-nvidia", "missing-nvidia-unshipped-ref") and name.startswith("nvidia/"))
+                        or (case in ("missing-builtin", "no-refs", "only-noncandidate-refs") and name.startswith("tegra/"))
+                        or (case == "preserved" and name.startswith("iwlwifi/"))):
                     continue
                 file = firmware / name
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b"firmware")
-            if fault == "incomplete":
+            if case == "incomplete":
                 (modules / "modules.builtin.modinfo").unlink()
             params = {
                 "FIRMWARE_PRESERVED_ROOTS": "brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi",
@@ -188,24 +204,50 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             try:
                 proof = image_verify.check_firmware(root, root, params, os.environ | {"PATH": f"{root}:{os.environ['PATH']}"})
             except (StreamError, subprocess.CalledProcessError) as error:
-                assert fault, (revision, error)
+                assert failure and failure in str(error), (revision, case, error)
             else:
-                assert not fault, (revision, fault)
-                assert ("nvidia" in proof["retained"]) == (revision == 8)
-                assert ("nvidia" in proof["removed"]) == (revision == 9)
-                assert {"tegra", "intel", *roots}.issubset(proof["retained"])
-                assert any("fixture (built-in)" in ref for ref in proof["firmware_references"])
+                assert not failure, (revision, case)
+                nvidia_retained = revision == 8 and case != "never-shipped-nvidia"
+                assert ("nvidia" in proof["retained"]) == nvidia_retained
+                assert ("nvidia" in proof["removed"]) != nvidia_retained
+                assert {"intel", *roots}.issubset(proof["retained"])
+                if case == "only-noncandidate-refs":
+                    assert proof["firmware_references"] == []
+                else:
+                    assert "tegra" in proof["retained"]
+                    assert any("fixture (built-in)" in ref for ref in proof["firmware_references"])
+                assert proof["examined_firmware_references"] == (2 if revision == 8 else 1)
                 image_vm.validate_verification({
                     "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
                     "slots": [proof | {"slot": slot, "reserve": "fixture"} for slot in ("rootfs_a", "rootfs_b")],
                 }, IDENTITY, {})
 
 
-def test_host_accepts_firmware_proof_without_driver_references() -> None:
+def test_host_rejects_empty_firmware_proof_without_evidence_of_inspection() -> None:
     receipt = {
         "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
         "slots": [{"slot": label, "reserve": "fixture", "removed": ["nvidia"], "retained": ["brcm"],
                    "firmware_references": []} for label in ("rootfs_a", "rootfs_b")],
+    }
+    for count in (None, 0):
+        invalid = deepcopy(receipt)
+        if count is not None:
+            for slot in invalid["slots"]:
+                slot["examined_firmware_references"] = count
+        try:
+            image_vm.validate_verification(invalid, IDENTITY, {})
+        except StreamError:
+            pass
+        else:
+            raise AssertionError(f"accepted empty firmware proof with inspection count {count}")
+
+
+def test_host_accepts_firmware_proof_without_driver_references() -> None:
+    receipt = {
+        "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
+        "slots": [{"slot": label, "reserve": "fixture", "removed": ["nvidia"], "retained": ["brcm"],
+                   "firmware_references": [], "examined_firmware_references": 1}
+                  for label in ("rootfs_a", "rootfs_b")],
     }
     image_vm.validate_verification(receipt, IDENTITY, {})
     for field in ("removed", "retained"):
@@ -217,6 +259,14 @@ def test_host_accepts_firmware_proof_without_driver_references() -> None:
             pass
         else:
             raise AssertionError(f"accepted empty {field} inventory")
+    receipt["slots"][0]["firmware_references"] = ["nvidia/retained.bin\tnouveau.ko",
+                                                 "tegra/retained.bin\tfixture (built-in)"]
+    try:
+        image_vm.validate_verification(receipt, IDENTITY, {})
+    except StreamError:
+        pass
+    else:
+        raise AssertionError("accepted more retained references than the verifier examined")
 
 
 def test_installed_kernel_lock_requires_exact_released_bytes_and_origin() -> None:
@@ -1508,7 +1558,8 @@ def test_measurement_and_verifier_records_reject_every_wrong_typed_field() -> No
     inventory = {member.id: member.sha256 for member in members}
     verifier = {"schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": inventory, "slots": [
         {"slot": slot, "reserve": "reserved", "removed": ["amdgpu"], "retained": ["nvidia"],
-         "firmware_references": ["nvidia/retained.bin\t7.2.0-ceralive-rk3588/nouveau.ko"]}
+         "firmware_references": ["nvidia/retained.bin\t7.2.0-ceralive-rk3588/nouveau.ko"],
+         "examined_firmware_references": 1}
         for slot in ("rootfs_a", "rootfs_b")
     ]}
     for record, check, args in (

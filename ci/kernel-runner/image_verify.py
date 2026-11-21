@@ -121,13 +121,15 @@ def _compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
 
 
 def check_firmware(source: Path, slot: Path, params: dict[str, str],
-                   env: dict[str, str]) -> dict[str, list[str]]:
+                   env: dict[str, str]) -> dict[str, list[str] | int]:
     """Check sweep results; the tar closure gate checks individual firmware objects."""
     firmware = slot / "usr/lib/firmware"
     refs = run_gate(["bash", "-euo", "pipefail", "-c",
         'source "$1"; firmware_sweep_module_refs "$2"', "_",
         str(source / "mkosi/customize/firmware-sweep.sh"), str(slot)],
         env=env, capture_output=True, text=True, timeout=300).stdout.splitlines()
+    if not refs:
+        raise StreamError("found no installed-module or built-in firmware references")
     bluetooth = run_gate(["bash", "-euo", "pipefail", "-c",
         'source "$1"; bluetooth_firmware_load "$2"; bluetooth_firmware_snapshot "$3"; '
         'printf "%s\\n" "${BT_FW_OBJECTS[@]}"', "_",
@@ -161,10 +163,13 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
             retained.add(name)
             proof.update(line for _, line in matched)
         else:
-            if runtime or any(path.removesuffix(".zst").removesuffix(".xz") in owned for path, _ in matched):
+            # The sweep protects the whole candidate, even if the particular
+            # requested file was never packaged.
+            if runtime or (matched and any(path == name or path.startswith(name + "/") for path in owned)):
                 raise StreamError(f"firmware sweep removed a referenced candidate: {name}")
             removed.add(name)
-    return {"removed": sorted(removed), "retained": sorted(retained), "firmware_references": sorted(proof)}
+    return {"removed": sorted(removed), "retained": sorted(retained), "firmware_references": sorted(proof),
+            "examined_firmware_references": len(refs)}
 
 
 def check_kernel_lock(packages: list[dict[str, str]], expected: tuple[str, str, str], digest: str) -> None:

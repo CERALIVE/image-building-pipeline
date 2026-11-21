@@ -766,9 +766,14 @@ does no mount, filesystem repair, chroot, package installation or tar extraction
 The same locked unit then starts a fresh no-network verifier overlay using
 the approved source/base and public metadata. It rechecks tar size, boot,
 firmware closure/inventory, package identities, kernel metadata and actual
-clean ext4 reserves. It verifies sweep results against installed module and
-built-in references and preserved firmware roots, without requiring any
-particular driver. Read-only guest mounts compare slot contents with the
+clean ext4 reserves. A missing sweep candidate fails if Bluetooth needs it or
+if a module or built-in references that candidate and the firmware package
+owns anything at or below it. The requested file need not be one the package
+ships. The verifier also checks preserved roots and rejects leftover sweep
+candidates with neither a driver reference nor Bluetooth use. On each slot,
+the host requires a positive count of all references read by the verifier,
+even if none match retained sweep candidates. No particular driver is required.
+Read-only guest mounts compare slot contents with the
 emitted tar plus independently recompiled boot payload; ext4's empty
 `lost+found` is filesystem housekeeping. Only a matching verifier result
 produces the host's candidate `acceptance.json`. The final marker makes it

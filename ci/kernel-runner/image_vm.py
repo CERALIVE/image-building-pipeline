@@ -240,12 +240,15 @@ def validate_verification(row, identity: Identity, inventory: dict) -> None:
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
     labels = set()
     for slot in slots:
-        if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained", "firmware_references"}
+        if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained",
+                                                     "firmware_references", "examined_firmware_references"}
                 or type(slot["slot"]) is not str or slot["slot"] not in ("rootfs_a", "rootfs_b")
                 or type(slot["reserve"]) is not str or not slot["reserve"]
                 or any(type(slot[key]) is not list or any(type(item) is not str for item in slot[key])
                        for key in ("removed", "retained", "firmware_references"))
-                or not slot["removed"] or not slot["retained"]):
+                or not slot["removed"] or not slot["retained"]
+                or type(slot["examined_firmware_references"]) is not int
+                or slot["examined_firmware_references"] < max(1, len(slot["firmware_references"]))):
             raise StreamError("invalid verifier slot record")
         labels.add(slot["slot"])
     if labels != {"rootfs_a", "rootfs_b"}:
