@@ -1702,8 +1702,9 @@ def test_probe_cleanup_and_artifact_publication_failures_never_publish_success()
 
 def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
     real_open, real_read, real_unlink = os.open, pathlib.Path.read_text, pathlib.Path.unlink
-    for step in ("capsule-create", "capsule-copy", "verifier-result", "capsule-unlink", "success", "replace"):
-        for action in ((step,) if step in ("success", "replace") else ("fail", "term")):
+    receipt_cases = ("success", "replace", "unapproved-release", "reserve-mismatch")
+    for step in ("capsule-create", "capsule-copy", "verifier-result", "capsule-unlink", *receipt_cases):
+        for action in ((step,) if step in receipt_cases else ("fail", "term")):
             with tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
                 base, input_file, store = root / "base", root / "input.tar", root / "returns"
@@ -1768,6 +1769,11 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                         inject("capsule-unlink")
                     return real_unlink(path, *options, **kwargs)
 
+                def release_evidence(_file, _identity, _trust, _parent, _checkpoint) -> SimpleNamespace:
+                    if action == "unapproved-release":
+                        raise StreamError("fixture could not authenticate released evidence")
+                    return SimpleNamespace()
+
                 def execute(_base, directory, request, _cancellation, jobs):
                     payload = request["payload"]
                     artifacts = directory / "artifacts"
@@ -1786,7 +1792,8 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
                             "slots": [
-                                {"slot": slot, "reserve": "reserve", **FIXTURE_FIRMWARE}
+                                {"slot": slot, "reserve": "other reserve" if action == "reserve-mismatch"
+                                 and slot == "rootfs_a" else "reserve", **FIXTURE_FIRMWARE}
                                 for slot in ("rootfs_a", "rootfs_b")
                             ],
                         }))
@@ -1797,7 +1804,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                                         validate_base=lambda *_args: None, disk_admission=lambda *_args: None,
                                         load_policy=lambda *_args: FixturePolicy(), execute=execute,
-                                        released_evidence=lambda *_args: SimpleNamespace(),
+                                        released_evidence=release_evidence,
                                         verify_released_receipts=lambda *_args: dict.fromkeys(
                                             ("rootfs_a", "rootfs_b"), "reserve")), \
                             patch.object(image_resources.ImageCaps, "qemu_limit"), \
@@ -1815,11 +1822,15 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                 if action == "replace":
                     assert written and capsule.read_bytes() == b"independent fixture"
                 assert status == int(not successful), (step, action)
-                assert marker.exists() == (action != "fail"), (step, action)
+                assert marker.exists() == (action not in ("fail", "unapproved-release")), (step, action)
+                if action == "unapproved-release":
+                    assert not (attempt / "build").exists()
                 if marker.exists():
                     row = json.loads(marker.read_text())
                     assert row["launcher_exit"] == status
                     assert row["pair_complete"] == successful
+                    if action == "reserve-mismatch":
+                        assert row["stop_reason"] == "StreamError", row
                 assert (image_vm.completed_acceptance(attempt / "acceptance.json") is not None) == successful
 
 

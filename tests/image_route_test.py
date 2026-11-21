@@ -2042,7 +2042,9 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
             body_by_file["measurement.json"] = json.dumps(bound).encode()
             digests["measurement.json"] = hashlib.sha256(body_by_file["measurement.json"]).hexdigest()
             for name, body in body_by_file.items():
-                (artifacts / name).write_bytes(body)
+                path = artifacts / name
+                path.write_bytes(body)
+                path.chmod(0o600)
             evidence = image_vm.ReleaseEvidence(kernel, "e" * 64, metadata)
             assert image_vm.verify_released_receipts(artifacts, digests, IDENTITY, root, evidence) == reserves
             for name, label, body in (
@@ -2053,10 +2055,12 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
                 ("rootfs_a.reserve", "changed reserve bytes", body_by_file["rootfs_b.reserve"]),
                 ("packages.lock.json", "lock origin", json.dumps(
                     lock_record | {"packages": [lock | {"origin": "foreign-release"}]}).encode()),
+                ("packages.lock.json", "lock kernel digest", json.dumps(
+                    lock_record | {"packages": [lock | {"sha256": "f" * 64}]}).encode()),
                 ("measurement.json", "host kernel binding", json.dumps(
                     bound | {"kernel_version": "7.2.0-ceralive7"}).encode()),
             ):
-                if label in {"changed reserve bytes", "lock origin"}:
+                if label in {"changed reserve bytes", "lock origin", "lock kernel digest"}:
                     # Isolate the claimed bytes/identity from the manifest's length check.
                     assert len(body) == len(body_by_file[name]), label
                 file = artifacts / name

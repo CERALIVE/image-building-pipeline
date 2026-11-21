@@ -907,8 +907,16 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
         digest = "d" * 64
 
         def capsule_bytes(revision: int, fault: str = "") -> io.BytesIO:
-            metadata = json.dumps({"package": kernel, "version": f"7.2.0-ceralive{revision}",
-                                   "arch": "arm64", "deb_sha256": digest, "validated_boards": [board]}).encode()
+            kernel_fields = {"package": kernel, "version": f"7.2.0-ceralive{revision}",
+                             "arch": "arm64", "deb_sha256": digest, "validated_boards": [board]}
+            metadata_faults = {
+                "wrong-package": {"package": "linux-image-7.2.1-ceralive-rk3588"},
+                "wrong-arch": {"arch": "amd64"},
+                "wrong-version-format": {"version": "7.2.0-ceralive09"},
+                "wrong-validated-board": {"validated_boards": ["orange-pi-5-plus"]},
+                "wrong-validated-boards-type": {"validated_boards": board},
+            }
+            metadata = json.dumps(kernel_fields | metadata_faults.get(fault, {})).encode()
             pin = hashlib.sha256(metadata).hexdigest()
             trust["kernel_metadata"]["kernel-artifact.json"] = pin
             kernel_row = {"sha256": pin, "length": len(metadata), "kind": "kernel-metadata", "urls": []}
@@ -938,6 +946,12 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
                 metadata = metadata.replace(b"7.2.0-ceralive9", b"7.2.0-ceralive8")
             if fault == "wrong-kind":
                 kernel_row = kernel_row | {"kind": "apt-metadata"}
+            if fault == "wrong-length":
+                kernel_row = kernel_row | {"length": len(metadata) + 1}
+            if fault == "candidate-object":
+                body = b"unapproved candidate fixture"
+                rows.append(({"sha256": hashlib.sha256(body).hexdigest(), "length": len(body),
+                              "kind": "measurement-candidate", "urls": []}, body))
             rows.append((kernel_row, metadata))
             if fault == "duplicate-object":
                 rows.append((kernel_row, metadata))
@@ -947,10 +961,17 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
                     {key: row[key] for key in ("sha256", "length", "kind", "urls")} for row, _ in rows]}
                 if fault == "wrong-source":
                     delivery = delivery | {"source_commit": "f" * 40}
+                if fault == "wrong-capsule-board":
+                    delivery = delivery | {"board": "orange-pi-5-plus"}
                 if fault == "wrong-repository-type":
                     delivery = delivery | {"repositories": []}
+                if fault == "candidate-key":
+                    delivery = delivery | {"measurement_candidate": {}}
                 objects = {"objects/" + row["sha256"]: body for row, body in rows}
-                for name, body in [("inventory.json", json.dumps(delivery).encode()), *objects.items()]:
+                entries = [("inventory.json", json.dumps(delivery).encode()), *objects.items()]
+                if fault == "duplicate-member":
+                    entries.append(("objects/" + pin, metadata))
+                for name, body in entries:
                     entry = tarfile.TarInfo(name)
                     entry.size = len(body)
                     archive.addfile(entry, io.BytesIO(body))
@@ -981,6 +1002,16 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
             ("missing-repository", "invalid released capsule identity"),
             ("wrong-repository-type", "invalid released capsule identity"),
             ("duplicate-object", "duplicate capsule evidence object"),
+            ("wrong-capsule-board", "invalid released capsule identity"),
+            ("wrong-package", "invalid approved released kernel evidence"),
+            ("wrong-arch", "invalid approved released kernel evidence"),
+            ("wrong-version-format", "invalid approved released kernel evidence"),
+            ("wrong-validated-board", "invalid approved released kernel evidence"),
+            ("wrong-validated-boards-type", "invalid approved released kernel evidence"),
+            ("candidate-key", "invalid released capsule identity"),
+            ("candidate-object", "invalid released capsule identity"),
+            ("duplicate-member", "duplicate or excessive capsule members"),
+            ("wrong-length", "invalid released capsule evidence object"),
         ):
             try:
                 released_evidence(capsule_bytes(9, fault), identity, trust, work, lambda: None)
