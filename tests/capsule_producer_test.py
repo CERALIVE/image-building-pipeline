@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real local HTTPS/mTLS and archive signatures; no external connections or credentials."""
 
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -34,14 +34,30 @@ sys.path.insert(0, str(ROOT / "ci/kernel-runner"))
 from image_capsule import unpack
 from image_stream import Identity
 from image_stream import StreamError
-from image_transport import identity_config
+from image_transport import copy_local, identity_config
 
 
-def assert_prefetch_mismatch(repository: str, role: str, label: str, *, size_only: bool = False) -> None:
+LOCAL_PATH_CANARY = "private-client-key-path-canary"
+
+
+def assert_mismatch_line(diagnostic: str, label: str, pinned_size: int, observed_size: int,
+                         pinned_hash: str, observed_hash: str) -> None:
+    prefix = "capsule preparation rejected: prefetched object size or digest mismatch"
+    assert diagnostic.startswith(prefix), diagnostic
+    for marker in ("/", "://", "?", "@", "deb.debian.org", "apt.ceralive.tv",
+                   "token-canary", "client-key-canary", "password-canary", "Bearer secret",
+                   LOCAL_PATH_CANARY, pinned_hash, observed_hash):
+        assert marker not in diagnostic, (marker, diagnostic)
+    assert diagnostic == (f"{prefix}: {label}; size (bytes) pinned={pinned_size} observed={observed_size}; "
+                          f"SHA-256 (first 16) pinned={pinned_hash[:16]} observed={observed_hash[:16]}\n"), diagnostic
+
+
+def assert_prefetch_mismatch(repository: str | None, role: str, label: str, *, size_only: bool = False) -> None:
     """Exercise the producer CLI with real inventory validation and inert transport bytes."""
     with tempfile.TemporaryDirectory(prefix="capsule-mismatch-") as temporary:
         work = Path(temporary)
-        (work / "private").mkdir()
+        private = work / LOCAL_PATH_CANARY
+        private.mkdir()
         objects = []
         responses: dict[str, bytes] = {}
 
@@ -51,7 +67,7 @@ def assert_prefetch_mismatch(repository: str, role: str, label: str, *, size_onl
             if url:
                 responses[url] = payload
             else:
-                path = work / "private" / ("client-key-canary-" + digest)
+                path = private / ("client-key-canary-" + digest)
                 path.write_bytes(payload)
                 row["path"] = str(path)
             objects.append(row)
@@ -88,21 +104,30 @@ def assert_prefetch_mismatch(repository: str, role: str, label: str, *, size_onl
         policy = {"schema": 1, "root_der_sha256": "1" * 64, "repositories": policies,
                   "kernel_metadata": kernel, "builder_images": [
                       {"object": builder, "tag": "fixture", "image_id": "sha256:" + "2" * 64, "arch": "arm64"}]}
-        pinned_hash = repositories[repository][role]
+        pinned_hash = source if repository is None else repositories[repository][role]
         row = next(row for row in objects if row["sha256"] == pinned_hash)
-        url, = row["urls"]
-        payload = responses[url]
+        if repository is None:
+            local_source = Path(row["path"])
+            payload = local_source.read_bytes()
+        else:
+            url, = row["urls"]
+            payload = responses[url]
         if size_only:
             row["length"] += 1
+            observed = payload
         else:
-            responses[url] = b"Bearer secret-canary"[:len(payload)].ljust(len(payload), b"!")
-        observed_hash = hashlib.sha256(responses[url]).hexdigest()
-        pinned_size, observed_size = row["length"], len(responses[url])
+            observed = b"Bearer secret-canary"[:len(payload)].ljust(len(payload), b"!")
+        if repository is None:
+            local_source.write_bytes(observed)
+        else:
+            responses[url] = observed
+        observed_hash = hashlib.sha256(observed).hexdigest()
+        pinned_size, observed_size = row["length"], len(observed)
 
         inventory, trust, output = (work / name for name in ("reviewed.json", "policy.json", "capsule.tar"))
         inventory.write_text(json.dumps(reviewed))
         trust.write_text(json.dumps(policy))
-        ca = work / "private" / "password-canary.pem"
+        ca = private / "password-canary.pem"
         script = ROOT / "ci/prepare-image-capsule.py"
         argv = [str(script), "--inventory", str(inventory), "--trust-policy", str(trust),
                 "--output", str(output), "--ca-file", str(ca)]
@@ -111,7 +136,14 @@ def assert_prefetch_mismatch(repository: str, role: str, label: str, *, size_onl
         def fetch_bytes(url: str, target: Path, *_args: object) -> None:
             target.write_bytes(responses[url])
 
-        with patch.object(sys, "argv", argv), patch("image_transport.fetch", side_effect=fetch_bytes), \
+        def copy_wrong_size(source: Path, target: Path, length: int) -> None:
+            # Emulate a short staged snapshot; a short input is rejected before copying.
+            copy_local(source, target, observed_size if source == local_source else length)
+
+        copy_fixture = (patch("image_transport.copy_local", side_effect=copy_wrong_size)
+                        if repository is None and size_only else nullcontext())
+        with copy_fixture, patch.object(sys, "argv", argv), \
+                patch("image_transport.fetch", side_effect=fetch_bytes), \
                 patch("image_transport.shell", side_effect=AssertionError("mismatch reached signature checks")), \
                 redirect_stdout(stdout), redirect_stderr(stderr):
             try:
@@ -124,15 +156,7 @@ def assert_prefetch_mismatch(repository: str, role: str, label: str, *, size_onl
         assert not output.exists()
         assert not list(work.glob(".prefetch-*"))
         assert stdout.getvalue() == ""
-        diagnostic = stderr.getvalue()
-        prefix = "capsule preparation rejected: prefetched object size or digest mismatch"
-        assert diagnostic.startswith(prefix), diagnostic
-        for marker in ("/", "://", "?", "@", "deb.debian.org", "apt.ceralive.tv",
-                       "token-canary", "client-key-canary", "password-canary", "Bearer secret",
-                       pinned_hash, observed_hash):
-            assert marker not in diagnostic, (marker, diagnostic)
-        assert diagnostic == (f"{prefix}: {label}; size (bytes) pinned={pinned_size} observed={observed_size}; "
-                              f"SHA-256 (first 16) pinned={pinned_hash[:16]} observed={observed_hash[:16]}\n"), diagnostic
+        assert_mismatch_line(stderr.getvalue(), label, pinned_size, observed_size, pinned_hash, observed_hash)
 
 
 def test_prefetch_mismatch_reports_public_debian_release() -> None:
@@ -145,6 +169,14 @@ def test_prefetch_mismatch_reports_firstparty_index() -> None:
 
 def test_prefetch_mismatch_reports_size_only_and_equal_digest_prefixes() -> None:
     assert_prefetch_mismatch("debian-security", "index", "debian-security index", size_only=True)
+
+
+def test_prefetch_mismatch_reports_local_source_bundle_digest() -> None:
+    assert_prefetch_mismatch(None, "source_bundle", "source-bundle")
+
+
+def test_prefetch_mismatch_reports_local_source_bundle_snapshot_size() -> None:
+    assert_prefetch_mismatch(None, "source_bundle", "source-bundle", size_only=True)
 
 
 def command(args: list[str], work: Path) -> bytes:
@@ -1043,18 +1075,34 @@ def test_local_input_links_size_and_hash_mismatches_never_publish() -> None:
                            ("size", "local input is not a regular file"),
                            ("hash", "prefetched object size or digest mismatch")):
         with fixture() as (work, reviewed, args, env, requests, _remote):
-            source = work / reviewed["source_bundle"]
+            source_dir = work / LOCAL_PATH_CANARY
+            source_dir.mkdir()
+            pinned_hash = reviewed["source_bundle"]
+            source = (work / pinned_hash).rename(source_dir / "source.bundle")
+            row = next(row for row in reviewed["objects"] if row["kind"] == "source-bundle")
+            row["path"] = str(source)
             if case == "link":
-                alias = work / "linked-source"
+                alias = source_dir / "linked-source"
                 alias.symlink_to(source)
-                next(row for row in reviewed["objects"] if row["kind"] == "source-bundle")["path"] = str(alias)
+                row["path"] = str(alias)
             else:
                 data = source.read_bytes()
                 source.write_bytes(data + b"changed" if case == "size" else bytes([data[0] ^ 1]) + data[1:])
             (work / "reviewed.json").write_text(json.dumps(reviewed))
+            identity_arg = args.index("--client-identity-config")
+            del args[identity_arg:identity_arg + 2]
             result = run(args, env)
             assert result.returncode != 0, case
             assert expected in result.stderr, (case, result.stderr)
+            assert result.returncode == 1 and result.stdout == "", case
+            assert LOCAL_PATH_CANARY not in result.stderr, (case, result.stderr)
+            if case == "hash":
+                observed = source.read_bytes()
+                assert_mismatch_line(result.stderr, "source-bundle", row["length"], len(observed),
+                                     pinned_hash, hashlib.sha256(observed).hexdigest())
+            else:
+                assert result.stderr == ("capsule preparation rejected: local input is not a regular file "
+                                         "of the approved size\n"), (case, result.stderr)
             assert requests == []
             assert not (work / "capsule.tar").exists()
 
