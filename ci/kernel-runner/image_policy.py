@@ -112,6 +112,10 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
 
 
 def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolicy:
+    return parse_policy(read_policy(path), client_origins)
+
+
+def read_policy(path: Path) -> dict:
     limit = 1024 * 1024
     def read_policy() -> bytes:
         with os.fdopen(checked_open(path, limit=limit), "rb") as source:
@@ -121,7 +125,15 @@ def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolic
     if len(data) > limit:
         raise StreamError("missing or oversized public trust policy")
     row = json.loads(data, object_pairs_hook=unique_object)
+    if type(row) is not dict:
+        raise StreamError("invalid public trust policy fields")
+    return row
+
+
+def parse_policy(row: dict, client_origins: Collection[str], *, candidate_sealing: bool = False) -> PublicPolicy:
     required = {"schema", "root_der_sha256", "repositories", "kernel_metadata", "builder_images"}
+    if candidate_sealing:
+        required.remove("kernel_metadata")
     optional = {"addon_public_object", "paseto_public_object", "os_version"}
     if (not required.issubset(row) or set(row) - required - optional
             or type(row["schema"]) is not int or row["schema"] != 1):
@@ -129,8 +141,9 @@ def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolic
     repositories = archive_policies(row["repositories"], client_origins)
     if not {"firstparty", "bsp", "debian-source"}.issubset(repositories):
         raise StreamError("missing approved first-party/BSP/Debian-source origin policy")
-    metadata = row["kernel_metadata"]
-    if set(metadata) != {"kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"}:
+    metadata = {} if candidate_sealing else row["kernel_metadata"]
+    if not candidate_sealing and set(metadata) != {
+            "kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"}:
         raise StreamError("policy requires the exact four released kernel metadata objects")
     for digest in metadata.values():
         object_id(digest)

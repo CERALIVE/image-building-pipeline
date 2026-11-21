@@ -19,7 +19,9 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
-from image_policy import load_policy
+from image_candidate import FIELD as CANDIDATE_FIELD, KIND as CANDIDATE_KIND
+from image_candidate import check_sealed_candidate_archive, select_candidate, stage_candidate
+from image_policy import parse_policy, read_policy
 from image_stream import Identity, StreamError
 from image_transport import (INDEX_LIMIT, SEALED, TransportParser, copy_local, fetch, metadata_base,
                              read_json, shell, transport_clients)
@@ -27,10 +29,18 @@ from image_transport import (INDEX_LIMIT, SEALED, TransportParser, copy_local, f
 
 def prepare(args: argparse.Namespace) -> str:
     clients = transport_clients(args)
-    policy = load_policy(args.trust_policy, clients.keys())
+    policy_record = read_policy(args.trust_policy)
     reviewed = read_json(args.inventory)
-    if set(reviewed) != {"schema", "source_commit", "epoch", "board", "source_bundle",
-                         "device_root", "objects", "repositories", "packages"}:
+    if type(reviewed) is not dict:
+        raise StreamError("invalid reviewed inventory fields")
+    candidate = select_candidate(policy_record, reviewed, args.inventory.parent)
+    policy = parse_policy({key: value for key, value in policy_record.items() if key != CANDIDATE_FIELD},
+                          clients.keys(), candidate_sealing=candidate is not None)
+    required = {"schema", "source_commit", "epoch", "board", "source_bundle",
+                "device_root", "objects", "repositories", "packages"}
+    if candidate:
+        required.add(CANDIDATE_FIELD)
+    if reviewed.keys() != required:
         raise StreamError("invalid reviewed inventory fields")
     Identity("prefetch", reviewed["board"], reviewed["source_commit"], reviewed["epoch"], "0" * 64)
     if type(reviewed["schema"]) is not int or reviewed["schema"] != 1:
@@ -45,6 +55,9 @@ def prepare(args: argparse.Namespace) -> str:
     objects = {}
     urls = set()
     for item in reviewed["objects"]:
+        if type(item) is dict and (item.get("kind") == CANDIDATE_KIND
+                                   or candidate and item.get("kind") == "kernel-metadata"):
+            raise StreamError("measurement-candidate inventory must select a single private producer bundle")
         if (set(item) not in ({"sha256", "length", "kind", "urls"},
                               {"sha256", "length", "kind", "urls", "path"})
                 or item["kind"] not in KINDS - {"artifact"}
@@ -65,7 +78,13 @@ def prepare(args: argparse.Namespace) -> str:
             raise StreamError("repository metadata exceeds the 256 MiB bound")
         objects[digest] = item | {"urls": names}
         urls.update(names)
-    if sum(item["length"] + 1024 for item in objects.values()) + 2 * 1024**2 > INPUT_LIMIT:
+    candidate_rows = candidate.rows() if candidate else []
+    if candidate and any(pin["sha256"] in objects for pin in (
+            candidate.binding["payloads"] | candidate.binding["proof"]).values()):
+        raise StreamError("measurement-candidate inventory reuses a private bundle object")
+    if (len(objects) + len(candidate_rows) >= 19999
+            or sum(item["length"] + 1024 for item in (*objects.values(), *candidate_rows))
+            + 2 * 1024**2 > INPUT_LIMIT):
         raise StreamError("reviewed capsule exceeds the unchanged 32 GiB budget")
     for digest, kind in ((reviewed["source_bundle"], "source-bundle"),
                          (reviewed["device_root"], "public-trust")):
@@ -123,6 +142,8 @@ def prepare(args: argparse.Namespace) -> str:
                 or not re.fullmatch(r"[A-Za-z0-9.+:~_-]+", package["version"])
                 or package["arch"] not in ("arm64", "all")):
             raise StreamError("invalid reviewed package identity")
+        if candidate and package["name"].startswith("linux-image-"):
+            raise StreamError("measurement-candidate inventory cannot also seal an APT kernel")
         identity = (package["repository"], package["name"], package["arch"])
         digest = package["sha256"]
         if (identity in identities or digest in packages or digest not in objects
@@ -150,6 +171,8 @@ def prepare(args: argparse.Namespace) -> str:
         data.mkdir(mode=0o700)
         env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": temporary,
                "TMPDIR": temporary, "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}
+        if candidate:
+            stage_candidate(candidate, work / "candidate", data, env)
         transfers = []
         for digest, item in objects.items():
             if item["kind"] == "deb":
@@ -184,6 +207,9 @@ def prepare(args: argparse.Namespace) -> str:
         inventory = {key: reviewed[key] for key in
                      ("schema", "source_commit", "epoch", "board", "source_bundle",
                       "device_root", "repositories")} | {"objects": rows}
+        if candidate:
+            inventory[CANDIDATE_FIELD] = candidate.binding
+            rows.extend(candidate_rows)
         (data / "inventory.json").write_text(json.dumps(inventory))
         (data / "trust.json").write_text(json.dumps(asdict(policy)))
         shell('source "$1/lib/rauc-pki-contract.sh"; rauc_public_root_resolve "$2" "$3"',
@@ -255,8 +281,11 @@ def prepare(args: argparse.Namespace) -> str:
                 with (data / row["sha256"]).open("rb") as source:
                     archive.addfile(header, source)
         digest = digest_file(staged)
-        unpack(staged, work / "checked",
-               Identity("prefetch", reviewed["board"], reviewed["source_commit"], reviewed["epoch"], digest))
+        if candidate:
+            check_sealed_candidate_archive(staged, encoded, rows)
+        else:
+            unpack(staged, work / "checked",
+                   Identity("prefetch", reviewed["board"], reviewed["source_commit"], reviewed["epoch"], digest))
         now = datetime.now(timezone.utc)
         if any(row.deadline is not None and not row.date <= now <= row.deadline for row in validities):
             raise StreamError("repository metadata expired during prefetch")
