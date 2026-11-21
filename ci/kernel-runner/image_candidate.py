@@ -14,8 +14,8 @@ import subprocess
 import sys
 import tarfile
 
-from image_capsule import INPUT_LIMIT
 from image_candidate_deb import check_deb_archive
+from image_candidate_policy import BOARDS, FIELD, INPUT_LIMIT, KIND, METADATA, PROOF, SHA, Approval, parse_approval
 from image_stream import StreamError, unique_object
 from vm_process import run as run_gate
 
@@ -23,12 +23,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "lib"))
 from kernel_release import KernelIdentity, KernelReleaseError, VERSION, verified_metadata
 
-FIELD = "measurement_candidate"
-KIND = "measurement-candidate"
-METADATA = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
-PROOF = ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")
-BOARDS = ("orange-pi-5-plus", "rock-5b-plus")
-SHA = re.compile(r"[0-9a-f]{64}")
 LABELS = dict(zip((*METADATA, *PROOF), ("artifact metadata", "resolved config", "module list",
                                         "payload checksums", "producer receipt", "producer authorization inputs",
                                         "producer checksum envelope"), strict=True))
@@ -36,7 +30,7 @@ LABELS = dict(zip((*METADATA, *PROOF), ("artifact metadata", "resolved config", 
 
 @dataclass(frozen=True)
 class Candidate:
-    binding: dict
+    binding: Approval
     bundle: Path
     deb: str
 
@@ -49,35 +43,9 @@ def select_candidate(policy: dict, reviewed: dict, parent: Path) -> Candidate | 
         return None
     if FIELD not in policy:
         raise StreamError("measurement-candidate policy approval missing")
-    selected = policy[FIELD]
-    if (type(selected) is not dict or set(selected) != {
-            "package", "version", "arch", "validated_boards", "input_fingerprint", "producer_commit",
-            "candidate_run_id", "payloads", "proof"}
-            or any(type(selected[key]) is not str for key in (
-                "package", "version", "arch", "input_fingerprint", "producer_commit", "candidate_run_id"))):
-        raise StreamError("invalid measurement-candidate policy fields or types")
+    selected = parse_approval(policy[FIELD])
     package, version, arch = (selected[key] for key in ("package", "version", "arch"))
-    boards = selected["validated_boards"]
-    if (not VERSION.fullmatch(version) or package != f"linux-image-{version.split('-ceralive')[0]}-ceralive-rk3588"
-            or arch != "arm64" or type(boards) is not list or not all(type(board) is str for board in boards)
-            or sorted(boards) != list(BOARDS) or not SHA.fullmatch(selected["input_fingerprint"])
-            or not re.fullmatch(r"[0-9a-f]{40}", selected["producer_commit"])
-            or not re.fullmatch(r"[1-9][0-9]*", selected["candidate_run_id"])):
-        raise StreamError("invalid measurement-candidate policy identity")
     deb = f"{package}_{version}_{arch}.deb"
-    digests = set()
-    for key, names in (("payloads", {deb, *METADATA}), ("proof", set(PROOF))):
-        pins = selected[key]
-        if type(pins) is not dict or pins.keys() != names:
-            raise StreamError("invalid measurement-candidate policy file closure")
-        for name, pin in pins.items():
-            if (type(pin) is not dict or pin.keys() != {"sha256", "length"}
-                    or type(pin["sha256"]) is not str or not SHA.fullmatch(pin["sha256"])
-                    or type(pin["length"]) is not int
-                    or not 0 < pin["length"] <= (INPUT_LIMIT if name == deb else 16 * 1024**2)
-                    or pin["sha256"] in digests):
-                raise StreamError("invalid measurement-candidate policy file pin")
-            digests.add(pin["sha256"])
     choice = reviewed.get(FIELD)
     if (type(choice) is not dict or choice.keys() != {"bundle"} or type(choice["bundle"]) is not str
             or not choice["bundle"] or ".." in Path(choice["bundle"]).parts):
@@ -162,7 +130,8 @@ def check_producer(work: Path, selected: dict, deb_digest: str) -> None:
             raise StreamError(f"{KIND} producer {field} differs from approved policy")
 
 
-def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> None:
+def check_identity(work: Path, candidate: Candidate, env: dict[str, str], *,
+                   check_local_producer: bool = True) -> None:
     selected = candidate.binding
     metadata = work / METADATA[0]
     pins = selected["payloads"]
@@ -191,9 +160,10 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
             raise StreamError(failure) from None
 
     commit_error = f"{KIND} producer commit is not a local commit"
-    if run("git", "-c", "protocol.allow=never", "cat-file", "-t", selected["producer_commit"],
-           extra_env={"GIT_MASTER": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
-           failure=commit_error) != "commit":
+    if check_local_producer and run(
+            "git", "-c", "protocol.allow=never", "cat-file", "-t", selected["producer_commit"],
+            extra_env={"GIT_MASTER": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
+            failure=commit_error) != "commit":
         raise StreamError(commit_error)
     expected = (selected["package"], selected["version"], selected["arch"])
     fields = ("Package", "Version", "Architecture")
@@ -231,6 +201,23 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
             prefix = observed[:16] if SHA.fullmatch(observed) else "unavailable"
             raise StreamError(f"{KIND} family fingerprint mismatch; "
                               f"SHA-256 (first 16) pinned={fp[:16]} observed={prefix}")
+        if not check_local_producer:
+            run("bash", "-euo", "pipefail", "-c", '''
+source "$1/lib/build-kernel.sh"
+defconfig_base="${KERNEL_SOURCE_DEFCONFIG_BASE:-}"
+fragment_rel="${KERNEL_SOURCE_DEFCONFIG_FRAGMENT:-}"
+fragments_rel="${KERNEL_SOURCE_DEFCONFIG_FRAGMENTS:-}"
+config_git_url="${KERNEL_SOURCE_CONFIG_GIT_URL:-}"
+config_commit="${KERNEL_SOURCE_CONFIG_COMMIT:-}"
+config_path="${KERNEL_SOURCE_CONFIG_PATH:-}"
+absent_rel="${KERNEL_SOURCE_CONFIG_ABSENT_SYMBOLS:-}"
+absent_list=
+resolve_kernel_config_mode
+# An offline candidate must not fetch a separate config tree.
+[[ "$config_mode" == defconfig ]]
+kernel_artifact_verify_config "$2"
+''', "_", str(ROOT), str(work / "resolved.config"), extra_env=params,
+                failure="measurement-candidate resolved config failed shipping checks")
     check_deb_archive(work / candidate.deb, paths, env)
 
 

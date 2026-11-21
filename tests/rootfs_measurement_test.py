@@ -169,6 +169,7 @@ rootfs_measurement_resolved
 '''
     with tempfile.TemporaryDirectory() as temporary:
         sealed = Path(temporary)
+        (sealed / "inventory.json").write_text('{"objects":[]}\n')
         for selected, approved, variant, slots, arch, valid_hash, success in (
             ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge", "false", "arm64", True, True),
             ("7.2.0-ceralive9", "7.2.0-ceralive9", "edge", "false", "arm64", True, True),

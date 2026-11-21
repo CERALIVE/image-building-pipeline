@@ -24,6 +24,7 @@ import time
 from typing import Literal
 
 from image_capsule import Capsule, digest_file, object_id, unpack
+from image_candidate_policy import FIELD
 from image_stream import (
     BUILD_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, encode, list_directory, listed_entry,
     retry_check, retry_io, unique_object, write_all,
@@ -292,9 +293,10 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     shutil.copyfile(directory / trust["repositories"]["debian-source"]["keyring"],
                     "/usr/share/keyrings/debian-archive-keyring.gpg")
     params = resolve(source, capsule.board, env)
-    history = HOME / "kernel-history" / params["KERNEL_SOURCE_PACKAGE_VERSION"]
-    stage_kernel_metadata(source, capsule, params, trust["kernel_metadata"], history)
-    env["CERALIVE_KERNEL_HISTORY_DIR"] = str(history.parent)
+    if FIELD not in trust:
+        history = HOME / "kernel-history" / params["KERNEL_SOURCE_PACKAGE_VERSION"]
+        stage_kernel_metadata(source, capsule, params, trust["kernel_metadata"], history)
+        env["CERALIVE_KERNEL_HISTORY_DIR"] = str(history.parent)
     mediamtx = command(["bash", "-euo", "pipefail", "-c",
         'source "$1"; printf "%s" "$MEDIAMTX_SHA256_arm64"', "_",
         str(source / "mkosi/runtime/rtmp-gateway/mediamtx.recipe.conf")], env)
@@ -394,12 +396,18 @@ def main() -> None:
     if job["schema"] != 1 or set(job) - {"schema", "identity", "operation", "trust", "artifacts", "build_identity"}:
         raise StreamError("invalid image job contract")
     identity = Identity(**job["identity"])
+    approved_candidate = job["trust"].get(FIELD)
+    if FIELD in job["trust"] and (
+            approved_candidate is None or "kernel_metadata" in job["trust"] or job["operation"] not in ("measure", "verify")):
+        raise StreamError("candidate requires an explicit measurement or verification job")
     HOME.mkdir(mode=0o700)
     env = {"PATH": os.environ["PATH"], "HOME": str(HOME), "LANG": "C.UTF-8"}
     capsule_path = Path("/dev/disk/by-id/virtio-ceralive-image-input")
-    capsule = unpack(capsule_path, HOME / "input", identity)
+    capsule = unpack(capsule_path, HOME / "input", identity, approved_candidate=approved_candidate)
     directory = HOME / "input"
-    (directory / "trust.json").write_text(json.dumps(job["trust"]) + "\n")
+    trust_path = directory / "trust.json"
+    trust_path.write_text(json.dumps(job["trust"]) + "\n")
+    trust_path.chmod(0o400)
     source = source_checkout(capsule, directory, env)
     failure = None
     try:

@@ -760,7 +760,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
             patch.object(image_vm, "validate_return", fixture_return),
             patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                            disk_admission=lambda *_args: None, disk_headroom=lambda *_args: None),
-            patch.object(image_vm, "load_policy", return_value=FixturePolicy()),
+            patch.object(image_vm, "load_job_trust", return_value=asdict(FixturePolicy())),
             patch.object(image_lifecycle, "disk_headroom"),
             patch.object(image_lifecycle, "process_priority", capture_priority),
             patch.object(image_resources, "require_process_priority", return_value=FIXTURE_PRIORITY["nice"]),
@@ -1803,7 +1803,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                 try:
                     with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
                                         validate_base=lambda *_args: None, disk_admission=lambda *_args: None,
-                                        load_policy=lambda *_args: FixturePolicy(), execute=execute,
+                                        load_job_trust=lambda *_args, **_kwargs: asdict(FixturePolicy()), execute=execute,
                                         released_evidence=release_evidence,
                                         verify_released_receipts=lambda *_args: dict.fromkeys(
                                             ("rootfs_a", "rootfs_b"), "reserve")), \
@@ -2794,9 +2794,7 @@ def test_duplicate_store_refusal_does_not_treat_a_partial_scan_as_empty() -> Non
 
                 with patch.object(image_vm, "list_directory", scan), \
                         patch.object(image_vm, "require_host_lock"), patch.object(image_vm, "cgroup_admission"), \
-                        patch.object(image_vm, "load_policy", return_value=SimpleNamespace()) as policy, \
-                        patch.object(image_vm, "asdict", side_effect=lambda value: {"root_der_sha256": "d" * 64}
-                                     if value is policy.return_value else asdict(value)), \
+                        patch.object(image_vm, "load_job_trust", return_value={"root_der_sha256": "d" * 64}), \
                         patch.object(image_vm, "report_error", side_effect=diagnostics.append), \
                         patch.object(image_vm, "run") as launch, patch.object(image_vm, "execute") as execute:
                     assert image_vm.run_image(args, None, vm.Cancellation()) == 1
@@ -2878,7 +2876,7 @@ def test_attempt_stays_in_admitted_directory_after_its_name_changes() -> None:
             return artifacts
 
         with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
-                            load_policy=lambda *_: FixturePolicy(), validate_base=lambda *_: None,
+                            load_job_trust=lambda *_, **__: asdict(FixturePolicy()), validate_base=lambda *_: None,
                             disk_admission=lambda *_: None, execute=execute), \
                 patch.object(image_resources.ImageCaps, "qemu_limit"), patch.object(os, "mkdir", mkdir):
             with fixture_signal_mask():
@@ -2924,9 +2922,10 @@ def test_late_disk_error_restarts_store_admission_before_execution() -> None:
             steps = []
             inventory = image_vm.list_directory
 
-            def policy(_path):
+            def policy(_path, *, measurement):
                 steps.append("policy")
-                return FixturePolicy()
+                assert not measurement
+                return asdict(FixturePolicy())
 
             def scan(path):
                 if named(path) == store:
@@ -2948,7 +2947,7 @@ def test_late_disk_error_restarts_store_admission_before_execution() -> None:
 
             success = failures == 1 and error != errno.EPERM
             with patch.multiple(image_vm, require_host_lock=lambda: None, cgroup_admission=lambda: None,
-                                validate_base=lambda *_: None, load_policy=policy, list_directory=scan,
+                                validate_base=lambda *_: None, load_job_trust=policy, list_directory=scan,
                                 disk_admission=disk, execute=execute), \
                     patch.object(image_resources.ImageCaps, "qemu_limit"):
                 try:

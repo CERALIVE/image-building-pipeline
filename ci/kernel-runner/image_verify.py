@@ -247,19 +247,28 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
                                "examined_firmware_references": len({row for _, row in references})}}
 
 
-def check_kernel_lock(packages: list[dict[str, str]], expected: tuple[str, str, str], digest: str) -> None:
+def kernel_receipt(kernel: tuple[str, str, str], digest: str) -> dict[str, str]:
+    package, version, arch = kernel
+    return {"name": package, "version": version, "arch": arch, "sha256": digest,
+            "origin": "measurement-candidate"}
+
+
+def check_kernel_lock(packages: list[dict[str, str]], expected: tuple[str, str, str], digest: str, *,
+                      origin: str = "ceralive-kernel") -> None:
     if type(packages) is not list or any(type(row) is not dict or type(row.get("name")) is not str
                                         for row in packages):
         raise StreamError("invalid installed package lock entries")
     kernels = [row for row in packages if row["name"].startswith("linux-image-")]
     keys = ("name", "version", "arch", "sha256", "origin")
-    if (len(kernels) != 1 or kernels[0].keys() != set(keys)
-            or tuple(kernels[0][key] for key in keys) != (*expected, digest, "ceralive-kernel")):
-        raise StreamError("installed kernel lock differs from the approved released identity")
+    if (origin not in ("ceralive-kernel", "measurement-candidate") or len(kernels) != 1
+            or kernels[0].keys() != set(keys)
+            or tuple(kernels[0][key] for key in keys) != (*expected, digest, origin)):
+        label = "released" if origin == "ceralive-kernel" else "candidate"
+        raise StreamError(f"installed kernel lock differs from the approved {label} identity")
 
 
-def checked_lock(lock: dict, epoch: int) -> list[dict[str, str]]:
-    """Validate a released measurement lock before using any of its rows."""
+def checked_lock(lock: dict, epoch: int, *, origin: str = "ceralive-kernel") -> list[dict[str, str]]:
+    """Validate a measurement lock before using any of its rows."""
     if (type(lock) is not dict or lock.keys() != {"built_at", "source_date_epoch", "packages", "debian_release_dates"}
             or type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] != epoch
             or type(lock["built_at"]) is not str
@@ -274,7 +283,8 @@ def checked_lock(lock: dict, epoch: int) -> list[dict[str, str]]:
         if (type(row) is not dict or row.keys() != {"name", "version", "arch", "origin", "sha256"}
                 or any(type(value) is not str or not value for value in row.values())
                 or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
-                or row["origin"] == "measurement-candidate"):
+                or (row["origin"] == "measurement-candidate"
+                    and (origin != "measurement-candidate" or not row["name"].startswith("linux-image-")))):
             raise StreamError("invalid released package lock entry")
         key = row["name"], row["arch"]
         if key in identities:
@@ -285,6 +295,7 @@ def checked_lock(lock: dict, epoch: int) -> list[dict[str, str]]:
 
 def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     reset_child_status()
+    from image_candidate_policy import FIELD, KIND
     from image_guest import HOME, KERNEL_METADATA, kernel_identity, resolve, stage_kernel_metadata
     inputs = capsule.directory
     identity = Identity(**job["build_identity"])
@@ -305,14 +316,30 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
     expected_kernel = kernel_identity(params)
     if measurement["kernel_version"] != expected_kernel[1]:
         raise StreamError("returned measurement kernel version differs from approved source")
-    metadata = HOME / "released-kernel"
-    kernel_digest = stage_kernel_metadata(source, capsule, params, job["trust"]["kernel_metadata"], metadata)
-    modules = approved_modules((metadata / "built-modules.txt").read_bytes(),
-                               job["trust"]["kernel_metadata"]["built-modules.txt"])
+    trust = job["trust"]
+    metadata = HOME / "approved-kernel"
+    if FIELD in trust:
+        pins = trust[FIELD]["payloads"]
+        package, version, arch = expected_kernel
+        kernel_digest = pins.get(f"{package}_{version}_{arch}.deb", {}).get("sha256")
+        observed = run_gate(["python3", str(source / "lib/measurement-candidate.py"), "stage",
+                             str(inputs), capsule.board, package, version, arch, str(metadata)],
+                            env=env | {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"},
+                            timeout=1200, capture_output=True, text=True).stdout.strip()
+        if kernel_digest is None or observed != kernel_digest:
+            raise StreamError("candidate verifier staged different kernel bytes")
+        kernel_origin = KIND
+        approved_metadata = {name: pins[name]["sha256"] for name in KERNEL_METADATA}
+    else:
+        approved_metadata = trust["kernel_metadata"]
+        kernel_digest = stage_kernel_metadata(source, capsule, params, approved_metadata, metadata)
+        kernel_origin = "ceralive-kernel"
+    modules = approved_modules((metadata / "built-modules.txt").read_bytes(), approved_metadata["built-modules.txt"])
     for name in KERNEL_METADATA:
         supplied = artifacts["kernel.SHA256SUMS" if name == "SHA256SUMS" else name]
-        if digest_file(supplied) != job["trust"]["kernel_metadata"][name]:
-            raise StreamError("returned kernel metadata differs from independently selected release")
+        if digest_file(supplied) != approved_metadata[name]:
+            label = "release" if kernel_origin == "ceralive-kernel" else "candidate"
+            raise StreamError(f"returned kernel metadata differs from independently selected {label}")
     with tarfile.open(artifacts["rootfs.tar"], "r:") as archive:
         if any(member.name.removeprefix("./").startswith("var/cache/apt/archives/")
                and member.name.endswith(".deb") for member in archive):
@@ -371,8 +398,8 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
                      env=env, timeout=300, stdout=subprocess.DEVNULL)
             locked = checked_lock(
                 json.loads(artifacts["packages.lock.json"].read_text(), object_pairs_hook=unique_object),
-                identity.epoch)
-            check_kernel_lock(locked, expected_kernel, kernel_digest)
+                identity.epoch, origin=kernel_origin)
+            check_kernel_lock(locked, expected_kernel, kernel_digest, origin=kernel_origin)
             parser = runpy.run_path(str(source / "lib/packages-lock.py"))["installed_packages"]
             installed = parser(mount / "var/lib/dpkg/status")
             if sorted((row["name"], row["version"], row["arch"]) for row in installed) != sorted(
@@ -385,6 +412,9 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
         finally:
             run_gate(["umount", str(mount)], env=env, timeout=60)
     result = HOME / "verification.json"
-    result.write_text(json.dumps({"schema": 1, "verified": True, "build_identity": asdict(identity),
-                                  "artifacts": job["artifacts"], "slots": slots}) + "\n")
+    row = {"schema": 1, "verified": True, "build_identity": asdict(identity),
+           "artifacts": job["artifacts"], "slots": slots}
+    if kernel_origin == KIND:
+        row["kernel"] = kernel_receipt(expected_kernel, kernel_digest)
+    result.write_text(json.dumps(row) + "\n")
     return [("verification.json", result)]

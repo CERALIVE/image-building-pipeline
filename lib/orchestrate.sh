@@ -260,6 +260,10 @@ main() {
     rootfs_measurement_preflight
   else
     [[ "${CERALIVE_BUILD_PURPOSE:-full}" == full ]] || die "select measurement explicitly with --rootfs-measurement"
+    if [[ -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+      python3 "${HERE}/sealed-inputs.py" refuse-measurement-candidate \
+        || die "sealed measurement candidate is not permitted outside --rootfs-measurement"
+    fi
   fi
   if (( kernel_only == 0 )); then
     if (( rootfs_measurement == 0 )) && [[ "${DRY_RUN:-0}" != "1" ]]; then
@@ -286,6 +290,7 @@ main() {
   # into one place — the stages are called from here, so bash's dynamic scoping
   # hands them these names exactly as the inline bodies had them.
   local kernel_from_source=0 family_manifest="" mkosi_arch="" rauc_build_dir_host=""
+  local kernel_origin=ceralive-kernel
   local ts="" rootfs_tree="" build_version=""
   local out_dir="" artifact=""
 
