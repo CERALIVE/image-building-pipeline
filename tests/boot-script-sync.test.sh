@@ -220,7 +220,7 @@ grep -qF 'setup_boot_script_sync() {' "${ROOT}/mkosi/customize/postinst.d/persis
   && ok "setup_boot_script_sync is defined and called from configure_services" \
   || bad "setup_boot_script_sync is not wired"
 
-{ grep -qxF 'Requires=ceralive-healthcheck.service' "${UNIT}" && grep -qxF 'After=ceralive-healthcheck.service' "${UNIT}" \
+{ grep -qxF 'Requires=ceralive-mark-good.service' "${UNIT}" && grep -qxF 'After=ceralive-mark-good.service' "${UNIT}" \
   && grep -qxF 'ConditionPathExists=/usr/lib/ceralive/boot/boot.scr' "${UNIT}" && grep -qxF 'WantedBy=multi-user.target' "${UNIT}"; } \
   && ok "the unit needs a successful healthcheck, is inert without a payload and is enabled at boot" \
   || bad "unit gating is wrong"

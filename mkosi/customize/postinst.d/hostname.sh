@@ -376,7 +376,8 @@ local_identity_matches() {
 }
 
 restart_identity_consumers() {
-    "$SYSTEMCTL_BIN" --no-block restart "${CONSUMER_UNITS[@]}"
+    "$SYSTEMCTL_BIN" --no-block restart "${CONSUMER_UNITS[@]}" || return 1
+    "$SYSTEMCTL_BIN" --no-block start ceralive-mark-good.service
 }
 
 clear_restart_pending() {
@@ -507,6 +508,7 @@ RuntimeDirectoryMode=0700
 ExecStart=/usr/local/sbin/ceralive-set-hostname
 ExecStartPost=/usr/bin/systemctl --no-block start ceralive.service
 ExecStartPost=/usr/bin/systemctl --no-block restart ceralive-tls-firstboot.service nginx.service ceralive-hawkbit-provision.service ceralive-healthcheck.service
+ExecStartPost=/usr/bin/systemctl --no-block start ceralive-mark-good.service
 TimeoutStartSec=150
 Restart=on-failure
 RestartSec=5
