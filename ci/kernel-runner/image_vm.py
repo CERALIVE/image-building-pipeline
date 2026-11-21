@@ -25,12 +25,14 @@ import time
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
 from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory, unlink_observed
 from image_policy import load_policy
+from image_receipt import ReleaseEvidence, released_evidence
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import (
-    BUILD_LOG_LIMIT, HEADER_LIMIT, MAGIC, MANIFEST_LIMIT, Identity, StreamError, checked_open, decode, exact_json,
+    BUILD_LOG_LIMIT, HEADER_LIMIT, MAGIC, MANIFEST_LIMIT, Identity, Member, StreamError, checked_open, decode, exact_json,
     list_directory, listed_entry, read_header, retry_check, unique_object, verify_sidecar,
 )
-from image_verify import FIRMWARE_FLOOR, approved_modules, candidate_consumers, check_nouveau_evidence, firmware_path
+from image_verify import (FIRMWARE_FLOOR, approved_modules, candidate_consumers, check_kernel_lock, checked_lock,
+                          check_nouveau_evidence, firmware_path)
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -192,7 +194,8 @@ def read_return_record(path: Path, *, private: bool) -> bytes:
     return retry_check(read)
 
 
-def measurement_stages(row, identity: Identity, public_root: str, members) -> dict:
+def measurement_stages(row, identity: Identity, public_root: str, members, *,
+                       kernel_version: str | None = None, validity: dict | None = None) -> dict:
     stages = dict.fromkeys(("resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
                            "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock",
                            "parity", "raw-slots"), 0)
@@ -219,6 +222,14 @@ def measurement_stages(row, identity: Identity, public_root: str, members) -> di
                 or type(repository["freshness_checked"]) is not bool
                 or repository["freshness"] != ("checked" if repository["freshness_checked"] else "NOT checked")):
             raise StreamError("invalid measurement repository record")
+    if validity is not None:
+        expected_rows = {record["repository"]: record for record in validity["repositories"]}
+        if (len(repositories) != len(expected_rows)
+                or len({record["repository"] for record in repositories}) != len(repositories)
+                or any(not exact_json(record, expected_rows.get(record["repository"])) for record in repositories)):
+            raise StreamError("measurement repository facts differ from the authenticated capsule")
+    if kernel_version is not None and kernel != kernel_version:
+        raise StreamError("measurement kernel version differs from the independently approved release")
     expected = {
         "schema": 1, "purpose": "rootfs-measurement", "build_mode": "production", "board": identity.board,
         "source_commit": identity.commit, "source_date_epoch": identity.epoch, "input_sha256": identity.input_sha256,
@@ -249,6 +260,27 @@ def verified_firmware_policy(path: Path, digest: str) -> tuple[dict[str, str], s
     return dict.fromkeys(prefixes, "directory") | dict.fromkeys(files, "file"), set(preserved)
 
 
+def verify_released_receipts(artifacts: Path, inventory: dict, identity: Identity,
+                             public_root: str, approved: ReleaseEvidence) -> dict[str, str]:
+    """Verify returned claims against the capsule and the independent verifier's inputs."""
+    lock = checked_lock(returned_json(artifacts / "packages.lock.json", private=True), identity.epoch)
+    check_kernel_lock(lock, approved.kernel, approved.deb_sha256)
+    resolved = returned_json(artifacts / "resolved.json", private=True)
+    if tuple(resolved[key] for key in ("KERNEL_PACKAGES", "KERNEL_SOURCE_PACKAGE_VERSION", "ARCH")) != approved.kernel:
+        raise StreamError("verified resolver kernel differs from the independently approved release")
+    reserves = {}
+    for slot in ("rootfs_a", "rootfs_b"):
+        name = slot + ".reserve"
+        body = read_return_record(artifacts / name, private=True)
+        if hashlib.sha256(body).hexdigest() != inventory[name]:
+            raise StreamError("returned slot reserve differs from the verifier inventory")
+        reserves[slot] = body.decode("ascii").strip()
+    row = returned_json(artifacts / "measurement.json", private=True)
+    members = tuple(Member(name, (artifacts / name).stat().st_size, digest) for name, digest in inventory.items())
+    measurement_stages(row, identity, public_root, members, kernel_version=approved.kernel[1], validity=approved.validity)
+    return reserves
+
+
 def check_retention_scan(slot: dict, references: list[str], candidates: set[str], preserved: set[str]) -> None:
     """Reconcile emitted firmware rows with the observations used to decide retention."""
     scan = slot["retention_scan"]
@@ -277,7 +309,8 @@ def check_retention_scan(slot: dict, references: list[str], candidates: set[str]
 
 
 def validate_verification(row, identity: Identity, inventory: dict, modules: list[str],
-                          policy: tuple[dict[str, str], set[str]]) -> None:
+                          policy: tuple[dict[str, str], set[str]], *,
+                          reserves: dict[str, str] | None = None) -> None:
     if type(row) is not dict:
         raise StreamError("invalid verifier receipt")
     slots = row.get("slots")
@@ -304,6 +337,8 @@ def validate_verification(row, identity: Identity, inventory: dict, modules: lis
                 or type(slot["nouveau_present"]) is not bool
                 or type(slot["candidate_consumers"]) is not dict):
             raise StreamError("invalid verifier slot record")
+        if reserves is not None and slot["reserve"] != reserves[slot["slot"]]:
+            raise StreamError("verifier reserve disagrees with the bound slot evidence")
         if slot["nouveau_present"] != nouveau_present:
             raise StreamError("reported Nouveau presence differs from the approved module inventory")
         references = slot["firmware_references"]
@@ -579,6 +614,12 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     directory = store / identity.attempt
     create_directory(directory)
     CAPS.qemu_limit()
+    approved = None
+    if args.image_mode == "measure":
+        with os.fdopen(os.dup(capsule_fd), "rb") as original:
+            original.seek(0)
+            approved = released_evidence(original, identity, trust, directory, cancellation.check)
+            original.seek(0)
     request = {"capsule": args.input_capsule, "capsule_fd": capsule_fd, "base_fd": base_fd,
                "base_sha256": args.base_sha256, "deadline": build_deadline,
                "retained_bytes": retained, "payload": {
@@ -613,7 +654,9 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
     policy = verified_firmware_policy(artifacts / "resolved.json", inventory["resolved.json"])
-    validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules, policy)
+    reserves = verify_released_receipts(artifacts, inventory, identity, trust["root_der_sha256"], approved)
+    validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules, policy,
+                          reserves=reserves)
     unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),

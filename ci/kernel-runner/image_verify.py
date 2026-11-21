@@ -15,7 +15,7 @@ import subprocess
 import tarfile
 
 from image_capsule import Capsule, digest_file
-from image_stream import Identity, StreamError, list_directory, listed_entry, retry_check
+from image_stream import Identity, StreamError, list_directory, listed_entry, retry_check, unique_object
 from vm_process import reset_child_status, run as run_gate
 
 FIRMWARE_FLOOR = frozenset({"brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "mrvl", "mrvl/prestera"})
@@ -248,11 +248,39 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
 
 
 def check_kernel_lock(packages: list[dict[str, str]], expected: tuple[str, str, str], digest: str) -> None:
+    if type(packages) is not list or any(type(row) is not dict or type(row.get("name")) is not str
+                                        for row in packages):
+        raise StreamError("invalid installed package lock entries")
     kernels = [row for row in packages if row["name"].startswith("linux-image-")]
-    if len(kernels) != 1 or tuple(kernels[0].get(key) for key in ("name", "version", "arch", "sha256", "origin")) != (
-        *expected, digest, "ceralive-kernel"
-    ):
+    keys = ("name", "version", "arch", "sha256", "origin")
+    if (len(kernels) != 1 or kernels[0].keys() != set(keys)
+            or tuple(kernels[0][key] for key in keys) != (*expected, digest, "ceralive-kernel")):
         raise StreamError("installed kernel lock differs from the approved released identity")
+
+
+def checked_lock(lock: dict, epoch: int) -> list[dict[str, str]]:
+    """Validate a released measurement lock before using any of its rows."""
+    if (type(lock) is not dict or lock.keys() != {"built_at", "source_date_epoch", "packages", "debian_release_dates"}
+            or type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] != epoch
+            or type(lock["built_at"]) is not str
+            or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", lock["built_at"])
+            or type(lock["debian_release_dates"]) is not dict or not lock["debian_release_dates"]
+            or any(not suite or type(date) is not str or not date
+                   for suite, date in lock["debian_release_dates"].items())
+            or type(lock["packages"]) is not list or not lock["packages"]):
+        raise StreamError("invalid released measurement lock")
+    identities = set()
+    for row in lock["packages"]:
+        if (type(row) is not dict or row.keys() != {"name", "version", "arch", "origin", "sha256"}
+                or any(type(value) is not str or not value for value in row.values())
+                or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+                or row["origin"] == "measurement-candidate"):
+            raise StreamError("invalid released package lock entry")
+        key = row["name"], row["arch"]
+        if key in identities:
+            raise StreamError("duplicate installed package lock entry")
+        identities.add(key)
+    return lock["packages"]
 
 
 def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
@@ -341,13 +369,15 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             compare_slot(mount, artifacts["rootfs.tar"], boot)
             run_gate(["bash", str(source / "lib/parity-check.sh"), str(mount)],
                      env=env, timeout=300, stdout=subprocess.DEVNULL)
-            lock = json.loads(artifacts["packages.lock.json"].read_text())
+            locked = checked_lock(
+                json.loads(artifacts["packages.lock.json"].read_text(), object_pairs_hook=unique_object),
+                identity.epoch)
+            check_kernel_lock(locked, expected_kernel, kernel_digest)
             parser = runpy.run_path(str(source / "lib/packages-lock.py"))["installed_packages"]
             installed = parser(mount / "var/lib/dpkg/status")
             if sorted((row["name"], row["version"], row["arch"]) for row in installed) != sorted(
-                    (row["name"], row["version"], row["arch"]) for row in lock["packages"]):
+                    (row["name"], row["version"], row["arch"]) for row in locked):
                 raise StreamError("returned package lock disagrees with installed slot")
-            check_kernel_lock(lock["packages"], expected_kernel, kernel_digest)
             if digest_file(mount / "etc/rauc/ceralive-keyring.pem") != digest_file(inputs / capsule.device_root):
                 raise StreamError("installed device root bytes differ from approved public root")
             firmware = retry_check(check_firmware, source, mount, params, env, "nouveau.ko" in modules)

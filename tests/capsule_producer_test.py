@@ -5,7 +5,7 @@ from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_st
 from collections.abc import Iterator
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -888,6 +888,140 @@ def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str
         args = [args[0], str(ROOT / "tests/capsule_transport_fixture.py"), *args[1:]]
     return subprocess.run(args, env=env, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, timeout=45)
+
+
+def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
+    from image_receipt import released_evidence
+
+    with fixture("debian-waiver") as (work, inventory, _args, _env, requests, remote):
+        trust = json.loads((work / "policy.json").read_text())
+        members = []
+        for row in inventory["objects"]:
+            if row["kind"] != "apt-metadata":
+                continue
+            file = work / row["sha256"]
+            body = file.read_bytes() if file.is_file() else remote[row["urls"][0]]
+            members.append((row, body))
+        board = inventory["board"]
+        kernel = "linux-image-7.2.0-ceralive-rk3588"
+        digest = "d" * 64
+
+        def capsule_bytes(revision: int, fault: str = "") -> io.BytesIO:
+            kernel_fields = {"package": kernel, "version": f"7.2.0-ceralive{revision}",
+                             "arch": "arm64", "deb_sha256": digest, "validated_boards": [board]}
+            metadata_faults = {
+                "wrong-package": {"package": "linux-image-7.2.1-ceralive-rk3588"},
+                "wrong-arch": {"arch": "amd64"},
+                "wrong-version-format": {"version": "7.2.0-ceralive09"},
+                "wrong-validated-board": {"validated_boards": ["orange-pi-5-plus"]},
+                "wrong-validated-boards-type": {"validated_boards": board},
+            }
+            metadata = json.dumps(kernel_fields | metadata_faults.get(fault, {})).encode()
+            pin = hashlib.sha256(metadata).hexdigest()
+            trust["kernel_metadata"]["kernel-artifact.json"] = pin
+            kernel_row = {"sha256": pin, "length": len(metadata), "kind": "kernel-metadata", "urls": []}
+            rows = list(members)
+            repos = deepcopy(inventory["repositories"])
+            if fault == "missing-repository":
+                del repos["bsp"]
+            if fault == "wrong-index":
+                assert repos["firstparty"]["index"] != repos["bsp"]["index"]
+                repos["firstparty"]["index"] = repos["bsp"]["index"]
+            original = repos["firstparty"]["inrelease"]
+            if fault in ("signature", "digest"):
+                index = next(i for i, (row, _) in enumerate(rows) if row["sha256"] == original)
+                row, signed = rows[index]
+                assert b"Suite: stable" in signed
+                changed = signed.replace(b"Suite: stable", b"Suite: forged")
+                if fault == "signature":
+                    replacement = hashlib.sha256(changed).hexdigest()
+                    row = row | {"sha256": replacement, "length": len(changed)}
+                    repos["firstparty"]["inrelease"] = replacement
+                else:
+                    changed = changed[:-1]
+                    row = row | {"length": len(changed)}
+                rows[index] = row, changed
+            if fault == "kernel-digest":
+                assert b"7.2.0-ceralive9" in metadata
+                metadata = metadata.replace(b"7.2.0-ceralive9", b"7.2.0-ceralive8")
+            if fault == "wrong-kind":
+                kernel_row = kernel_row | {"kind": "apt-metadata"}
+            if fault == "wrong-length":
+                kernel_row = kernel_row | {"length": len(metadata) + 1}
+            if fault == "candidate-object":
+                body = b"unapproved candidate fixture"
+                rows.append(({"sha256": hashlib.sha256(body).hexdigest(), "length": len(body),
+                              "kind": "measurement-candidate", "urls": []}, body))
+            rows.append((kernel_row, metadata))
+            if fault == "duplicate-object":
+                rows.append((kernel_row, metadata))
+            payload = io.BytesIO()
+            with tarfile.open(fileobj=payload, mode="w") as archive:
+                delivery = inventory | {"repositories": repos, "objects": [
+                    {key: row[key] for key in ("sha256", "length", "kind", "urls")} for row, _ in rows]}
+                if fault == "wrong-source":
+                    delivery = delivery | {"source_commit": "f" * 40}
+                if fault == "wrong-capsule-board":
+                    delivery = delivery | {"board": "orange-pi-5-plus"}
+                if fault == "wrong-repository-type":
+                    delivery = delivery | {"repositories": []}
+                if fault == "candidate-key":
+                    delivery = delivery | {"measurement_candidate": {}}
+                objects = {"objects/" + row["sha256"]: body for row, body in rows}
+                entries = [("inventory.json", json.dumps(delivery).encode()), *objects.items()]
+                if fault == "duplicate-member":
+                    entries.append(("objects/" + pin, metadata))
+                for name, body in entries:
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(body)
+                    archive.addfile(entry, io.BytesIO(body))
+            payload.seek(0)
+            return payload
+
+        identity = Identity("host-fixture", board, inventory["source_commit"], inventory["epoch"], "b" * 64)
+        for revision in (8, 9):
+            evidence = released_evidence(capsule_bytes(revision), identity, trust, work, lambda: None)
+            assert evidence.kernel == (kernel, f"7.2.0-ceralive{revision}", "arm64")
+            assert evidence.deb_sha256 == digest
+            validity = {row["repository"]: row for row in evidence.validity["repositories"]}
+            assert set(validity) == set(inventory["repositories"])
+            for name, row in validity.items():
+                original = inventory["repositories"][name]["inrelease"]
+                signed = next(body for item, body in members if item["sha256"] == original)
+                date = next(line[6:] for line in signed.decode().splitlines() if line.startswith("Date: "))
+                assert row["release_date"] == parsedate_to_datetime(date).isoformat()
+                assert row["release_sha256"] == original
+                assert row["freshness_checked"] == (name != "debian-source")
+        for fault, expected in (
+            ("signature", "could not authenticate released capsule evidence"),
+            ("wrong-index", "could not authenticate released capsule evidence"),
+            ("digest", "released capsule evidence digest mismatch"),
+            ("kernel-digest", "released capsule evidence digest mismatch"),
+            ("wrong-kind", "invalid released capsule evidence object"),
+            ("wrong-source", "invalid released capsule identity"),
+            ("missing-repository", "invalid released capsule identity"),
+            ("wrong-repository-type", "invalid released capsule identity"),
+            ("duplicate-object", "duplicate capsule evidence object"),
+            ("wrong-capsule-board", "invalid released capsule identity"),
+            ("wrong-package", "invalid approved released kernel evidence"),
+            ("wrong-arch", "invalid approved released kernel evidence"),
+            ("wrong-version-format", "invalid approved released kernel evidence"),
+            ("wrong-validated-board", "invalid approved released kernel evidence"),
+            ("wrong-validated-boards-type", "invalid approved released kernel evidence"),
+            ("candidate-key", "invalid released capsule identity"),
+            ("candidate-object", "invalid released capsule identity"),
+            ("duplicate-member", "duplicate or excessive capsule members"),
+            ("wrong-length", "invalid released capsule evidence object"),
+        ):
+            try:
+                released_evidence(capsule_bytes(9, fault), identity, trust, work, lambda: None)
+            except StreamError as error:
+                assert str(error) == expected, (fault, str(error))
+                continue
+            except AttributeError as error:
+                raise AssertionError(f"invalid capsule crashed the reader: {fault}") from error
+            raise AssertionError(f"accepted an invalid capsule: {fault}")
+        assert not requests, requests
 
 
 def approve_redirects(work: Path, reviewed: dict, maximum: int = 3, name: str = "bsp") -> None:

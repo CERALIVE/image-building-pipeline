@@ -807,6 +807,17 @@ records `release_date` (the signed Date as ISO 8601), `release_sha256` (the
 original Release/InRelease object's SHA-256), `freshness_checked`, and
 `freshness`. A waived Debian row has `freshness_checked: false` and
 `freshness: "NOT checked"`; its enclosing purpose is `rootfs-measurement`.
+Before accepting a released measurement, the launcher reauthenticates the
+original signed indexes and release dates from its digest-checked capsule. It
+compares those facts to the build receipt and ties the reported kernel version
+and lock entry to the independently pinned kernel metadata and the verifier's
+manifest resolution. The verifier still checks installed package identities and
+recomputes reserve from both slot images; the launcher checks the verifier's
+reserve against the digest-bound reserve records. These checks do not add any
+receipt fields, admit an unreleased candidate, or claim a host-side firmware
+scan. Rolling out the changed baked verifier requires a separately approved
+guest base and base digest; no running base is changed by the code update.
+
 This receipt preserves signature and byte identity evidence without claiming
 freshness for the waiver.
 

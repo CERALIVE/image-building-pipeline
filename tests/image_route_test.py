@@ -1897,6 +1897,248 @@ def test_terminal_manifest_rejects_every_wrong_typed_field() -> None:
         rejected(frame(invalid))
 
 
+def test_released_measurement_claims_require_independent_expected_values() -> None:
+    """Receipt shape alone must not authorize a different release, kernel or reserve."""
+    failures = []
+    for revision in (8, 9):
+        kernel = (KERNEL_PACKAGE, f"7.2.0-ceralive{revision}", "arm64")
+        root = "d" * 64
+        members = tuple(Member(name, 1, "a" * 64) for name in (
+            "rootfs.tar", "packages.lock.json", "rootfs_a.ext4", "rootfs_b.ext4", "rootfs_a.reserve",
+            "rootfs_b.reserve", "rootfs_a.header", "rootfs_b.header", "boot.scr", "boot.scr.sha256"))
+        metadata = {"schema": 1, "purpose": "rootfs-measurement", "repositories": [
+            {"repository": name, "release_date": "2026-11-19T00:00:00+00:00", "release_sha256": digest * 64,
+             "freshness_checked": name != "debian-source",
+             "freshness": "NOT checked" if name == "debian-source" else "checked"}
+            for name, digest in (("firstparty", "a"), ("bsp", "b"), ("debian-source", "c"))]}
+        measurement = {
+            "schema": 1, "purpose": "rootfs-measurement", "build_mode": "production",
+            "board": IDENTITY.board, "source_commit": IDENTITY.commit, "source_date_epoch": IDENTITY.epoch,
+            "input_sha256": IDENTITY.input_sha256, "public_root_der_sha256": root, "kernel_version": kernel[1],
+            "stages": dict.fromkeys(("resolve", "fetch", "kernel-reuse", "rauc-build", "partition", "bsp",
+                                    "mkosi", "tar", "boot", "size", "firmware-closure", "packages-lock",
+                                    "parity", "raw-slots"), 0),
+            "slot_only_additions": ["usr/lib/ceralive/boot/boot.scr", "usr/lib/ceralive/boot/boot.scr.sha256"],
+            "metadata_validity": deepcopy(metadata),
+            "artifacts": {member.id: {"sha256": member.sha256, "bytes": member.length} for member in members},
+            "signed_candidate": False,
+        }
+        inventory = {member.id: member.sha256 for member in members}
+        reserves = {"rootfs_a": "observed reserve A", "rootfs_b": "observed reserve B"}
+        modules = ["nouveau.ko"] if revision == 8 else ["fixture.ko"]
+        references = ["nvidia/retained.bin\t7.2.0-ceralive-rk3588/nouveau.ko"] if revision == 8 else []
+        policy = (dict.fromkeys(("nvidia", "amdgpu"), "directory"), set())
+        verifier = {"schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": inventory, "slots": [
+            firmware_receipt_slot({"slot": label, "reserve": reserves[label],
+                "removed": ["amdgpu"] if revision == 8 else ["amdgpu", "nvidia"],
+                "retained": ["nvidia"] if revision == 8 else [],
+                "firmware_references": references, "examined_firmware_references": 1,
+                "candidate_consumers": {"amdgpu": [], "nvidia": ["nouveau"] if revision == 8 else []},
+                "nouveau_present": revision == 8}, modules) for label in reserves]}
+        lock = dict(zip(("name", "version", "arch"), kernel, strict=True)) | {
+            "sha256": "e" * 64, "origin": "ceralive-kernel"}
+        userspace = {"name": "base-files", "version": "13", "arch": "arm64",
+                     "sha256": "f" * 64, "origin": "debian:stable"}
+        lock_record = {"built_at": "2026-11-21T00:00:00Z", "source_date_epoch": IDENTITY.epoch,
+                       "debian_release_dates": {"stable": "Thu, 19 Nov 2026 00:00:00 UTC"}, "packages": [lock]}
+
+        def measurement_check(row):
+            image_vm.measurement_stages(row, IDENTITY, root, members, kernel_version=kernel[1], validity=metadata)
+
+        def verifier_check(row):
+            image_vm.validate_verification(row, IDENTITY, inventory, modules, policy, reserves=reserves)
+
+        def lock_check(row):
+            image_verify.check_kernel_lock(image_verify.checked_lock(row, IDENTITY.epoch), kernel, "e" * 64)
+
+        for label, check, record in (
+            ("measurement", measurement_check, measurement), ("verifier", verifier_check, verifier),
+            ("kernel lock", lock_check, lock_record),
+        ):
+            try:
+                check(record)
+            except (StreamError, TypeError) as error:
+                failures.append((revision, label, "genuine rejected", str(error)))
+                continue
+            for path, invalid in wrong_typed_records(record):
+                try:
+                    check(invalid)
+                except StreamError:
+                    continue
+                failures.append((revision, label, "wrong type accepted", path))
+            for path, invalid in receipt_shape_faults(record):
+                try:
+                    check(invalid)
+                except StreamError:
+                    continue
+                failures.append((revision, label, "shape fault accepted", path))
+            for path, invalid in receipt_value_faults(record):
+                try:
+                    check(invalid)
+                except StreamError:
+                    continue
+                failures.append((revision, label, "value fault accepted", path))
+            with tempfile.TemporaryDirectory() as scratch:
+                path = pathlib.Path(scratch) / "receipt.json"
+                for location, wire in duplicate_receipt_keys(record):
+                    path.write_text(wire)
+                    try:
+                        image_vm.returned_json(path)
+                    except StreamError:
+                        continue
+                    failures.append((revision, label, "duplicate key accepted", location))
+        for key, value in (("repository", "replacement"), ("release_date", "2026-11-18T00:00:00+00:00"),
+                           ("release_sha256", "f" * 64), ("freshness_checked", False),
+                           ("freshness", "NOT checked")):
+            altered = deepcopy(measurement)
+            altered["metadata_validity"]["repositories"][0][key] = value
+            try:
+                measurement_check(altered)
+            except (StreamError, TypeError):
+                continue
+            failures.append((revision, "measurement", key, "substitution accepted"))
+        for field, value in (("name", "linux-image-foreign"), ("version", "7.2.0-ceralive7"), ("arch", "amd64"),
+                             ("sha256", "f" * 64), ("origin", "measurement-candidate")):
+            try:
+                lock_check(lock_record | {"packages": [lock | {field: value}]})
+            except StreamError:
+                continue
+            failures.append((revision, "kernel lock", field, "substitution accepted"))
+        lock_check(lock_record | {"packages": [lock, userspace]})
+        for label, rows in (
+            ("unexpected userspace field", [userspace | {"size": "123"}]),
+            ("duplicate userspace identity", [userspace, userspace | {"version": "14"}]),
+            ("candidate origin outside kernel", [userspace | {"origin": "measurement-candidate"}]),
+            ("non-hex userspace digest", [userspace | {"sha256": "z" * 64}]),
+        ):
+            try:
+                lock_check(lock_record | {"packages": [lock, *rows]})
+            except StreamError:
+                continue
+            failures.append((revision, "package lock", label, "userspace fault accepted"))
+        for label, check, altered in (
+            ("kernel version", measurement_check, measurement | {"kernel_version": "7.2.0-ceralive7"}),
+            ("kernel epoch", lock_check, lock_record | {"source_date_epoch": IDENTITY.epoch + 1}),
+            *[(f"{slot['slot']} reserve", verifier_check,
+               verifier | {"slots": [item | {"reserve": "different reserve"} if item is slot else item
+                                     for item in verifier["slots"]]}) for slot in verifier["slots"]],
+        ):
+            try:
+                check(altered)
+            except StreamError:
+                continue
+            failures.append((revision, label, "substitution accepted"))
+        with tempfile.TemporaryDirectory() as scratch:
+            artifacts = pathlib.Path(scratch)
+            body_by_file = {member.id: b"x" for member in members}
+            body_by_file.update({slot + ".reserve": (value + "\n").encode() for slot, value in reserves.items()})
+            body_by_file["packages.lock.json"] = json.dumps(lock_record).encode()
+            resolved = dict(zip(("KERNEL_PACKAGES", "KERNEL_SOURCE_PACKAGE_VERSION", "ARCH"), kernel, strict=True))
+            body_by_file["resolved.json"] = json.dumps(resolved).encode()
+            digests = {name: hashlib.sha256(body).hexdigest() for name, body in body_by_file.items()}
+            bound = deepcopy(measurement)
+            bound["artifacts"] = {member.id: {"sha256": digests[member.id], "bytes": len(body_by_file[member.id])}
+                                  for member in members}
+            body_by_file["measurement.json"] = json.dumps(bound).encode()
+            digests["measurement.json"] = hashlib.sha256(body_by_file["measurement.json"]).hexdigest()
+            for name, body in body_by_file.items():
+                path = artifacts / name
+                path.write_bytes(body)
+                path.chmod(0o600)
+            evidence = image_vm.ReleaseEvidence(kernel, "e" * 64, metadata)
+            assert image_vm.verify_released_receipts(artifacts, digests, IDENTITY, root, evidence) == reserves
+            for name, label, body in (
+                ("resolved.json", "resolver package", json.dumps(resolved | {"KERNEL_PACKAGES": "other"}).encode()),
+                ("resolved.json", "resolver version", json.dumps(
+                    resolved | {"KERNEL_SOURCE_PACKAGE_VERSION": "7.2.0-ceralive7"}).encode()),
+                ("resolved.json", "resolver arch", json.dumps(resolved | {"ARCH": "amd64"}).encode()),
+                ("rootfs_a.reserve", "changed reserve bytes", body_by_file["rootfs_b.reserve"]),
+                ("packages.lock.json", "lock origin", json.dumps(
+                    lock_record | {"packages": [lock | {"origin": "foreign-release"}]}).encode()),
+                ("packages.lock.json", "lock kernel digest", json.dumps(
+                    lock_record | {"packages": [lock | {"sha256": "f" * 64}]}).encode()),
+                ("measurement.json", "host kernel binding", json.dumps(
+                    bound | {"kernel_version": "7.2.0-ceralive7"}).encode()),
+            ):
+                if label in {"changed reserve bytes", "lock origin", "lock kernel digest"}:
+                    # Isolate the claimed bytes/identity from the manifest's length check.
+                    assert len(body) == len(body_by_file[name]), label
+                file = artifacts / name
+                file.write_bytes(body)
+                try:
+                    image_vm.verify_released_receipts(artifacts, digests, IDENTITY, root, evidence)
+                except StreamError:
+                    pass
+                else:
+                    failures.append((revision, label, "bound evidence fault accepted"))
+                finally:
+                    file.write_bytes(body_by_file[name])
+    assert not failures, failures
+
+
+def receipt_shape_faults(record):
+    """Remove and add an entry at every nested collection, without changing its siblings."""
+    def shapes(value, path):
+        if isinstance(value, dict):
+            yield (*path, "+extra"), value | {"unexpected": True}
+            for key, child in value.items():
+                yield (*path, "-" + key), {k: v for k, v in value.items() if k != key}
+                for marker, modified in shapes(child, (*path, key)):
+                    yield marker, value | {key: modified}
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                yield (*path, f"-{index}"), value[:index] + value[index + 1:]
+                yield (*path, f"+{index}"), value + [child]
+                for marker, modified in shapes(child, (*path, index)):
+                    yield marker, value[:index] + [modified] + value[index + 1:]
+    return shapes(record, ())
+
+
+def duplicate_receipt_keys(record):
+    """Carry duplicate keys through JSON instead of normalizing them in Python."""
+    def variants(value, path):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                raw = json.dumps(value)
+                yield (*path, key), raw[:-1] + ", " + json.dumps({key: child})[1:]
+                for marker, replacement in variants(child, (*path, key)):
+                    pairs = (json.dumps(k) + ": " + (replacement if k == key else json.dumps(v))
+                             for k, v in value.items())
+                    yield marker, "{" + ", ".join(pairs) + "}"
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                for marker, replacement in variants(child, (*path, index)):
+                    yield marker, "[" + ", ".join(replacement if i == index else json.dumps(item)
+                                                  for i, item in enumerate(value)) + "]"
+    return variants(record, ())
+
+
+def receipt_value_faults(record):
+    """Change one scalar with the same JSON type."""
+    def variants(value, path):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                for marker, changed in variants(child, (*path, key)):
+                    yield marker, value | {key: changed}
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                for marker, changed in variants(child, (*path, index)):
+                    yield marker, value[:index] + [changed] + value[index + 1:]
+        elif type(value) is bool:
+            yield path, not value
+        elif type(value) is int:
+            yield path, value + 1
+        elif type(value) is str:
+            # These strings are shape-checked local writer observations, not policy values.
+            if path[0] == "built_at":
+                yield path, "not-a-timestamp"
+            elif path[0] == "debian_release_dates":
+                yield path, ""
+            else:
+                yield path, "0" * 64 if len(value) == 64 else "altered"
+    return variants(record, ())
+
+
 if __name__ == "__main__":
     tests = [value for name, value in list(globals().items()) if name.startswith("test_")]
     for test in tests:
