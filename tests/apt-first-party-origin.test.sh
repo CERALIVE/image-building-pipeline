@@ -302,7 +302,9 @@ Version: 1.0
 Description: installed older version
 STATUS
   assert_eq "$writer: newer release selected" 2.0 "$(candidate cerastream)"
-  if apt-get "${apt_opts[@]}" -s upgrade | grep -q '^Inst cerastream \[1\.0\] (2\.0'; then ok "$writer: upgrade selects our newer release"; else bad "$writer: upgrade did not select our newer release"; fi
+  # Let APT finish before matching so grep cannot interrupt the simulation.
+  upgrade_out="$(apt-get "${apt_opts[@]}" -s upgrade)" || { bad "$writer: upgrade simulation failed"; exit 1; }
+  if grep -q '^Inst cerastream \[1\.0\] (2\.0' <<<"$upgrade_out"; then ok "$writer: upgrade selects our newer release"; else bad "$writer: upgrade did not select our newer release"; fi
   cat >"${work}/apt/status" <<'STATUS'
 Package: cerastream
 Status: install ok installed
@@ -315,7 +317,8 @@ Version: 10.0
 Description: installed newer version
 STATUS
   assert_eq "$writer: 990 preserves installed newer release" 10.0 "$(candidate cerastream)"
-  if apt-get "${apt_opts[@]}" -s upgrade | grep -q '^Inst cerastream'; then
+  upgrade_out="$(apt-get "${apt_opts[@]}" -s upgrade)" || { bad "$writer: upgrade simulation failed"; exit 1; }
+  if grep -q '^Inst cerastream' <<<"$upgrade_out"; then
     bad "$writer: upgrade would replace installed 10.0"
   else
     ok "$writer: upgrade does not replace installed 10.0"

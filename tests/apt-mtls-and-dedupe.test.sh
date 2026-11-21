@@ -81,7 +81,7 @@ mod_src="$(extract_fn configure_ceralive_source "${MODULE}")"
 if grep -Eq 'APT_CLIENT_(CRT|KEY)_B64|/etc/apt/certs/client\.(crt|key)|install_mtls_cert' <<<"${post_repo}"; then
   fail 'runtime writer still bakes a CI client credential into the device'
 fi
-if grep -v '^[[:space:]]*#' "${MODULE}" | grep -Eq 'APT_CLIENT_(CRT|KEY)_B64|/etc/apt/certs/client\.(crt|key)|install_mtls_cert'; then
+if grep -v '^[[:space:]]*#' "${MODULE}" | grep -Ec 'APT_CLIENT_(CRT|KEY)_B64|/etc/apt/certs/client\.(crt|key)|install_mtls_cert' >/dev/null; then
   fail 'customize writer still bakes a CI client credential into the device'
 fi
 grep -Fq 'ceralive-apt-credentials' "${PIPELINE_DIR}/mkosi/mkosi.images/app/mkosi.postinst.chroot" \

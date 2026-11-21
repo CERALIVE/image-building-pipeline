@@ -76,7 +76,7 @@ cleanup() {
   done
 
   for ns in "${NETNS_NAMES[@]}"; do
-    if sudo -n ip netns list | awk '{print $1}' | grep -Fxq "$ns"; then
+    if sudo -n ip netns list | awk '{print $1}' | grep -Fxc "$ns" >/dev/null; then
       printf 'real-avahi-hostname: cleanup left namespace %s\n' "$ns" >&2
       cleanup_rc=1
     fi

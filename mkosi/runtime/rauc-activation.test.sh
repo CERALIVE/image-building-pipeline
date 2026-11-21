@@ -153,7 +153,7 @@ if ! SYSTEMD_UNIT_PATH="$TMP/root/etc/systemd/system:$TMP/root/usr/lib/systemd/s
   command cat "$TMP/manager-dump"
   fail 'offline systemd manager dump'
 fi
-if ! grep -A 65 'ceralive-rauc-activate.service:' "$TMP/manager-dump" | grep -Fq 'Conflicts: shutdown.target'; then
+if ! grep -A 65 'ceralive-rauc-activate.service:' "$TMP/manager-dump" | grep -Fc 'Conflicts: shutdown.target' >/dev/null; then
   fail 'implicit Conflicts=shutdown.target not observed in offline manager dump'
 fi
 ok 'offline systemd manager: implicit Conflicts=shutdown.target'
