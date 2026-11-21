@@ -34,10 +34,10 @@ load manifest-helpers
 }
 
 # Exercise the real harness and its extracted allocator without starting daemons
-# or namespaces. Only the device commands and the poll cadence are substituted.
+# or namespaces. Substitute the device commands and, for deadline tests, time.
 run_real_avahi_stub_claim() (
   set -euo pipefail
-  local root="$1" scenario="$2"
+  local root="$1" scenario="$2" clock_step="${3:-}" poll_interval=0
   # shellcheck source=tests/real-avahi-hostname-contract.sh
   source "$BATS_TEST_DIRNAME/real-avahi-hostname-contract.sh"
   mkdir -m 0700 "$root" "$root/run" "$root/state"
@@ -49,10 +49,13 @@ if [[ "$1" = -n ]]; then shift; fi
 case "$1" in
   env)
     if [[ "${2:-}" = DBUS_SYSTEM_BUS_ADDRESS=* ]]; then
-      if [[ -s "$REAL_DEVICE_ROOT/subscribed" ]]; then
-        printf 'observer-first\n' >"$REAL_DEVICE_ROOT/claim-order"
-      fi
       exit 0
+    fi
+    if [[ "${2:-}" = -u ]]; then
+      printf 'started\n' >"$REAL_DEVICE_ROOT/allocator-started"
+      if [[ -s "$REAL_DEVICE_ROOT/clock.env" ]]; then
+        export BASH_ENV="$REAL_DEVICE_ROOT/clock.env"
+      fi
     fi
     exec "$@"
     ;;
@@ -61,8 +64,9 @@ esac
 case "${!#}" in
   monitor)
     [[ "$*" = *"member='StateChanged'"* && "$*" = *"member='NameOwnerChanged'"* ]]
-    printf 'subscribed\n' >"$REAL_DEVICE_ROOT/subscribed"
-    printf 'Monitoring bus message stream.\n' >&2
+    if [[ "$REAL_SCENARIO" != no-ack ]]; then
+      printf 'Monitoring bus message stream.\n' >&2
+    fi
     printf 'Member=StateChanged\nMember=NameOwnerChanged\n'
     ;;
   GetState)
@@ -85,9 +89,16 @@ esac
 SH
   chmod 0700 "$root/device"
   local file
-  for file in hostname hosts system-hostname calls machine-id subscribed claim-order avahi.log dbus.log ceralive-set-hostname; do
+  for file in hostname hosts system-hostname calls machine-id allocator-started clock.env avahi.log dbus.log ceralive-set-hostname; do
     install -m 0600 /dev/null "$root/$file"
   done
+  if [[ -n "$clock_step" ]]; then
+    poll_interval=1
+    # Turn Bash's SECONDS into a manual clock in the allocator shell only.
+    # The first claim poll advances it; subsequent polls take no virtual time.
+    printf 'unset BASH_ENV SECONDS\nSECONDS=0\nadvance=%s\n' "$clock_step" >"$root/clock.env"
+    printf '%s\n' 'sleep() { SECONDS=$((SECONDS + advance)); advance=0; }' >>"$root/clock.env"
+  fi
   printf '0123456789abcdef0123456789abcdef\n' >"$root/machine-id"
   printf 'avahi-tail-witness\n' >"$root/avahi.log"
   printf 'dbus-tail-witness\n' >"$root/dbus.log"
@@ -95,11 +106,20 @@ SH
   write_device_wrappers "$root"
   local fixture_sudo="$root/device" fixture_busctl="$root/device"
   export REAL_DEVICE_ROOT="$root" REAL_SCENARIO="$scenario"
-  observe_allocator "$root" a
-  REAL_POLL_INTERVAL=0 REAL_MACHINE_ID_FILE="$root/machine-id" \
+  observe_allocator "$root" a || return 1
+  REAL_POLL_INTERVAL="$poll_interval" REAL_MACHINE_ID_FILE="$root/machine-id" \
     run_allocator "$root" stub a &
   collect_allocator "$root" a "$!"
 )
+
+@test "hostname: real Avahi fixture refuses to launch without acknowledgement" {
+  local root="$BATS_TEST_TMPDIR/no-ack"
+  run run_real_avahi_stub_claim "$root" no-ack
+  printf '%s\n' "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"AVAHI_OBSERVER_ERROR device=a reason=subscription-not-acknowledged"* ]]
+  [[ ! -s "$root/allocator-started" && ! -e "$root/state/host_index" ]]
+}
 
 @test "hostname: real Avahi fixture can finish a claim after probe 60" {
   local root="$BATS_TEST_TMPDIR/delayed-claim"
@@ -122,7 +142,24 @@ SH
   [[ "$output" == *"Member=StateChanged"* && "$output" == *"Member=NameOwnerChanged"* ]]
   [[ "$output" == *"AVAHI_LOG device=a source=avahi.log"* && "$output" == *"avahi-tail-witness"* ]]
   [[ "$output" == *"AVAHI_LOG device=a source=dbus.log"* && "$output" == *"dbus-tail-witness"* ]]
-  [ "$(<"$root/claim-order")" = observer-first ]
+  [ ! -e "$root/state/host_index" ]
+}
+
+@test "hostname: real Avahi fixture can claim at 119 virtual seconds" {
+  local root="$BATS_TEST_TMPDIR/before-deadline"
+  run run_real_avahi_stub_claim "$root" delayed 119
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [ "$(<"$root/state/host_index")" = 1 ]
+}
+
+@test "hostname: real Avahi fixture stops claiming at 120 virtual seconds" {
+  local root="$BATS_TEST_TMPDIR/at-deadline"
+  run run_real_avahi_stub_claim "$root" delayed 120
+  printf '%s\n' "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not establish Avahi ownership of ceralive.local within the bounded wait"* ]]
+  [[ "$output" == *"AVAHI_FINAL device=a probes=1 "* ]]
   [ ! -e "$root/state/host_index" ]
 }
 

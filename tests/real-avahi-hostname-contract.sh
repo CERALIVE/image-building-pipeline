@@ -415,6 +415,12 @@ collect_allocator() {
 run_allocator() (
   umask 077
   local root="$1" ns="$2" device_id="$3" mode="${4:-}" barrier="${5:-}"
+  # The child inherits the parent's acknowledged observers at launch. A
+  # later subscription in the parent cannot satisfy this check.
+  [[ -n "${OBSERVER_DRAINS[$root]:-}" ]] || {
+    printf 'AVAHI_ALLOCATION_ERROR device=%s reason=observer-not-ready-at-launch\n' "$device_id" >&2
+    return 1
+  }
   local -a args=()
   [[ -z "$mode" ]] || args+=("$mode")
   # Use the shipped shared deadline and per-attempt probe cap (both default
