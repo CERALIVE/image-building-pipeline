@@ -30,7 +30,7 @@ from image_stream import (
     BUILD_LOG_LIMIT, HEADER_LIMIT, MAGIC, MANIFEST_LIMIT, Identity, StreamError, checked_open, decode, exact_json,
     list_directory, listed_entry, read_header, retry_check, unique_object, verify_sidecar,
 )
-from image_verify import approved_modules, candidate_consumers, check_nouveau_evidence, firmware_path
+from image_verify import FIRMWARE_FLOOR, approved_modules, candidate_consumers, check_nouveau_evidence, firmware_path
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -231,7 +231,25 @@ def measurement_stages(row, identity: Identity, public_root: str, members) -> di
     return stages
 
 
-def check_retention_scan(slot: dict, references: list[str], candidates: dict) -> None:
+def verified_firmware_policy(path: Path, digest: str) -> tuple[set[str], set[str]]:
+    """Use only the resolver bytes checked against approved source by the verifier."""
+    data = read_return_record(path, private=True)
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise StreamError("returned firmware policy differs from the verifier inventory")
+    params = json.loads(data, object_pairs_hook=unique_object)
+    keys = ("FIRMWARE_SWEEP_PREFIXES", "FIRMWARE_SWEEP_FILES", "FIRMWARE_PRESERVED_ROOTS")
+    if type(params) is not dict or any(type(params.get(key)) is not str for key in keys):
+        raise StreamError("invalid resolved firmware policy")
+    prefixes, files, preserved = (params[key].split() for key in keys)
+    candidates = set(prefixes + files)
+    if (not candidates or len(candidates) != len(prefixes) + len(files)
+            or not all(firmware_path(name) for name in candidates.union(preserved))
+            or candidates.intersection(FIRMWARE_FLOOR.union(preserved))):
+        raise StreamError("invalid resolved firmware policy domain")
+    return candidates, set(preserved)
+
+
+def check_retention_scan(slot: dict, references: list[str], candidates: set[str], preserved: set[str]) -> None:
     """Reconcile emitted firmware rows with the observations used to decide retention."""
     scan = slot["retention_scan"]
     if type(scan) is not dict or scan.keys() != {"candidate_rows", "present", "examined_firmware_references"}:
@@ -244,15 +262,19 @@ def check_retention_scan(slot: dict, references: list[str], candidates: dict) ->
     if (type(present) is not dict or any(type(value) is not bool for value in present.values())
             or any(not firmware_path(name) for name in present)):
         raise StreamError("invalid firmware retention inventory")
+    if present.keys() != candidates | preserved | FIRMWARE_FLOOR:
+        raise StreamError("firmware decisions do not cover the approved policy domain")
+    if not all(present[name] for name in FIRMWARE_FLOOR):
+        raise StreamError("required preserved firmware is absent from the retention scan")
     if not exact_json(slot["retained"], sorted(name for name, exists in present.items() if exists)):
         raise StreamError("retained firmware disagrees with the retention scan")
-    if not exact_json(slot["removed"], sorted(name for name, exists in present.items() if not exists)):
+    if not exact_json(slot["removed"], sorted(name for name in candidates if not present[name])):
         raise StreamError("removed firmware disagrees with the retention scan")
     if not exact_json(slot["examined_firmware_references"], scan["examined_firmware_references"]):
         raise StreamError("firmware count disagrees with the retention scan")
 
 
-def validate_verification(row, identity: Identity, inventory: dict, modules: list[str]) -> None:
+def validate_verification(row, identity: Identity, inventory: dict, modules: list[str], policy: tuple[set[str], set[str]]) -> None:
     if type(row) is not dict:
         raise StreamError("invalid verifier receipt")
     slots = row.get("slots")
@@ -261,6 +283,7 @@ def validate_verification(row, identity: Identity, inventory: dict, modules: lis
                                     "artifacts": inventory, "slots": slots})):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
     labels = set()
+    candidates, preserved = policy
     nouveau_present = "nouveau.ko" in modules
     for slot in slots:
         if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained",
@@ -281,6 +304,8 @@ def validate_verification(row, identity: Identity, inventory: dict, modules: lis
             raise StreamError("reported Nouveau presence differs from the approved module inventory")
         references = slot["firmware_references"]
         consumers = slot["candidate_consumers"]
+        if consumers.keys() != candidates:
+            raise StreamError("firmware consumers do not cover the approved candidate domain")
         removed = set(slot["removed"])
         retained = set(slot["retained"])
         if (not removed <= consumers.keys() or not consumers.keys() <= removed | retained
@@ -291,7 +316,7 @@ def validate_verification(row, identity: Identity, inventory: dict, modules: lis
         check_nouveau_evidence(nouveau_present, references)
         if not exact_json(slot["examined_modules"], modules):
             raise StreamError("examined modules disagree with the approved module inventory")
-        check_retention_scan(slot, references, consumers)
+        check_retention_scan(slot, references, candidates, preserved)
         labels.add(slot["slot"])
     if labels != {"rootfs_a", "rootfs_b"}:
         raise StreamError("missing or duplicate verifier slot")
@@ -580,7 +605,8 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
-    validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules)
+    policy = verified_firmware_policy(artifacts / "resolved.json", inventory["resolved.json"])
+    validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules, policy)
     unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),

@@ -18,6 +18,8 @@ from image_capsule import Capsule, digest_file
 from image_stream import Identity, StreamError, list_directory, listed_entry, retry_check
 from vm_process import reset_child_status, run as run_gate
 
+FIRMWARE_FLOOR = frozenset({"brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "mrvl", "mrvl/prestera"})
+
 
 @contextmanager
 def parent_fd(root: Path, name: str):
@@ -174,7 +176,9 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
     """Check sweep results; the tar closure gate checks individual firmware objects."""
     firmware = slot / "usr/lib/firmware"
     scan = run_gate(["bash", "-euo", "pipefail", "-c",
-        'source "$1"; firmware_sweep_module_refs "$2" --examined-modules', "_",
+        'source "$1"; firmware_sweep_module_refs "$2"; '
+        'moddir="$2/usr/lib/modules"; [[ -d "$moddir" ]] || moddir="$2/lib/modules"; '
+        'find "$moddir" -type f -name "*.ko*" -printf "\\t%f\\n"', "_",
         str(source / "mkosi/customize/firmware-sweep.sh"), str(slot)],
         env=env, capture_output=True, text=True, timeout=300).stdout.splitlines()
     refs = [line for line in scan if not line.startswith("\t")]
@@ -194,11 +198,12 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
     references = [(line.split("\t", 1)[0], line) for line in refs]
     # The existing RK3588 retention floor includes Marvell and six populated
     # roots. The registry may also protect roots not shipped by this archive.
-    retained = {"brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "mrvl", "mrvl/prestera"}
-    for name in params["FIRMWARE_PRESERVED_ROOTS"].split():
+    retained = set(FIRMWARE_FLOOR)
+    preserved = params["FIRMWARE_PRESERVED_ROOTS"].split()
+    for name in preserved:
         if any(path == name or path.startswith(name + "/") for path in owned):
             retained.add(name)
-    decisions = {}
+    decisions = dict.fromkeys(preserved, False)
     for name in sorted(retained):
         info = listed_entry(firmware, name)
         decisions[name] = info is not None and stat.S_ISDIR(info.st_mode)

@@ -693,10 +693,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
 FIXTURE_MODULES = b"drivers/net/fixture.ko\n"
 FIXTURE_FIRMWARE = {
-    "removed": ["amdgpu"], "retained": ["brcm"], "firmware_references": [],
+    "removed": ["amdgpu"], "retained": sorted(image_vm.FIRMWARE_FLOOR), "firmware_references": [],
     "examined_firmware_references": 1, "nouveau_present": False, "candidate_consumers": {"amdgpu": []},
     "examined_modules": ["fixture.ko"],
-    "retention_scan": {"candidate_rows": {"amdgpu": []}, "present": {"amdgpu": False, "brcm": True},
+    "retention_scan": {"candidate_rows": {"amdgpu": []},
+                       "present": dict.fromkeys(sorted(image_vm.FIRMWARE_FLOOR), True) | {"amdgpu": False},
                        "examined_firmware_references": 1},
 }
 
@@ -705,6 +706,10 @@ def fixture_modules(directory: pathlib.Path) -> None:
     path = directory / "built-modules.txt"
     path.write_bytes(FIXTURE_MODULES)
     path.chmod(0o600)
+    policy = directory / "resolved.json"
+    policy.write_text(json.dumps({"FIRMWARE_SWEEP_PREFIXES": "amdgpu", "FIRMWARE_SWEEP_FILES": "",
+                                  "FIRMWARE_PRESERVED_ROOTS": "brcm"}))
+    policy.chmod(0o600)
 
 
 @dataclass(frozen=True, slots=True)

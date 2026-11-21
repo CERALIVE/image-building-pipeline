@@ -779,15 +779,21 @@ The consumer map comes from the retention rows, not the emitted rows. The host
 requires exact agreement on candidate rows, consumers, paths and count, including
 a positive count when no references match candidates.
 
-The host compares the installed module names examined by the slot reader with
-the names in the digest-pinned `built-modules.txt`, with module compression
-suffixes removed. It derives Nouveau presence from that inventory, not the
-kernel version or a receipt flag. If Nouveau is listed, each slot must show an
-NVIDIA firmware reference from it. If it is absent, a positive scan with no
-candidate consumers may legitimately have no candidate rows. The module list
-does not encode firmware requests. Agreement detects a fault in either reported
-view, including a lost candidate row; it does not independently repeat `modinfo`
-on the host or authenticate a common-mode error in the underlying reader.
+| Firmware fact | First source | Host cross-check |
+|---|---|---|
+| Complete candidate domain | Per-candidate slot decisions and consumer keys | The exact `resolved.json` bytes in the verified artifact inventory: the verifier checks these against the approved source's resolver before scanning either slot. Every declared prefix and file needs a decision even with no references. |
+| Removed and retained paths | Flat path lists | The retention scan's path-presence decisions; every candidate is covered, the fixed RK3588 floor is present, and optional preserved entries are limited to resolver policy. |
+| Candidate reference rows and consumers | Flat emitted request rows | The per-candidate rows that informed retention, and the consumer names derived from those rows. |
+| Total inspected references | Positive flat scan count | Distinct rows counted in the retention scan, including noncandidate rows. |
+| Examined installed modules | Independent walk of the mounted slot's installed module files | Digest-pinned `built-modules.txt` basenames, with installed compression suffixes removed. Older source readers, including `9d74a7de`, need no inventory-reporting option. |
+| Nouveau presence and NVIDIA proof | Receipt flag and request rows | The same approved module list. If it includes Nouveau, each slot needs an NVIDIA request from it; otherwise a positive scan with no candidate consumers can have no candidate rows. |
+
+The host does not rerun the firmware reader. The two views share the underlying
+module/built-in reference scan and mounted firmware observations; agreement
+cannot detect a common error there. The module list names compiled modules
+but does not describe their firmware requests. Bluetooth requirements and
+whether optional preserved roots are package-owned are evaluated in the verifier,
+not independently reconstructed by the host.
 Read-only guest mounts compare slot contents with the
 emitted tar plus independently recompiled boot payload; ext4's empty
 `lost+found` is filesystem housekeeping. Only a matching verifier result
