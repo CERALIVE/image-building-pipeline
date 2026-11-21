@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -44,6 +45,542 @@ from vm_process import Cancelled, ChildStatusError, wait
 
 
 IDENTITY = Identity("fixture-attempt", "rock-5b-plus", "a" * 40, 123, "b" * 64)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+KERNEL_PACKAGE = "linux-image-7.2.0-ceralive-rk3588"
+KERNEL_FILES = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
+
+
+def kernel_metadata_fixture(objects, version, deb="d" * 64):
+    files = {
+        "kernel-artifact.json": json.dumps({
+            "package": KERNEL_PACKAGE, "version": version, "arch": "arm64",
+            "kernel_release": KERNEL_PACKAGE.removeprefix("linux-image-"),
+            "deb_sha256": deb, "input_fingerprint": "e" * 64, "kernel_epoch": 123,
+            "validated_boards": ["rock-5b-plus", "orange-pi-5-plus"],
+            "builder_closure": {"base_image": "fixture", "packages": ["gcc=1"], "compiler": "gcc",
+                                "dockerfile_sha256": "f" * 64},
+        }).encode(),
+        "resolved.config": b"CONFIG_MODULES=y\n",
+        "built-modules.txt": b"kernel/fixture.ko\n",
+    }
+    files["SHA256SUMS"] = (
+        f"{deb}  {KERNEL_PACKAGE}_{version}_arm64.deb\n" +
+        "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items())
+    ).encode()
+    result = {}
+    for name, data in files.items():
+        digest = hashlib.sha256(data).hexdigest()
+        (objects / digest).write_bytes(data)
+        result[name] = digest
+    return result
+
+
+def test_released_metadata_staging_follows_manifest_and_refuses_mismatched_policy() -> None:
+    for selected, approved, tamper, package, success in (
+        (8, 8, False, KERNEL_PACKAGE, True),
+        (9, 9, False, KERNEL_PACKAGE, True),
+        (8, 9, False, KERNEL_PACKAGE, False),
+        (9, 9, True, KERNEL_PACKAGE, False),
+        (9, 9, False, "linux-image-7.3.0-ceralive-rk3588", False),
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            capsule = SimpleNamespace(directory=directory, board=IDENTITY.board)
+            policy = kernel_metadata_fixture(directory, f"7.2.0-ceralive{approved}")
+            if tamper:
+                config = directory / policy["resolved.config"]
+                config.write_bytes(config.read_bytes() + b"\n")
+                sums = directory / policy["SHA256SUMS"]
+                sums.write_text(sums.read_text().replace(
+                    policy["resolved.config"], hashlib.sha256(config.read_bytes()).hexdigest()))
+            params = {"KERNEL_PACKAGES": package, "ARCH": "arm64",
+                      "KERNEL_SOURCE_PACKAGE_VERSION": f"7.2.0-ceralive{selected}"}
+            output = directory / "approved"
+            try:
+                digest = image_guest.stage_kernel_metadata(ROOT, capsule, params, policy, output)
+            except StreamError as error:
+                assert not success, (selected, approved, error)
+            else:
+                assert success, (selected, approved, tamper, package)
+                assert digest == "d" * 64 and {file.name for file in output.iterdir()} == set(KERNEL_FILES)
+
+
+def test_measure_populates_only_manifest_selected_release_history() -> None:
+    class BeforeBuild(Exception):
+        pass
+
+    with tempfile.TemporaryDirectory() as temporary:
+        home = pathlib.Path(temporary)
+        objects = home / "input"
+        objects.mkdir()
+        capsule = SimpleNamespace(directory=objects, board=IDENTITY.board, device_root="unused",
+                                  source_commit=IDENTITY.commit, epoch=IDENTITY.epoch)
+        params = {"KERNEL_PACKAGES": KERNEL_PACKAGE, "ARCH": "arm64",
+                  "KERNEL_SOURCE_PACKAGE_VERSION": "7.2.0-ceralive9"}
+        job = {"identity": asdict(IDENTITY), "trust": {
+            "root_der_sha256": "f" * 64, "os_version": "", "addon_public_object": "", "paseto_public_object": "",
+            "kernel_metadata": kernel_metadata_fixture(objects, params["KERNEL_SOURCE_PACKAGE_VERSION"]),
+            "repositories": {name: {"suite": "stable", "origin": "unused",
+                                    "keyring": hashlib.sha256(b"fixture").hexdigest()}
+                             for name in ("firstparty", "bsp", "debian-source")},
+        }}
+        (objects / hashlib.sha256(b"fixture").hexdigest()).write_bytes(b"fixture")
+        copyfile = image_guest.shutil.copyfile
+
+        def copy(src, dst):
+            if dst != "/usr/share/keyrings/debian-archive-keyring.gpg":
+                return copyfile(src, dst)
+
+        with patch.object(image_guest, "HOME", home), patch.object(image_guest, "resolve", return_value=params), \
+                patch.object(image_guest.shutil, "copyfile", copy), \
+                patch.object(image_guest, "command", side_effect=BeforeBuild):
+            try:
+                image_guest.measure(ROOT, capsule, job)
+            except BeforeBuild:
+                history = home / "kernel-history"
+                assert [path.name for path in history.iterdir()] == ["7.2.0-ceralive9"]
+                assert {path.name for path in (history / "7.2.0-ceralive9").iterdir()} == set(KERNEL_FILES)
+            else:
+                raise AssertionError("measurement did not reach sealed source preparation")
+
+
+def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roots() -> None:
+    single_file = "r8a779x_usb3_rom.mem"
+    wrong_prefix_types = ("prefix-file", "prefix-symlink-to-dir", "prefix-dangling-symlink")
+    wrong_file_types = ("directory-at-file-candidate", "file-symlink-to-file", "file-dangling-symlink", "file-fifo")
+    named_file_cases = ("regular-file-candidate", *wrong_file_types)
+    for revision, case, failure in (
+        (8, "missing-nvidia-unshipped-ref", "removed a referenced candidate: nvidia"),
+        (8, "", ""), (9, "", ""), (9, "unused-nvidia", "unreferenced candidate: nvidia"),
+        (8, "missing-nvidia", "removed a referenced candidate: nvidia"),
+        (8, "suppressed-nouveau", "Nouveau firmware proof differs from the approved module inventory"),
+        (8, "never-shipped-nvidia", ""),
+        (9, "missing-builtin", "removed a referenced candidate: tegra"),
+        (9, "preserved", "preserved firmware directory is absent: iwlwifi"),
+        (9, "incomplete", "firmware_sweep_module_refs"),
+        (9, "no-refs", "found no installed-module or built-in firmware references"),
+        (9, "only-noncandidate-refs", ""),
+        (9, "other-candidate", ""),
+        *((8, kind, "not a directory: nvidia") for kind in wrong_prefix_types),
+        (9, "regular-file-candidate", ""),
+        *((9, kind, f"not a file: {single_file}") for kind in wrong_file_types),
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            firmware = root / "usr/lib/firmware"
+            modules = root / "usr/lib/modules/7.2.0-ceralive-rk3588"
+            modules.mkdir(parents=True)
+            (modules / "modules.builtin").write_text("kernel/drivers/fixture.ko\n")
+            builtin_ref = ("brcm/fixture.bin" if case in ("no-refs", "only-noncandidate-refs")
+                           else "nvidia/retained.bin" if case == "suppressed-nouveau"
+                           else "tegra/retained.bin")
+            (modules / "modules.builtin.modinfo").write_bytes(
+                b"fixture.file=drivers/fixture\0" +
+                (f"fixture.firmware={builtin_ref}\0".encode() if case != "no-refs" else b""))
+            if revision == 8:
+                (modules / "nouveau.ko").touch()
+            else:
+                (modules / "other.ko").touch()
+            modinfo = root / "modinfo"
+            nvidia_ref = ("nvidia/never-shipped.bin" if case in ("missing-nvidia-unshipped-ref", "never-shipped-nvidia")
+                          else "nvidia/retained.bin")
+            nouveau_output = ":" if case == "suppressed-nouveau" else f"printf '{nvidia_ref}\\n'"
+            other_output = (
+                "printf 'nvidia/retained.bin\\n'" if case == "other-candidate"
+                else f"printf '{single_file}\\n'" if case in named_file_cases
+                else ":"
+            )
+            modinfo.write_text(f"#!/bin/sh\ncase \"$3\" in */nouveau.ko) {nouveau_output};; "
+                               f"*/other.ko) {other_output};; *) exit 1;; esac\n")
+            modinfo.chmod(0o755)
+            policy = root / "manifests/rk3588-bluetooth-firmware-roots.txt"
+            policy.parent.mkdir()
+            policy.write_text("runtime-composed fixture intel/ibt-* # fixture\n")
+            if revision == 8 and not case:
+                customize = root / "mkosi/customize"
+                customize.mkdir(parents=True)
+                reader = ROOT / "mkosi/customize/firmware-sweep.sh"
+                # Model a source reader with the historical one-argument API.
+                (customize / reader.name).write_text(
+                    f"source {shlex.quote(str(reader))}\n"
+                    "eval \"$(declare -f firmware_sweep_module_refs | "
+                    "sed '1s/^firmware_sweep_module_refs/legacy_refs/')\"\n"
+                    "firmware_sweep_module_refs() { [[ $# == 1 ]] && legacy_refs \"$1\"; }\n")
+                (customize / "bluetooth-firmware.sh").symlink_to(reader.with_name("bluetooth-firmware.sh"))
+            else:
+                (root / "mkosi").symlink_to(ROOT / "mkosi", target_is_directory=True)
+            roots = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "iwlwifi", "mrvl/prestera")
+            supplied = ("tegra/retained.bin", "nvidia/retained.bin", "intel/ibt-fixture",
+                        *(name + "/fixture.bin" for name in roots))
+            if case in named_file_cases:
+                supplied += (single_file,)
+            if case == "never-shipped-nvidia":
+                supplied = tuple(name for name in supplied if not name.startswith("nvidia/"))
+            claims = root / "var/lib/dpkg/info/armbian-firmware-full.list"
+            claims.parent.mkdir(parents=True)
+            claims.write_text("".join(f"/usr/lib/firmware/{name}\n" for name in supplied))
+            for name in supplied:
+                if ((name.startswith("nvidia/") and revision == 9 and case not in ("unused-nvidia", "other-candidate"))
+                        or (case in ("missing-nvidia", "missing-nvidia-unshipped-ref") and name.startswith("nvidia/"))
+                        or (case in wrong_prefix_types and name.startswith("nvidia/"))
+                        or (case in ("missing-builtin", "no-refs", "only-noncandidate-refs", "suppressed-nouveau")
+                            and name.startswith("tegra/"))
+                        or (case == "preserved" and name.startswith("iwlwifi/"))):
+                    continue
+                file = firmware / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(b"firmware")
+            if case == "prefix-file":
+                (firmware / "nvidia").write_bytes(b"not a directory")
+            elif case in ("prefix-symlink-to-dir", "prefix-dangling-symlink"):
+                (firmware / "nvidia").symlink_to("brcm" if case == "prefix-symlink-to-dir" else "absent")
+            elif case in wrong_file_types:
+                candidate = firmware / single_file
+                candidate.unlink()
+                if case == "directory-at-file-candidate":
+                    candidate.mkdir()
+                elif case == "file-fifo":
+                    os.mkfifo(candidate)
+                else:
+                    target = "brcm/fixture.bin" if case == "file-symlink-to-file" else "absent"
+                    candidate.symlink_to(target)
+            if case == "incomplete":
+                (modules / "modules.builtin.modinfo").unlink()
+            params = {
+                "FIRMWARE_PRESERVED_ROOTS": "brcm rtl_bt rtw88 rtw89 rockchip mediatek iwlwifi",
+                "FIRMWARE_SWEEP_PREFIXES": "tegra nvidia intel amdgpu radeon i915 xe mellanox netronome intel/ipu intel/vsc",
+                "FIRMWARE_SWEEP_FILES": "r8a779x_usb3_rom.mem",
+            }
+            module_list = (b"drivers/gpu/drm/nouveau/nouveau.ko\n" if revision == 8
+                           else b"drivers/net/other.ko\n")
+            expected = image_verify.approved_modules(module_list, hashlib.sha256(module_list).hexdigest())
+            resolved = root / "resolved.json"
+            resolved.write_text(json.dumps(params))
+            resolved.chmod(0o600)
+            selected = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            domain = image_vm.verified_firmware_policy(resolved, selected)
+            env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}"}
+            try:
+                proof = image_verify.check_firmware(root, root, params, env, "nouveau.ko" in expected)
+            except (StreamError, subprocess.CalledProcessError) as error:
+                assert failure and failure in str(error), (revision, case, error)
+            else:
+                assert not failure, (revision, case)
+                nvidia_retained = (revision == 8 and case != "never-shipped-nvidia") or case == "other-candidate"
+                assert ("nvidia" in proof["retained"]) == nvidia_retained
+                assert ("nvidia" in proof["removed"]) != nvidia_retained
+                assert {"intel", *roots}.issubset(proof["retained"])
+                if case == "only-noncandidate-refs":
+                    assert proof["firmware_references"] == []
+                else:
+                    assert "tegra" in proof["retained"]
+                    assert any("fixture (built-in)" in ref for ref in proof["firmware_references"])
+                assert proof["nouveau_present"] is (revision == 8)
+                if revision == 8:
+                    assert f"{nvidia_ref}\t7.2.0-ceralive-rk3588/nouveau.ko" in proof["firmware_references"]
+                    assert proof["candidate_consumers"]["nvidia"] == ["nouveau"]
+                assert proof["examined_firmware_references"] == (
+                    2 if revision == 8 or case in ("other-candidate", "regular-file-candidate") else 1)
+                if case == "regular-file-candidate":
+                    assert single_file in proof["retained"]
+                    assert proof["retention_scan"]["candidate_types"][single_file] == "file"
+                    assert proof["candidate_consumers"][single_file] == ["other"]
+                receipt = {
+                    "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
+                    "slots": [proof | {"slot": slot, "reserve": "fixture"} for slot in ("rootfs_a", "rootfs_b")],
+                }
+                image_vm.validate_verification(receipt, IDENTITY, {}, expected, domain)
+                if (revision, case) in ((8, ""), (9, "other-candidate"), (9, "only-noncandidate-refs"),
+                                         (9, "regular-file-candidate")):
+                    assert_single_firmware_faults_are_rejected(receipt, expected, domain)
+                if case == "other-candidate":
+                    assert proof["candidate_consumers"]["nvidia"] == ["other"]
+                    select_rows = image_verify.firmware_rows
+                    with patch.object(image_verify, "firmware_rows", side_effect=lambda refs, candidates: [
+                        row for row in select_rows(refs, candidates) if not row.endswith("/other.ko")
+                    ]):
+                        dropped = image_verify.check_firmware(root, root, params, env, False)
+                    assert dropped["candidate_consumers"]["nvidia"] == ["other"]
+                    assert dropped["examined_firmware_references"] == 2 and "nvidia" in dropped["retained"]
+                    altered = deepcopy(receipt)
+                    altered["slots"][0].update(dropped)
+                    reject_firmware_receipt(altered, expected, domain, "lost emitted other.ko row")
+                    omitted_params = params | {
+                        "FIRMWARE_SWEEP_PREFIXES": " ".join(
+                            name for name in params["FIRMWARE_SWEEP_PREFIXES"].split() if name != "nvidia"),
+                    }
+                    omitted = image_verify.check_firmware(root, root, omitted_params, env, False)
+                    assert "nvidia" not in omitted["candidate_consumers"]
+                    assert "nvidia" not in omitted["retention_scan"]["present"]
+                    altered["slots"][0].update(omitted)
+                    reject_firmware_receipt(altered, expected, domain, "omitted referenced candidate after scanning")
+
+
+def reject_firmware_receipt(receipt: dict, modules: list[str], policy: tuple[dict[str, str], set[str]], case) -> None:
+    try:
+        image_vm.validate_verification(receipt, IDENTITY, {}, modules, policy)
+    except StreamError:
+        pass
+    else:
+        raise AssertionError(f"accepted single firmware fault: {case}")
+
+
+def assert_single_firmware_faults_are_rejected(receipt: dict, modules: list[str],
+                                               policy: tuple[dict[str, str], set[str]]) -> None:
+    """Mutate one wire value without changing its independent witness."""
+    def alter(value):
+        if type(value) is str:
+            if "\t" in value:
+                path, owner = value.split("\t", 1)
+                return f"{path}x\t{owner}"
+            return value + "x"
+        if type(value) is bool:
+            return not value
+        if type(value) is int:
+            return value + 1
+        if type(value) is list:
+            return value + ["unexpected"]
+        return value | {"unexpected": []}
+
+    def faults(record):
+        if type(record) is list:
+            for index, value in enumerate(record):
+                for changed in (record[:index] + record[index + 1:],
+                                record[:index] + [alter(value)] + record[index + 1:],
+                                record[:index] + [value] + record[index:]):
+                    yield (index,), changed
+            if not record:
+                yield (), ["unexpected"]
+        elif type(record) is dict:
+            for key, value in record.items():
+                yield (key,), {name: row for name, row in record.items() if name != key}
+                yield (key,), record | {key: alter(value)}
+                yield (key,), record | {key + "_extra": value}
+                for path, changed in faults(value):
+                    yield (key, *path), record | {key: changed}
+
+    def duplicate_keys(value):
+        if type(value) is dict:
+            for key, entry in value.items():
+                fields = [f"{json.dumps(name)}:{json.dumps(item)}" for name, item in value.items()]
+                fields.append(f"{json.dumps(key)}:{json.dumps(entry)}")
+                yield "{" + ",".join(fields) + "}"
+                for changed in duplicate_keys(entry):
+                    yield "{" + ",".join(f"{json.dumps(name)}:{changed if name == key else json.dumps(item)}"
+                                         for name, item in value.items()) + "}"
+        elif type(value) is list:
+            for index, entry in enumerate(value):
+                for changed in duplicate_keys(entry):
+                    yield "[" + ",".join(changed if pos == index else json.dumps(item)
+                                         for pos, item in enumerate(value)) + "]"
+
+    for index, slot in enumerate(receipt["slots"]):
+        payload = {key: value for key, value in slot.items() if key not in ("slot", "reserve")}
+        for path, altered in faults(payload):
+            changed = deepcopy(receipt)
+            changed["slots"][index] = altered | {"slot": slot["slot"], "reserve": slot["reserve"]}
+            reject_firmware_receipt(changed, modules, policy, (modules, index, path, altered))
+        for candidate in sorted(policy[0]):
+            changed = deepcopy(receipt)
+            missing = changed["slots"][index]
+            del missing["candidate_consumers"][candidate]
+            del missing["retention_scan"]["candidate_rows"][candidate]
+            del missing["retention_scan"]["present"][candidate]
+            missing["retention_scan"]["candidate_types"].pop(candidate, None)
+            for field in ("removed", "retained"):
+                if candidate in missing[field]:
+                    missing[field].remove(candidate)
+            missing["firmware_references"] = [
+                row for row in missing["firmware_references"]
+                if any(row in rows for rows in missing["retention_scan"]["candidate_rows"].values())
+            ]
+            reject_firmware_receipt(changed, modules, policy, (modules, index, "omit candidate", candidate))
+        for candidate, kind in slot["retention_scan"]["candidate_types"].items():
+            for wrong_kind in ("file" if kind == "directory" else "directory", "symlink", "other"):
+                changed = deepcopy(receipt)
+                changed["slots"][index]["retention_scan"]["candidate_types"][candidate] = wrong_kind
+                reject_firmware_receipt(changed, modules, policy, (index, candidate, "wrong type", wrong_kind))
+        changed = deepcopy(receipt)
+        changed["slots"][index]["retained"].remove("brcm")
+        changed["slots"][index]["retention_scan"]["present"]["brcm"] = False
+        reject_firmware_receipt(changed, modules, policy, (modules, index, "omit required preserved root", "brcm"))
+        encoded = json.dumps(receipt)
+        # Validate the actual wire duplicate rather than letting a dict collapse it.
+        with tempfile.TemporaryDirectory() as temporary:
+            wire = pathlib.Path(temporary) / "verification.json"
+            for altered in duplicate_keys(payload):
+                label = json.dumps({"slot": slot["slot"], "reserve": slot["reserve"]})
+                wire.write_text(encoded.replace(json.dumps(slot), label[:-1] + "," + altered[1:], 1))
+                try:
+                    image_vm.returned_json(wire)
+                except StreamError:
+                    pass
+                else:
+                    raise AssertionError(f"accepted duplicate firmware key: {altered}")
+
+
+def firmware_receipt_slot(slot: dict, modules: list[str]) -> dict:
+    """Complete a hand-built valid receipt before a named test corrupts one field."""
+    rows = {name: [row for row in slot["firmware_references"]
+                   if row.split("\t")[0].split("/")[0] == name] for name in slot["candidate_consumers"]}
+    return slot | {
+        "retained": sorted(set(slot["retained"]) | image_verify.FIRMWARE_FLOOR),
+        "examined_modules": modules,
+        "retention_scan": {"candidate_rows": rows,
+                           "candidate_types": dict.fromkeys(set(rows) & set(slot["retained"]), "directory"),
+                           "present": (dict.fromkeys(image_verify.FIRMWARE_FLOOR, True)
+                                       | dict.fromkeys(slot["retained"], True) | dict.fromkeys(slot["removed"], False)),
+                           "examined_firmware_references": slot.get("examined_firmware_references", 1)},
+    }
+
+
+def test_host_firmware_policy_uses_exact_resolver_artifact() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        path = pathlib.Path(temporary) / "resolved.json"
+        policy = {"FIRMWARE_SWEEP_PREFIXES": "nvidia amdgpu", "FIRMWARE_SWEEP_FILES": "radio.bin",
+                  "FIRMWARE_PRESERVED_ROOTS": "brcm iwlwifi"}
+        path.write_text(json.dumps(policy))
+        path.chmod(0o600)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert image_vm.verified_firmware_policy(path, digest) == (
+            {"nvidia": "directory", "amdgpu": "directory", "radio.bin": "file"}, {"brcm", "iwlwifi"})
+        path.write_text(json.dumps(policy | {"FIRMWARE_SWEEP_PREFIXES": "amdgpu"}))
+        try:
+            image_vm.verified_firmware_policy(path, digest)
+        except StreamError as error:
+            assert "differs from the verifier inventory" in str(error)
+        else:
+            raise AssertionError("accepted modified firmware policy outside the verified artifact inventory")
+        for updates in (
+            {"FIRMWARE_SWEEP_FILES": []},
+            {"FIRMWARE_SWEEP_FILES": "nvidia"},
+            {"FIRMWARE_SWEEP_FILES": "../outside"},
+            {"FIRMWARE_SWEEP_FILES": "brcm"},
+            {"FIRMWARE_SWEEP_PREFIXES": "", "FIRMWARE_SWEEP_FILES": ""},
+        ):
+            path.write_text(json.dumps(policy | updates))
+            try:
+                image_vm.verified_firmware_policy(path, hashlib.sha256(path.read_bytes()).hexdigest())
+            except StreamError as error:
+                assert "invalid resolved firmware policy" in str(error)
+            else:
+                raise AssertionError(f"accepted invalid resolved firmware policy: {updates}")
+
+
+def test_host_binds_candidate_references_to_the_approved_module_list() -> None:
+    for driver in ("nouveau", "other", None):
+        path = f"7.2.0-ceralive-rk3588/kernel/{driver}.ko"
+        modules = f"drivers/{driver or 'fixture'}.ko\n".encode()
+        digest = hashlib.sha256(modules).hexdigest()
+        expected = image_verify.approved_modules(modules, digest)
+        refs = [f"nvidia/retained.bin\t{path}"] if driver else []
+        receipt = {
+            "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
+            "slots": [firmware_receipt_slot({"slot": slot, "reserve": "fixture", "removed": ["amdgpu"],
+                       "retained": ["brcm", "nvidia"] if driver else ["brcm", "intel"],
+                       "firmware_references": refs, "examined_firmware_references": 1,
+                       "candidate_consumers": {"amdgpu": [], "nvidia" if driver else "intel": [driver] if driver else []},
+                       "nouveau_present": driver == "nouveau"}, expected) for slot in ("rootfs_a", "rootfs_b")],
+        }
+        domain = (dict.fromkeys(("amdgpu", "nvidia" if driver else "intel"), "directory"), set())
+        image_vm.validate_verification(receipt, IDENTITY, {}, expected, domain)
+        failures = [
+            ({"nouveau_present": int(driver == "nouveau")}, "invalid verifier slot record"),
+            ({"undeclared": ""}, "invalid verifier slot record"),
+            ({"candidate_consumers": {"amdgpu": [], "nvidia" if driver else "intel": [False]}},
+             "invalid candidate firmware consumers"),
+        ]
+        if driver:
+            failures.append(({"firmware_references": []}, "invalid candidate firmware consumers"))
+        if driver == "nouveau":
+            failures.extend([
+                ({"firmware_references": [], "candidate_consumers": {"amdgpu": [], "nvidia": []}},
+                 "Nouveau firmware proof differs from the approved module inventory"),
+                ({"nouveau_present": False, "firmware_references": [],
+                  "candidate_consumers": {"amdgpu": [], "nvidia": []}},
+                 "reported Nouveau presence differs from the approved module inventory"),
+                ({"nouveau_present": False}, "reported Nouveau presence differs from the approved module inventory"),
+            ])
+            try:
+                image_verify.approved_modules(b"drivers/other.ko\n", digest)
+            except StreamError as error:
+                assert "differs from independently approved release" in str(error)
+            else:
+                raise AssertionError("accepted a substituted bound module list")
+        for change, expected_error in failures:
+            invalid = deepcopy(receipt)
+            invalid["slots"][0].update(change)
+            try:
+                image_vm.validate_verification(invalid, IDENTITY, {}, expected, domain)
+            except StreamError as error:
+                assert expected_error in str(error), (driver, change, error)
+            else:
+                raise AssertionError((driver, change, "accepted an invalid candidate receipt"))
+
+
+def test_host_rejects_empty_firmware_proof_without_evidence_of_inspection() -> None:
+    receipt = {
+        "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
+        "slots": [firmware_receipt_slot(
+                  {"slot": label, "reserve": "fixture", "removed": ["nvidia"], "retained": ["brcm"],
+                   "firmware_references": [], "nouveau_present": False, "candidate_consumers": {"nvidia": []}},
+                  ["fixture.ko"])
+                  for label in ("rootfs_a", "rootfs_b")],
+    }
+    for count in (None, 0):
+        invalid = deepcopy(receipt)
+        if count is not None:
+            for slot in invalid["slots"]:
+                slot["examined_firmware_references"] = count
+        try:
+            image_vm.validate_verification(invalid, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
+        except StreamError:
+            pass
+        else:
+            raise AssertionError(f"accepted empty firmware proof with inspection count {count}")
+
+
+def test_host_accepts_firmware_proof_without_driver_references() -> None:
+    receipt = {
+        "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
+        "slots": [firmware_receipt_slot({"slot": label, "reserve": "fixture", "removed": ["nvidia"], "retained": ["brcm"],
+                   "firmware_references": [], "examined_firmware_references": 1,
+                   "nouveau_present": False, "candidate_consumers": {"nvidia": []}}, ["fixture.ko"])
+                  for label in ("rootfs_a", "rootfs_b")],
+    }
+    image_vm.validate_verification(receipt, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
+    for field in ("removed", "retained"):
+        invalid = deepcopy(receipt)
+        invalid["slots"][0][field] = []
+        try:
+            image_vm.validate_verification(invalid, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
+        except StreamError:
+            pass
+        else:
+            raise AssertionError(f"accepted empty {field} inventory")
+    receipt["slots"][0]["firmware_references"] = ["nvidia/retained.bin\tfirst.ko",
+                                                 "nvidia/other.bin\tsecond (built-in)"]
+    receipt["slots"][0]["candidate_consumers"] = {"nvidia": ["first", "second"]}
+    try:
+        image_vm.validate_verification(receipt, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
+    except StreamError as error:
+        assert "invalid verifier slot record" in str(error)
+    else:
+        raise AssertionError("accepted more retained references than the verifier examined")
+
+
+def test_installed_kernel_lock_requires_exact_released_bytes_and_origin() -> None:
+    approved = {"name": KERNEL_PACKAGE, "version": "7.2.0-ceralive9", "arch": "arm64",
+                "origin": "ceralive-kernel", "sha256": "d" * 64}
+    for changes in ({}, {"version": "7.2.0-ceralive8"}, {"arch": "amd64"},
+                    {"sha256": "b" * 64}, {"origin": "source-built"}):
+        try:
+            image_verify.check_kernel_lock([approved | changes], (KERNEL_PACKAGE, approved["version"], "arm64"),
+                                           approved["sha256"])
+        except StreamError:
+            assert changes
+        else:
+            assert not changes, changes
 
 
 def rejected(payload: bytes, expected: Identity = IDENTITY) -> None:
@@ -339,7 +876,7 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
     spawn, waitpid = subprocess.Popen, os.waitpid
     for code, fault in ((8, "normal"), (4, "normal"), (1, "normal"), (0, "normal"),
                         (8, "premature-reap"), (8, "ignored-during-spawn"), (0, "echild"),
-                        (8, "inherited-ignore")):
+                        (8, "inherited-ignore"), (0, "wrong-receipt-version"), (0, "wrong-returned-metadata")):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             home = root / "home"
@@ -354,13 +891,22 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
             trust = {"root_der_sha256": "fixture-root", "kernel_metadata": dict.fromkeys(metadata, "approved")}
             for name in (*artifacts, "approved"):
                 (root / name).touch()
-            params = {"BOARD_ID": IDENTITY.board, "DTB_NAME": "fixture", "SERIAL_CONSOLE": "fixture"}
+            params = {"BOARD_ID": IDENTITY.board, "DTB_NAME": "fixture", "SERIAL_CONSOLE": "fixture",
+                      "KERNEL_PACKAGES": KERNEL_PACKAGE, "ARCH": "arm64",
+                      "KERNEL_SOURCE_PACKAGE_VERSION": "7.2.0-ceralive9"}
             (root / "resolved.json").write_text(json.dumps(params))
-            (root / "measurement.json").write_text(json.dumps({"public_root_der_sha256": "fixture-root"}))
+            (root / "measurement.json").write_text(json.dumps({
+                "public_root_der_sha256": "fixture-root",
+                "kernel_version": "7.2.0-ceralive8" if fault == "wrong-receipt-version" else "7.2.0-ceralive9",
+            }))
             with tarfile.open(root / "rootfs.tar", "w"):
                 pass
             capsule = SimpleNamespace(directory=root, board=IDENTITY.board, device_root="approved")
-            kernel = SimpleNamespace(verified_metadata=lambda *_: SimpleNamespace(boards=[IDENTITY.board]))
+            trust["kernel_metadata"] = kernel_metadata_fixture(root, "7.2.0-ceralive9")
+            for name, digest in trust["kernel_metadata"].items():
+                (root / ("kernel.SHA256SUMS" if name == "SHA256SUMS" else name)).write_bytes((root / digest).read_bytes())
+            if fault == "wrong-returned-metadata":
+                (root / "resolved.config").write_bytes(b"unapproved replacement")
             seen, reaped = [], []
 
             def start(args, **options):
@@ -400,10 +946,10 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                 if fault == "inherited-ignore":
                     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
                 with patch.object(image_guest, "HOME", home), patch.object(image_guest, "resolve", return_value=params), \
-                        patch.dict(sys.modules, {"kernel_release": kernel}), patch.object(subprocess, "Popen", start), \
+                        patch.object(subprocess, "Popen", start), \
                         patch.object(os, "waitpid", wait_with_fault):
                     try:
-                        image_verify.verify(root, capsule, {"build_identity": asdict(IDENTITY),
+                        image_verify.verify(ROOT, capsule, {"build_identity": asdict(IDENTITY),
                                                            "artifacts": artifacts, "trust": trust})
                     except ReserveReached:
                         assert (code, fault) == (0, "normal"), (code, fault, "unverified success")
@@ -412,6 +958,11 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                     except ChildStatusError as error:
                         assert fault in ("premature-reap", "ignored-during-spawn", "echild"), (fault, error)
                         assert isinstance(error.__cause__, ChildProcessError) and error.__cause__.errno == errno.ECHILD
+                    except StreamError as error:
+                        assert (fault, str(error)) in (
+                            ("wrong-receipt-version", "returned measurement kernel version differs from approved source"),
+                            ("wrong-returned-metadata", "returned kernel metadata differs from independently selected release"),
+                        )
                     else:
                         raise AssertionError("verifier returned before checking reserve")
                     if fault == "inherited-ignore":
@@ -419,7 +970,8 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
             finally:
                 sys.path[:] = before_path
                 signal.signal(signal.SIGCHLD, inherited)
-            assert seen == (["e2fsck", "reserve"] if (code, fault) == (0, "normal") else ["e2fsck"])
+            assert seen == ([] if fault in ("wrong-receipt-version", "wrong-returned-metadata") else
+                            ["e2fsck", "reserve"] if (code, fault) == (0, "normal") else ["e2fsck"])
 
 
 def test_guest_gate_refuses_ignored_sigchld_before_spawn() -> None:
@@ -726,6 +1278,8 @@ def test_measure_checks_loaded_platform_config_and_returns_safe_failure_frame() 
                 def engine(args, **kwargs):
                     if args[:1] == ["bash"]:
                         return subprocess.CompletedProcess(args, 0, "data")
+                    if args[0] == "fallocate":
+                        raise BuildReady
                     if args[:2] == ["docker", "load"]:
                         assert args[2:] == ["-i", str(root / "guest/input" / archive_id)]
                         return subprocess.CompletedProcess(args, 0)
@@ -754,7 +1308,8 @@ def test_measure_checks_loaded_platform_config_and_returns_safe_failure_frame() 
                         patch.object(image_guest, "unpack", side_effect=unpack_builder), \
                         patch.object(image_guest, "source_checkout", return_value=root / "source"), \
                         patch.object(image_guest.shutil, "copyfile"), \
-                        patch.object(image_guest, "resolve", side_effect=BuildReady), \
+                        patch.object(image_guest, "resolve", return_value={"KERNEL_SOURCE_PACKAGE_VERSION": "7.2.0-ceralive8"}), \
+                        patch.object(image_guest, "stage_kernel_metadata"), \
                         patch.object(image_guest, "run_gate", side_effect=engine):
                     try:
                         image_guest.main()
@@ -1180,6 +1735,7 @@ serve(objects, managed=True)
                     directory.mkdir(parents=True)
                 # The checked-out script must not run, regardless of its protocol.
                 (source / "lib/sealed-inputs.py").write_text("raise SystemExit(99)\n")
+                (source / "lib/kernel_release.py").symlink_to(ROOT / "lib/kernel_release.py")
                 (source / "images" / board / "fixture.measurement.json").touch()
                 (objects / "data").write_bytes(b"offline fixture")
                 (home / "swap").touch()
@@ -1188,11 +1744,12 @@ serve(objects, managed=True)
                                           objects=[SimpleNamespace(sha256="data", kind="pinned-source")])
                 repositories = {name: {"suite": "stable", "keyring": "data", "origin": "unused"}
                                 for name in ("firstparty", "bsp", "debian-source")}
+                version = "7.2.0-ceralive8" if revision.startswith("14bf") else "7.2.0-ceralive9"
+                params = {"KERNEL_PACKAGES": KERNEL_PACKAGE, "ARCH": "arm64", "KERNEL_SOURCE_PACKAGE_VERSION": version}
                 job = {"identity": {"input_sha256": IDENTITY.input_sha256}, "trust": {
                     "root_der_sha256": "0" * 64, "repositories": repositories, "os_version": "",
                     "addon_public_object": "", "paseto_public_object": "", "builder_images": [],
-                    "kernel_metadata": dict.fromkeys(
-                        ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"), "data"),
+                    "kernel_metadata": kernel_metadata_fixture(objects, version),
                 }}
                 launches = []
                 replies = []
@@ -1220,9 +1777,15 @@ serve(objects, managed=True)
                         connection.close()
                     return spawn([sys.executable, "-B", "-c", "pass"], **kwargs)
 
-                with patch.object(image_guest, "HOME", home), patch.object(image_guest.shutil, "copyfile"), \
+                copyfile = image_guest.shutil.copyfile
+
+                def copy(src, dst):
+                    if dst != "/usr/share/keyrings/debian-archive-keyring.gpg":
+                        return copyfile(src, dst)
+
+                with patch.object(image_guest, "HOME", home), patch.object(image_guest.shutil, "copyfile", copy), \
                         patch.object(image_guest, "command", return_value="data"), \
-                        patch.object(image_guest, "resolve", return_value={}), \
+                        patch.object(image_guest, "resolve", return_value=params), \
                         patch.object(image_guest, "run_gate"), \
                         patch.object(image_guest.subprocess, "Popen", start):
                     try:
@@ -1294,12 +1857,16 @@ def test_measurement_and_verifier_records_reject_every_wrong_typed_field() -> No
     }
     inventory = {member.id: member.sha256 for member in members}
     verifier = {"schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": inventory, "slots": [
-        {"slot": slot, "reserve": "reserved", "removed": ["amdgpu"], "retained": ["nvidia"],
-         "nvidia_references": ["nvidia/nouveau.ko"]} for slot in ("rootfs_a", "rootfs_b")
+        firmware_receipt_slot({"slot": slot, "reserve": "reserved", "removed": ["amdgpu"], "retained": ["nvidia"],
+         "firmware_references": ["nvidia/retained.bin\t7.2.0-ceralive-rk3588/nouveau.ko"],
+         "examined_firmware_references": 1, "nouveau_present": True,
+         "candidate_consumers": {"amdgpu": [], "nvidia": ["nouveau"]}}, ["nouveau.ko"])
+        for slot in ("rootfs_a", "rootfs_b")
     ]}
     for record, check, args in (
         (row, image_vm.measurement_stages, (IDENTITY, root, members)),
-        (verifier, image_vm.validate_verification, (IDENTITY, inventory)),
+        (verifier, image_vm.validate_verification,
+         (IDENTITY, inventory, ["nouveau.ko"], (dict.fromkeys(("amdgpu", "nvidia"), "directory"), set()))),
     ):
         check(record, *args)
         for path, invalid in wrong_typed_records(record):
