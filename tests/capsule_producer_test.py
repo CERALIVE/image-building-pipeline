@@ -1089,8 +1089,6 @@ def test_local_input_links_size_and_hash_mismatches_never_publish() -> None:
                 data = source.read_bytes()
                 source.write_bytes(data + b"changed" if case == "size" else bytes([data[0] ^ 1]) + data[1:])
             (work / "reviewed.json").write_text(json.dumps(reviewed))
-            identity_arg = args.index("--client-identity-config")
-            del args[identity_arg:identity_arg + 2]
             result = run(args, env)
             assert result.returncode != 0, case
             assert expected in result.stderr, (case, result.stderr)
