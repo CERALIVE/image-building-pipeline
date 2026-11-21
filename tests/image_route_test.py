@@ -147,6 +147,8 @@ def test_measure_populates_only_manifest_selected_release_history() -> None:
 def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roots() -> None:
     single_file = "r8a779x_usb3_rom.mem"
     wrong_prefix_types = ("prefix-file", "prefix-symlink-to-dir", "prefix-dangling-symlink")
+    wrong_file_types = ("directory-at-file-candidate", "file-symlink-to-file", "file-dangling-symlink", "file-fifo")
+    named_file_cases = ("regular-file-candidate", *wrong_file_types)
     for revision, case, failure in (
         (8, "missing-nvidia-unshipped-ref", "removed a referenced candidate: nvidia"),
         (8, "", ""), (9, "", ""), (9, "unused-nvidia", "unreferenced candidate: nvidia"),
@@ -161,7 +163,7 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
         (9, "other-candidate", ""),
         *((8, kind, "not a directory: nvidia") for kind in wrong_prefix_types),
         (9, "regular-file-candidate", ""),
-        (9, "directory-at-file-candidate", f"not a file: {single_file}"),
+        *((9, kind, f"not a file: {single_file}") for kind in wrong_file_types),
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -185,7 +187,7 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             nouveau_output = ":" if case == "suppressed-nouveau" else f"printf '{nvidia_ref}\\n'"
             other_output = (
                 "printf 'nvidia/retained.bin\\n'" if case == "other-candidate"
-                else f"printf '{single_file}\\n'" if case in ("regular-file-candidate", "directory-at-file-candidate")
+                else f"printf '{single_file}\\n'" if case in named_file_cases
                 else ":"
             )
             modinfo.write_text(f"#!/bin/sh\ncase \"$3\" in */nouveau.ko) {nouveau_output};; "
@@ -210,7 +212,7 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             roots = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "iwlwifi", "mrvl/prestera")
             supplied = ("tegra/retained.bin", "nvidia/retained.bin", "intel/ibt-fixture",
                         *(name + "/fixture.bin" for name in roots))
-            if case in ("regular-file-candidate", "directory-at-file-candidate"):
+            if case in named_file_cases:
                 supplied += (single_file,)
             if case == "never-shipped-nvidia":
                 supplied = tuple(name for name in supplied if not name.startswith("nvidia/"))
@@ -232,9 +234,16 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
                 (firmware / "nvidia").write_bytes(b"not a directory")
             elif case in ("prefix-symlink-to-dir", "prefix-dangling-symlink"):
                 (firmware / "nvidia").symlink_to("brcm" if case == "prefix-symlink-to-dir" else "absent")
-            elif case == "directory-at-file-candidate":
-                (firmware / single_file).unlink()
-                (firmware / single_file).mkdir()
+            elif case in wrong_file_types:
+                candidate = firmware / single_file
+                candidate.unlink()
+                if case == "directory-at-file-candidate":
+                    candidate.mkdir()
+                elif case == "file-fifo":
+                    os.mkfifo(candidate)
+                else:
+                    target = "brcm/fixture.bin" if case == "file-symlink-to-file" else "absent"
+                    candidate.symlink_to(target)
             if case == "incomplete":
                 (modules / "modules.builtin.modinfo").unlink()
             params = {
