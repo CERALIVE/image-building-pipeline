@@ -13,10 +13,10 @@ import stat
 import tarfile
 from typing import BinaryIO, Callable, Final
 
-from image_stream import Identity, StreamError, list_directory, unique_object
+from image_candidate_policy import Approval, FIELD, INPUT_LIMIT, KIND, parse_approval
+from image_stream import Identity, StreamError, exact_json, list_directory, unique_object
 from image_urls import InputURLError, canonical_url
 
-INPUT_LIMIT: Final = 32 * 1024**3
 KINDS: Final = frozenset(("source-bundle", "public-trust", "apt-metadata", "deb",
                          "pinned-source", "builder-image", "kernel-metadata", "artifact"))
 
@@ -65,17 +65,19 @@ def original_url(value: str) -> str:
         raise StreamError(str(exc)) from exc
 
 
-def unpack(capsule: Path, directory: Path, expected: Identity) -> Capsule:
+def unpack(capsule: Path, directory: Path, expected: Identity, *,
+           approved_candidate: Approval | None = None) -> Capsule:
     """Guest-only import; paths and archive link semantics never cross this boundary."""
     with capsule.open("rb") as source:
         if (os.fstat(source.fileno()).st_size > INPUT_LIMIT
                 or hashlib.file_digest(source, "sha256").hexdigest() != expected.input_sha256):
             raise StreamError("input capsule length or transport digest mismatch")
         source.seek(0)
-        return unpack_archive(source, directory, expected)
+        return unpack_archive(source, directory, expected, approved_candidate=approved_candidate)
 
 
-def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Capsule:
+def unpack_archive(source: BinaryIO, directory: Path, expected: Identity, *,
+                   approved_candidate: Approval | None = None) -> Capsule:
     directory.mkdir(mode=0o700)
     with tarfile.open(fileobj=source, mode="r:") as archive:
         entries = archive.getmembers()
@@ -90,22 +92,32 @@ def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Cap
             raise StreamError("unreadable capsule inventory")
         with source:
             row = json.load(source, object_pairs_hook=unique_object)
-        if (set(row) != {"schema", "source_commit", "epoch", "board", "objects", "fetched_at",
-                        "source_bundle", "device_root", "repositories"}
+        fields = {"schema", "source_commit", "epoch", "board", "objects", "fetched_at",
+                  "source_bundle", "device_root", "repositories"}
+        if approved_candidate is not None:
+            fields.add(FIELD)
+        if (type(row) is not dict or set(row) != fields
                 or type(row["schema"]) is not int or row["schema"] != 1
                 or type(row["epoch"]) is not int or type(row["objects"]) is not list
                 or type(row["repositories"]) is not dict
                 or (row["source_commit"], row["epoch"], row["board"])
                 != (expected.commit, expected.epoch, expected.board)):
             raise StreamError("capsule source or board identity mismatch")
+        if approved_candidate is not None:
+            approved_candidate = parse_approval(approved_candidate)
+            if (expected.board not in approved_candidate["validated_boards"]
+                    or not exact_json(row[FIELD], approved_candidate)):
+                raise StreamError("capsule candidate differs from independently approved policy")
+        allowed_kinds = KINDS if approved_candidate is None else (KINDS - {"kernel-metadata"}) | {KIND}
         fetched_at = datetime.strptime(row["fetched_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         if fetched_at > datetime.now(timezone.utc):
             raise StreamError("capsule prefetch completion time is in the future")
         objects = []
         urls = set()
         for item in row["objects"]:
-            if (set(item) != {"sha256", "length", "kind", "urls"}
-                    or item["kind"] not in KINDS or type(item["length"]) is not int
+            if (type(item) is not dict or set(item) != {"sha256", "length", "kind", "urls"}
+                    or type(item["kind"]) is not str or item["kind"] not in allowed_kinds
+                    or type(item["length"]) is not int
                     or not 0 < item["length"] <= INPUT_LIMIT or type(item["urls"]) is not list):
                 raise StreamError("invalid typed capsule object")
             names = tuple(original_url(url) for url in item["urls"])
@@ -114,6 +126,10 @@ def unpack_archive(source: BinaryIO, directory: Path, expected: Identity) -> Cap
             urls.update(names)
             objects.append(InputObject(object_id(item["sha256"]), item["length"],
                                        item["kind"], names))
+        if approved_candidate is not None and (
+                {item.sha256: (item.length, item.urls) for item in objects if item.kind == KIND}
+                != {pin["sha256"]: (pin["length"], ()) for pin in approved_candidate["payloads"].values()}):
+            raise StreamError("capsule does not carry exactly the five approved candidate objects")
         ids = {item.sha256 for item in objects}
         if len(ids) != len(objects) or len(entries) != len(objects) + 1:
             raise StreamError("duplicate or extra capsule objects")
@@ -162,7 +178,7 @@ def verification_capsule(original: BinaryIO, artifacts: Path, output: BinaryIO,
         with stream:
             row = json.load(stream, object_pairs_hook=unique_object)
         objects = {item["sha256"]: item for item in row["objects"]
-                   if item["kind"] in ("source-bundle", "public-trust", "apt-metadata", "kernel-metadata")}
+                   if item["kind"] in ("source-bundle", "public-trust", "apt-metadata", "kernel-metadata", KIND)}
         files = {}
         for name in list_directory(artifacts):
             file = artifacts / name
@@ -185,7 +201,7 @@ def verification_capsule(original: BinaryIO, artifacts: Path, output: BinaryIO,
             for digest, item in objects.items():
                 header = tarfile.TarInfo("objects/" + digest)
                 header.size = item["length"]
-                if digest in files:
+                if digest in files and item["kind"] == "artifact":
                     with files[digest].open("rb") as member:
                         target.addfile(header, CheckedReader(member, checkpoint))
                 else:

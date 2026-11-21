@@ -39,6 +39,8 @@ def merge(
     built_at: str,
     commit: str,
     patches_commit: str,
+    *,
+    measurement_candidate: bool = False,
 ) -> None:
     receipts: dict[tuple[str, str, str], dict[str, str]] = {}
     dates: dict[str, str] = {}
@@ -53,6 +55,10 @@ def merge(
                     raise LockError(f"invalid receipt shape in {file}: {row}")
                 if not re.fullmatch(r"[0-9a-f]{64}", row["sha256"]):
                     raise LockError(f"invalid SHA-256 for {row['name']} in {file}")
+                if row["origin"] == "measurement-candidate" and (
+                        not measurement_candidate or file != staging / "packages-lock/measurement-candidate.jsonl"
+                        or not row["name"].startswith("linux-image-")):
+                    raise LockError("measurement-candidate receipt is not permitted in this lock")
                 key = (row["name"], row["version"], row["arch"])
                 previous = receipts.get(key)
                 if previous and previous != row:
@@ -69,14 +75,24 @@ def merge(
         raise LockError("invalid SOURCE_DATE_EPOCH")
 
     packages = []
+    candidate_count = 0
     for identity in installed_packages(root / "var/lib/dpkg/status"):
         key = (identity["name"], identity["version"], identity["arch"])
         receipt = receipts.get(key)
         if identity["name"].startswith("linux-image-") and receipt:
-            if receipt["origin"] != "ceralive-kernel":
-                raise LockError(f"kernel {key}: expected authenticated CeraLive APT origin")
+            origin = "measurement-candidate" if measurement_candidate else "ceralive-kernel"
+            if receipt["origin"] != origin:
+                raise LockError(f"kernel {key}: expected {origin} origin")
+            if measurement_candidate:
+                deb = staging / "debs" / f"{key[0]}_{key[1]}_{key[2]}.deb"
+                with deb.open("rb") as content:
+                    if hashlib.file_digest(content, "sha256").hexdigest() != receipt["sha256"]:
+                        raise LockError("staged candidate does not match its lock receipt")
+                candidate_count += 1
             packages.append(receipt)
         elif identity["name"].startswith("linux-image-"):
+            if measurement_candidate:
+                raise LockError("installed candidate has no staging receipt")
             if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(
                 r"[0-9a-f]{40}", patches_commit
             ):
@@ -130,6 +146,8 @@ def merge(
                 raise LockError(f"unaccounted installed package {key}: no apt/fetch/generated SHA-256 receipt")
             packages.append(receipt)
 
+    if measurement_candidate and candidate_count != 1:
+        raise LockError("measurement requires exactly one installed candidate kernel")
     output.parent.mkdir(parents=True, exist_ok=True)
     temp = output.with_name(output.name + ".tmp")
     temp.write_text(
@@ -150,9 +168,11 @@ def merge(
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) != 9 or sys.argv[1] != "merge":
+        if (len(sys.argv) not in (9, 10) or sys.argv[1] != "merge"
+                or sys.argv[9:] not in ([], ["--measurement-candidate"])):
             raise LockError("usage: packages-lock.py merge ROOT STAGING OUTPUT EPOCH BUILT_AT COMMIT PATCHES_COMMIT")
-        merge(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]), *sys.argv[5:])
+        merge(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]), *sys.argv[5:9],
+              measurement_candidate=len(sys.argv) == 10)
     except (OSError, ValueError, KeyError, TypeError, LockError) as exc:
         print(f"packages lock: {exc}", file=sys.stderr)
         sys.exit(1)

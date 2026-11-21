@@ -634,13 +634,26 @@ objects. It does not embed the proof files or local paths. First-party
 userspace still uses its original archive signature chain. Candidate approval
 does not use the archive key and creates no runtime local override.
 
-The follow-up will add measurement-only staging, a distinct package-lock
-origin, independent verification and explicit release rejection even when a
-valid signed APT kernel is available. The owner must decide on the private
-local bundle rather than a public Actions artifact, approve a dedicated
-runner or quiet kernel build window, and separately approve the guest base
-rollout, capsule reseal and digest. Nothing publishes to `apt.ceralive.tv` or
-reaches devices.
+Only explicit production rootfs measurement can install the candidate. The
+launcher requires an independent policy and approved capsule digest. Both guests
+revalidate the five payloads; the verifier independently checks the installed
+kernel and lock. The lock and candidate verifier receipt record
+`measurement-candidate` and the exact deb digest, never `ceralive-kernel`.
+Released receipts keep their existing fields. A local path or environment
+variable is not approval. Full image and release entry points reject sealed
+candidate input before signer selection or APT access, even when the same version
+is available from signed production APT.
+
+Approve each operational step separately:
+
+1. Choose a private bundle location and a dedicated runner or quiet build
+   window. Do not publish the bundle as a public Actions artifact.
+2. Review the new guest seed, then approve the rebuilt guest base and its
+   digest. This code change does not update any running base.
+3. Reseal the approved bundle and source checkout, then review and approve
+   the new capsule digest independently of the base approval.
+
+Nothing in this flow publishes to `apt.ceralive.tv` or reaches devices.
 
 Create a private output directory and invoke one board at a time:
 
