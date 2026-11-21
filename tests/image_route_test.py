@@ -806,6 +806,7 @@ def test_guest_stages_only_controller_approved_candidate_and_records_exact_lock(
         status.parent.mkdir(parents=True)
         status.write_text(f"Package: {KERNEL_PACKAGE}\nVersion: {version}\nArchitecture: arm64\n"
                           "Status: install ok installed\n")
+        status.chmod(0o600)
         merge = runpy.run_path(str(ROOT / "lib/packages-lock.py"))["merge"]
         lock = root / "lock.json"
         merge(root, staging, lock, "123", "2026-01-01", "", "", measurement_candidate=True)
@@ -1170,7 +1171,9 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                                           "7.2.0-ceralive9", "arm64"]
                     destination = pathlib.Path(args[-1])
                     destination.mkdir()
-                    (destination / "built-modules.txt").write_bytes((root / "built-modules.txt").read_bytes())
+                    modules = destination / "built-modules.txt"
+                    modules.write_bytes((root / "built-modules.txt").read_bytes())
+                    modules.chmod(0o600)
                     digest = "e" if fault == "candidate-wrong-stage-digest" else "d"
                     return spawn(["/usr/bin/printf", "%s\n", digest * 64], **options)
                 if "slot_reserve_assert_ext4" in " ".join(args):
