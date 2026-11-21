@@ -3,6 +3,7 @@
 
 from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import gzip
@@ -38,6 +39,463 @@ from image_transport import copy_local, identity_config
 
 
 LOCAL_PATH_CANARY = "private-client-key-path-canary"
+
+CANDIDATE_KIND = "measurement-candidate"
+CANDIDATE_META = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
+CANDIDATE_PROOF = ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")
+
+
+def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        work = Path(temporary)
+        bundle = work / LOCAL_PATH_CANARY
+        version = "7.2.0-ceralive9"
+        package = "linux-image-7.2.0-ceralive-rk3588"
+        deb_name = f"{package}_{version}_arm64.deb"
+        payloads = (deb_name, *CANDIDATE_META)
+        producer = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
+            env=os.environ | {"GIT_MASTER": "1", "GIT_NO_LAZY_FETCH": "1"}, text=True, timeout=10,
+        ).strip()
+        subprocess.run([
+            "bash", "-euo", "pipefail", "-c",
+            'ROOT="$1"; WORK="$2"; source "$ROOT/tests/lib/kernel-release-fixtures.sh"; '
+            'kernel_test_artifact "$3" "$4" "$ROOT"',
+            "_", str(ROOT), temporary, str(bundle), version,
+        ], capture_output=True, check=True, timeout=30)
+
+        def pin(data: bytes) -> dict[str, str | int]:
+            return {"sha256": hashlib.sha256(data).hexdigest(), "length": len(data)}
+
+        def sums(files: dict[str, bytes]) -> bytes:
+            return "".join(f"{pin(data)['sha256']}  {name}\n" for name, data in sorted(files.items())).encode()
+
+        content = {name: (bundle / name).read_bytes() for name in payloads}
+        metadata = json.loads(content["kernel-artifact.json"])
+        receipt = {"schema": 1, "family": "rk3588", "commit": producer, "candidate_run_id": "123",
+                   "kernel_floor": "none", "publication": "blocked-pending-owner"}
+        authorization = {
+            "mode": "apt-publish", "publish_run_id": None, "run_attempt": None, "candidate_run_id": "123",
+            "tag": f"kernel/v{version}", "commit": producer, "package": package, "version": version,
+            "deb_sha256": pin(content[deb_name])["sha256"], "channel": "stable", "bench_report_sha256": None,
+        }
+
+        def proof(candidate: dict, auth: dict, files: dict[str, bytes]) -> dict[str, bytes]:
+            records = {"candidate.json": json.dumps(candidate).encode(),
+                       "publish-authorization.inputs.json": json.dumps(auth).encode()}
+            return records | {"BUNDLE.SHA256SUMS": sums(files | records)}
+
+        original = content | proof(receipt, authorization, content)
+        for name, data in original.items():
+            (bundle / name).write_bytes(data)
+        binding = {
+            "package": package, "version": version, "arch": "arm64",
+            "validated_boards": metadata["validated_boards"], "input_fingerprint": metadata["input_fingerprint"],
+            "producer_commit": producer, "candidate_run_id": "123",
+            "payloads": {name: pin(original[name]) for name in payloads},
+            "proof": {name: pin(original[name]) for name in CANDIDATE_PROOF},
+        }
+        rows, remote = [], {}
+
+        def object_row(data: bytes, kind: str, url: str = "") -> str:
+            row = pin(data) | {"kind": kind, "urls": [url] if url else []}
+            digest = str(row["sha256"])
+            if url:
+                remote[url] = data
+            else:
+                (work / digest).write_bytes(data)
+                row["path"] = digest
+            rows.append(row)
+            return digest
+
+        source = object_row(b"source", "source-bundle")
+        device = object_row(b"root", "public-trust")
+        keyring = object_row(b"keyring", "apt-metadata")
+        builder = object_row(b"builder", "builder-image")
+        archives, repositories = {}, {}
+        for name, origin in (("firstparty", "https://apt.ceralive.tv"), ("bsp", "https://repo.example"),
+                             ("debian-source", "https://deb.debian.org/debian")):
+            base = origin + "/dists/stable" + ("/binary-arm64" if name == "firstparty" else "")
+            repo = {"origin": origin, "keyring": keyring, "fingerprints": ["A" * 40], "suite": "stable",
+                    "component": "main", "arch": "arm64", "index_path": "Packages.gz"}
+            archives[name] = repo | {"max_age_seconds": 86400}
+            repositories[name] = repo | {
+                "inrelease": object_row(name.encode() + b" release", "apt-metadata", base + "/InRelease"),
+                "index": object_row(name.encode() + b" index", "apt-metadata", base + "/Packages.gz"),
+            }
+        filename = "ceralive-device_1_arm64.deb"
+        userspace = b"already authenticated userspace fixture"
+        package_digest = object_row(userspace, "deb", f"https://apt.ceralive.tv/dists/stable/binary-arm64/{filename}")
+        field = "measurement_candidate"
+        policy = {"schema": 1, "root_der_sha256": "1" * 64, "repositories": archives,
+                  "builder_images": [{"object": builder, "tag": "fixture", "arch": "arm64",
+                                      "image_id": "sha256:" + "3" * 64}], field: binding}
+        reviewed = {"schema": 1, "source_commit": "a" * 40, "epoch": 1234, "board": "rock-5b-plus",
+                    "source_bundle": source, "device_root": device, "objects": rows, "repositories": repositories,
+                    "packages": [{"repository": "firstparty", "name": "ceralive-device", "version": "1",
+                                  "arch": "arm64", "sha256": package_digest}], field: {"bundle": bundle.name}}
+        inventory, trust, output = (work / name for name in ("reviewed.json", "policy.json", "capsule.tar"))
+        cli = ROOT / "ci/prepare-image-capsule.py"
+        argv = [str(cli), "--inventory", str(inventory), "--trust-policy", str(trust), "--output", str(output)]
+        requests = []
+
+        def fetch_bytes(url: str, target: Path, *_args: object) -> None:
+            requests.append(url)
+            target.write_bytes(remote[url])
+
+        def offline_shell(script: str, *_args: object) -> str:
+            if "auth_lookup_package" in script:
+                return f"{filename}\t{package_digest}\t1\tarm64\t{len(userspace)}"
+            assert "rauc_public_root_resolve" in script or "assert_deb_identity" in script
+            return ""
+
+        def validity(directory: Path) -> tuple:
+            (directory / "metadata-validity.json").write_text("{}")
+            return ()
+
+        def invoke(selected: dict = binding, inventory_row: dict = reviewed, *,
+                   raw_policy: str = "") -> tuple[int, str]:
+            inventory.write_text(json.dumps(inventory_row))
+            trust.write_text(raw_policy or json.dumps(policy | {field: selected}))
+            requests.clear()
+            stderr = io.StringIO()
+            with patch.object(sys, "argv", argv), patch("image_transport.fetch", side_effect=fetch_bytes), \
+                    patch("image_transport.shell", side_effect=offline_shell), \
+                    patch.dict("image_transport.SEALED", {"mirror_validities": validity,
+                                                         "decompress_index": lambda *_args: None}), \
+                    redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+                try:
+                    runpy.run_path(str(cli), run_name="__main__")
+                except SystemExit as exc:
+                    return exc.code, stderr.getvalue()
+            return 0, stderr.getvalue()
+
+        failures = []
+
+        def rejected(label: str, expected: str, selected: dict = binding, inventory_row: dict = reviewed, *,
+                     raw_policy: str = "") -> None:
+            rc, error = invoke(selected, inventory_row, raw_policy=raw_policy)
+            assert not output.exists() and not list(work.glob(".prefetch-*")), label
+            assert not requests, (label, requests)
+            assert all(marker not in error for marker in ("/", "://", LOCAL_PATH_CANARY, "password-canary")), error
+            if rc != 1 or expected not in error:
+                failures.append((label, expected, rc, error.strip()))
+
+        for key in binding:
+            rejected(f"drop {key}", "measurement-candidate policy", {k: v for k, v in binding.items() if k != key})
+            rejected(f"wrong type {key}", "measurement-candidate policy", binding | {key: True})
+            raw = json.dumps(policy).replace(f'"{key}":', f'"{key}": null, "{key}":', 1)
+            rejected(f"duplicate {key}", "duplicate JSON key", raw_policy=raw)
+        for key, changed in (("package", "linux-image-7.3.0-ceralive-rk3588"), ("version", "7.2.0-ceralive8"),
+                             ("arch", "amd64"), ("validated_boards", ["rock-5b-plus"]),
+                             ("input_fingerprint", "4" * 64), ("producer_commit", "5" * 40),
+                             ("candidate_run_id", "456")):
+            diagnostic = {
+                "package": "policy identity", "version": "policy file closure",
+                "arch": "policy identity", "validated_boards": "policy identity",
+                "input_fingerprint": "artifact fingerprint mismatch", "producer_commit": "producer commit",
+                "candidate_run_id": "producer run",
+            }[key]
+            rejected(f"change {key}", diagnostic, binding | {key: changed})
+        rejected("whole inventory binding omitted", "measurement-candidate inventory",
+                 inventory_row={k: v for k, v in reviewed.items() if k != field})
+        rejected("whole policy binding omitted", "measurement-candidate",
+                 raw_policy=json.dumps({k: v for k, v in policy.items() if k != field}))
+        rejected("second candidate policy", "measurement-candidate policy", [binding, binding])
+        rejected("second candidate inventory", "measurement-candidate inventory",
+                 inventory_row=reviewed | {field: [reviewed[field], reviewed[field]]})
+        rejected("extra field in inventory selection", "measurement-candidate inventory",
+                 inventory_row=reviewed | {field: reviewed[field] | {"commit": producer}})
+        rejected("URL-bearing typed object", "measurement-candidate inventory",
+                 inventory_row=reviewed | {"objects": rows + [pin(b"extra") | {
+                     "kind": CANDIDATE_KIND, "urls": ["https://invalid.example/password-canary"]}]})
+        rejected("unbound released metadata", "measurement-candidate inventory",
+                 inventory_row=reviewed | {"objects": rows + [pin(b"legacy") | {
+                     "kind": "kernel-metadata", "urls": [], "path": "legacy"}]})
+        rejected("second signed APT kernel", "measurement-candidate inventory cannot also seal an APT kernel",
+                 inventory_row=reviewed | {"packages": [reviewed["packages"][0] | {"name": package}]})
+        rejected("another capsule object with the producer receipt digest", "inventory reuses a private bundle object",
+                 inventory_row=reviewed | {"objects": rows + [pin(original["candidate.json"]) | {
+                     "kind": "public-trust", "urls": [], "path": "private-proof"}]})
+        rejected("unrelated board", "invalid host-selected identity", inventory_row=reviewed | {"board": "x86-minipc"})
+        rejected("released and candidate approval together", "invalid public trust policy fields",
+                 raw_policy=json.dumps(policy | {"kernel_metadata": {}}))
+        for name in (*payloads, *CANDIDATE_PROOF):
+            group = "payloads" if name in payloads else "proof"
+            pins = binding[group]
+            rejected(f"omit pin for {name}", "measurement-candidate policy",
+                     binding | {group: {k: v for k, v in pins.items() if k != name}})
+            for leaf, invalid in (("sha256", True), ("length", True)):
+                rejected(f"wrong {leaf} type for {name}", "measurement-candidate policy",
+                         binding | {group: pins | {name: pins[name] | {leaf: invalid}}})
+                rejected(f"omit {leaf} for {name}", "measurement-candidate policy",
+                         binding | {group: pins | {name: {k: v for k, v in pins[name].items() if k != leaf}}})
+                selected_pin = json.dumps(pins[name])
+                duplicate_pin = selected_pin.replace(f'"{leaf}":', f'"{leaf}": null, "{leaf}":', 1)
+                rejected(f"duplicate {leaf} for {name}", "duplicate JSON key",
+                         raw_policy=json.dumps(policy).replace(selected_pin, duplicate_pin, 1))
+            duplicate_object = f'{json.dumps(name)}: {json.dumps(pins[name])}'
+            rejected(f"duplicate {name}", "duplicate JSON key",
+                     raw_policy=json.dumps(policy).replace(duplicate_object, duplicate_object + ", " + duplicate_object, 1))
+            rejected(f"wrong pinned hash for {name}", "SHA-256 (first 16) pinned=" + "4" * 16,
+                     binding | {group: pins | {name: pins[name] | {"sha256": "4" * 64}}})
+            rejected(f"wrong pinned length for {name}",
+                     f"size (bytes) pinned={len(original[name]) + 1} observed={len(original[name])}",
+                     binding | {group: pins | {name: pins[name] | {"length": len(original[name]) + 1}}})
+            path = bundle / name
+            link_target = work / "password-canary-file"
+            link_target.write_bytes(original[name])
+            for shape in ("missing", "wrong size", "tampered", "symlink", "fifo"):
+                path.unlink()
+                if shape == "wrong size":
+                    path.write_bytes(original[name] + b"x")
+                elif shape == "tampered":
+                    path.write_bytes(b"x" * len(original[name]))
+                elif shape == "symlink":
+                    path.symlink_to(link_target)
+                elif shape == "fifo":
+                    os.mkfifo(path)
+                try:
+                    diagnostic = f"size (bytes) pinned={len(original[name])} observed=unavailable"
+                    if shape == "tampered":
+                        diagnostic = (f"SHA-256 (first 16) pinned={pins[name]['sha256'][:16]} "
+                                      f"observed={pin(b'x' * len(original[name]))['sha256'][:16]}")
+                    elif shape == "wrong size":
+                        diagnostic = f"size (bytes) pinned={len(original[name])} observed={len(original[name]) + 1}"
+                    rejected(f"{shape} at {name}", diagnostic)
+                finally:
+                    path.unlink(missing_ok=True)
+                    path.write_bytes(original[name])
+        extra = bundle / "password-canary.deb"
+        extra.write_bytes(b"sixth payload")
+        rejected("extra sixth payload", "measurement-candidate bundle closure")
+        extra.unlink()
+
+        def coherently_replace(label: str, files: dict[str, bytes], evidence: dict[str, bytes],
+                               expected: str, **changes: object) -> None:
+            for name, data in (files | evidence).items():
+                (bundle / name).write_bytes(data)
+            try:
+                rejected(label, expected, binding | {"payloads": {k: pin(v) for k, v in files.items()},
+                                                     "proof": {k: pin(v) for k, v in evidence.items()}} | changes)
+            finally:
+                for name, data in original.items():
+                    (bundle / name).write_bytes(data)
+
+        coherently_replace("other producer commit", content, proof(receipt | {"commit": "6" * 40}, authorization, content),
+                           "producer commit")
+        coherently_replace("other producer package", content, proof(receipt, authorization | {"package": "other"}, content),
+                           "producer package")
+        coherently_replace("other producer run", content, proof(receipt | {"candidate_run_id": "456"}, authorization, content),
+                           "producer run")
+        coherently_replace("other producer version", content, proof(receipt, authorization | {"version": "other"}, content),
+                           "producer version")
+        coherently_replace("other producer tag", content, proof(receipt, authorization | {"tag": "other"}, content),
+                           "producer tag")
+        coherently_replace("other producer deb", content, proof(receipt, authorization | {"deb_sha256": "7" * 64}, content),
+                           "producer deb digest")
+        coherently_replace("producer is already published", content,
+                           proof(receipt | {"publication": "published"}, authorization, content), "producer receipt state")
+        coherently_replace("missing commit in producer receipt", content,
+                           proof({k: v for k, v in receipt.items() if k != "commit"}, authorization, content),
+                           "producer receipt record")
+        coherently_replace("non-string commit in producer receipt", content,
+                           proof(receipt | {"commit": True}, authorization, content), "producer commit")
+        other = proof(receipt, authorization, content)
+        other["BUNDLE.SHA256SUMS"] = other["BUNDLE.SHA256SUMS"].replace(
+            str(pin(content[deb_name])["sha256"]).encode(), b"7" * 64)
+        coherently_replace("different envelope hash", content, other, "checksum envelope mismatch")
+        other = proof(receipt, authorization, content)
+        other["BUNDLE.SHA256SUMS"] = b"\n".join(other["BUNDLE.SHA256SUMS"].splitlines()[1:]) + b"\n"
+        coherently_replace("missing producer envelope entry", content, other, "checksum envelope coverage")
+        coherently_replace("second checksum entry", content,
+                           {name: original[name] for name in CANDIDATE_PROOF} | {
+                               "BUNDLE.SHA256SUMS": original["BUNDLE.SHA256SUMS"] * 2}, "checksum envelope")
+        changed = content | {"kernel-artifact.json": json.dumps(metadata | {"input_fingerprint": "4" * 64}).encode()}
+        changed["SHA256SUMS"] = sums({k: v for k, v in changed.items() if k != "SHA256SUMS"})
+        coherently_replace("wrong recomputed fingerprint", changed, proof(receipt, authorization, changed),
+                           "family fingerprint", input_fingerprint="4" * 64)
+        coherently_replace("producer fingerprint differs from policy", changed, proof(receipt, authorization, changed),
+                           "artifact fingerprint mismatch")
+        changed = content | {"kernel-artifact.json": json.dumps(
+            metadata | {"validated_boards": ["rock-5b-plus"]}).encode()}
+        changed["SHA256SUMS"] = sums({k: v for k, v in changed.items() if k != "SHA256SUMS"})
+        coherently_replace("producer omits both-board evidence", changed, proof(receipt, authorization, changed),
+                           "both-board validation")
+        changed = content | {"SHA256SUMS": sums({k: v for k, v in content.items() if k != "SHA256SUMS"}) * 2}
+        coherently_replace("duplicate payload checksum", changed, proof(receipt, authorization, changed),
+                           "payload checksum or metadata")
+        wrong_deb = deb("9.0", "amd64")
+        wrong_deb_hash = pin(wrong_deb)["sha256"]
+        changed = content | {deb_name: wrong_deb, "kernel-artifact.json": json.dumps(
+            metadata | {"deb_sha256": wrong_deb_hash}).encode()}
+        changed["SHA256SUMS"] = sums({k: v for k, v in changed.items() if k != "SHA256SUMS"})
+        coherently_replace("deb control differs despite all matching hashes", changed,
+                           proof(receipt, authorization | {"deb_sha256": wrong_deb_hash}, changed),
+                           "deb control identity")
+
+        unpacked = work / "unpacked-kernel"
+        subprocess.run(["dpkg-deb", "-R", str(bundle / deb_name), str(unpacked)],
+                       capture_output=True, check=True, timeout=30)
+        for board, dtb_name in (("orange-pi-5-plus", "rk3588-orangepi-5-plus.dtb"),
+                                ("rock-5b-plus", "rk3588-rock-5b-plus.dtb")):
+            dtb, = unpacked.rglob(dtb_name)
+            payload = dtb.read_bytes()
+            dtb.unlink()
+            repacked = work / "repacked.deb"
+            try:
+                subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(unpacked), str(repacked)],
+                               capture_output=True, check=True, timeout=30)
+                changed = content | {deb_name: repacked.read_bytes()}
+            finally:
+                dtb.write_bytes(payload)
+            deb_hash = pin(changed[deb_name])["sha256"]
+            changed["kernel-artifact.json"] = json.dumps(metadata | {"deb_sha256": deb_hash}).encode()
+            changed["SHA256SUMS"] = sums({k: v for k, v in changed.items() if k != "SHA256SUMS"})
+            coherently_replace(f"deb missing DTB for {board}", changed,
+                               proof(receipt, authorization | {"deb_sha256": deb_hash}, changed),
+                               f"kernel deb board check failed: {board}; DTB presence pinned=present observed=unverified")
+
+        absent_commit = "f" * 40
+        coherently_replace("producer commit not in local repository", content,
+                           proof(receipt | {"commit": absent_commit}, authorization | {"commit": absent_commit}, content),
+                           "producer commit is not a local commit", producer_commit=absent_commit)
+
+        def deb_evidence(data: bytes) -> tuple[dict[str, bytes], dict[str, bytes]]:
+            digest = pin(data)["sha256"]
+            files = content | {deb_name: data, "kernel-artifact.json": json.dumps(
+                metadata | {"deb_sha256": digest}).encode()}
+            files["SHA256SUMS"] = sums({k: v for k, v in files.items() if k != "SHA256SUMS"})
+            return files, proof(receipt, authorization | {"deb_sha256": digest}, files)
+
+        def repinned_deb(label: str, data: bytes, diagnostic: str) -> None:
+            files, evidence = deb_evidence(data)
+            coherently_replace(label, files, evidence, diagnostic)
+
+        fixture_deb = bundle / deb_name
+        data_tar = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(fixture_deb)], timeout=30)
+        ar_names = subprocess.check_output(["ar", "t", str(fixture_deb)], text=True, timeout=30).splitlines()
+        control_name, = (name for name in ar_names if name.startswith("control.tar"))
+        for name in ("debian-binary", control_name):
+            (work / name).write_bytes(subprocess.check_output(["ar", "p", str(fixture_deb), name], timeout=30))
+        archive_canary = "password-canary"
+        with tarfile.open(fileobj=io.BytesIO(data_tar)) as source:
+            dtbs = {board: next(member.name for member in source.getmembers() if member.name.endswith("/" + name))
+                    for board, name in (("orange-pi-5-plus", "rk3588-orangepi-5-plus.dtb"),
+                                        ("rock-5b-plus", "rk3588-rock-5b-plus.dtb"))}
+
+        def changed_deb(board: str, shape: str) -> bytes:
+            target = dtbs[board]
+            other = next(name for name in dtbs.values() if name != target)
+            data = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(data_tar)) as source, tarfile.open(
+                    fileobj=data, mode="w", format=tarfile.PAX_FORMAT if shape == "pax" else tarfile.GNU_FORMAT
+            ) as destination:
+                for member in source:
+                    if member.name == target and shape in {"fifo", "symlink", "hardlink", "directory", "device"}:
+                        replacement = tarfile.TarInfo(target)
+                        replacement.type = {
+                            "fifo": tarfile.FIFOTYPE, "symlink": tarfile.SYMTYPE, "hardlink": tarfile.LNKTYPE,
+                            "directory": tarfile.DIRTYPE, "device": tarfile.CHRTYPE,
+                        }[shape]
+                        if shape in {"symlink", "hardlink"}:
+                            replacement.linkname = Path(other).name if shape == "symlink" else other
+                        destination.addfile(replacement)
+                    elif shape == "ancestor" and member.name == target.rsplit("/", 1)[0]:
+                        replacement = tarfile.TarInfo(member.name)
+                        replacement.type = tarfile.SYMTYPE
+                        replacement.linkname = archive_canary
+                        destination.addfile(replacement)
+                    else:
+                        destination.addfile(member, source.extractfile(member) if member.isfile() else None)
+                if shape in {"duplicate", "duplicate-alias", "absolute", "parent", "pax", "sparse",
+                             "long-protected", "long-unrelated"}:
+                    name = target.removeprefix("./")
+                    added = tarfile.TarInfo({
+                        "duplicate": target, "long-protected": "./" + "x" * 110 + "/../" + name,
+                        "long-unrelated": "./usr/lib/modules/" + "x" * 110,
+                        "absolute": "/" + name, "parent": f"./{archive_canary}/../{name}",
+                    }.get(shape, name))
+                    if shape == "pax":
+                        added.pax_headers = {"path": name}
+                    if shape == "sparse":
+                        added.type = tarfile.GNUTYPE_SPARSE
+                    destination.addfile(added)
+            trailer = b"password-canary".ljust(tarfile.BLOCKSIZE, b"\0") if shape == "trailer" else b""
+            (work / "data.tar.xz").write_bytes(lzma.compress(data.getvalue() + trailer))
+            repacked = work / "archive-shape.deb"
+            repacked.unlink(missing_ok=True)
+            subprocess.run(["ar", "rc", repacked.name, "debian-binary", control_name, "data.tar.xz"], cwd=work,
+                           capture_output=True, check=True, timeout=30)
+            return repacked.read_bytes()
+
+        for board in dtbs:
+            for shape in ("fifo", "symlink"):
+                repinned_deb(f"deb DTB {shape} for {board}", changed_deb(board, shape),
+                             f"{board}; DTB member pinned=regular observed={shape}")
+        board = "orange-pi-5-plus"
+        for shape, diagnostic in (
+            ("hardlink", f"{board}; DTB member pinned=regular observed=hardlink"),
+            ("directory", f"{board}; DTB member pinned=regular observed=directory"),
+            ("device", f"{board}; DTB member pinned=regular observed=device"),
+            ("duplicate", f"{board}; DTB member pinned=regular observed=duplicate"),
+            ("duplicate-alias", f"{board}; DTB member pinned=regular observed=duplicate"),
+            ("absolute", f"{board}; DTB member pinned=regular observed=non-canonical"),
+            ("parent", f"{board}; DTB member pinned=regular observed=non-canonical"),
+            ("long-protected", f"{board}; DTB member pinned=regular observed=non-canonical"),
+            ("ancestor", "DTB member pinned=regular observed=non-directory ancestor"),
+            ("pax", "kernel deb data archive rejected: pax header"),
+            ("sparse", "kernel deb data archive rejected: sparse header"),
+            ("trailer", "kernel deb data archive rejected: nonzero trailer"),
+        ):
+            repinned_deb(f"deb DTB {shape} for {board}", changed_deb(board, shape), diagnostic)
+
+        files, evidence = deb_evidence(changed_deb(board, "long-unrelated"))
+        try:
+            for name, payload in (files | evidence).items():
+                (bundle / name).write_bytes(payload)
+            extended_binding = binding | {"payloads": {k: pin(v) for k, v in files.items()},
+                                          "proof": {k: pin(v) for k, v in evidence.items()}}
+            rc, error = invoke(extended_binding)
+            assert rc == 0 and output.is_file(), error
+        finally:
+            output.unlink(missing_ok=True)
+            for name, payload in original.items():
+                (bundle / name).write_bytes(payload)
+
+        rc, error = invoke()
+        if rc != 0:
+            failures.append(("valid reviewed producer bundle", "successful seal", rc, error.strip()))
+        assert not failures, "\n".join(map(str, failures))
+        with tarfile.open(output, "r:") as archive:
+            stream = archive.extractfile("inventory.json")
+            assert stream is not None
+            sealed = json.load(stream)
+            assert sealed[field] == binding
+            candidate_rows = [row for row in sealed["objects"] if row["kind"] == CANDIDATE_KIND]
+            assert sorted(candidate_rows, key=lambda row: row["sha256"]) == sorted(
+                [pin(original[name]) | {"kind": CANDIDATE_KIND, "urls": []} for name in payloads],
+                key=lambda row: row["sha256"]), "unexpected candidate object closure"
+            for name in payloads:
+                stream = archive.extractfile("objects/" + str(pin(original[name])["sha256"]))
+                assert stream is not None and stream.read() == original[name]
+            for name in CANDIDATE_PROOF:
+                assert "objects/" + str(pin(original[name])["sha256"]) not in archive.getnames()
+            assert not any(row.get("path") for row in sealed["objects"])
+        try:
+            from image_policy import load_policy
+            load_policy(trust)
+        except StreamError:
+            pass
+        else:
+            raise AssertionError("launcher loaded a host-only candidate policy")
+        try:
+            unpack(output, work / "runtime", Identity("fixture", reviewed["board"], reviewed["source_commit"],
+                   reviewed["epoch"], hashlib.sha256(output.read_bytes()).hexdigest()))
+        except StreamError:
+            pass
+        else:
+            raise AssertionError("runtime accepted a host-only candidate capsule")
 
 
 def assert_mismatch_line(diagnostic: str, label: str, pinned_size: int, observed_size: int,
