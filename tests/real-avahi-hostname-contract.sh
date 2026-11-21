@@ -17,15 +17,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIPELINE_DIR="$(cd "${HERE}/.." && pwd)"
 POSTINST_ENTRY="${PIPELINE_DIR}/mkosi/customize/postinst-lib.sh"
 POSTINST_D="${PIPELINE_DIR}/mkosi/customize/postinst.d"
-# D-Bus rejects socket paths over 99 bytes. The suite's disk-backed TMPDIR
-# can already exceed that once /concurrent/device-a/bus is appended. This
-# small, ephemeral fixture needs a bounded path, not the image scratch volume.
-TMP="$(mktemp -d /var/tmp/ceralive-real-avahi.XXXXXX)"
 TAG="$(printf '%06x' "$((BASHPID % 16777215))")"
 
 declare -a NETNS_NAMES=()
 declare -a AVAHI_PGIDS=()
 declare -a DBUS_PGIDS=()
+declare -A OBSERVER_PIDS=()
+declare -A OBSERVER_DRAINS=()
 declare -A PAIR_A_NS=()
 declare -A PAIR_B_NS=()
 declare -A PAIR_SW_NS=()
@@ -47,7 +45,10 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
 
-  local pgid ns
+  local pgid ns root
+  for root in "${!OBSERVER_PIDS[@]}"; do
+    end_avahi_observer "$root"
+  done
   for pgid in "${AVAHI_PGIDS[@]}"; do
     if private_group_live "$pgid"; then
       sudo -n kill -TERM -- "-$pgid" 2>/dev/null || true
@@ -94,18 +95,6 @@ cleanup() {
   (( original_rc != 0 )) && exit "$original_rc"
   exit "$cleanup_rc"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-for command in awk avahi-daemon avahi-set-host-name busctl dbus-daemon flock ip \
-               pgrep setsid sudo timeout unshare; do
-  command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
-done
-sudo -n true 2>/dev/null || fail "passwordless sudo is required for network namespaces"
-[[ -r "$POSTINST_ENTRY" ]] || fail "postinst library not found: $POSTINST_ENTRY"
-[[ -d "$POSTINST_D" ]] || fail "postinst module dir not found: $POSTINST_D"
-
 # postinst-lib.sh is a thin entry that sources the per-concern modules under
 # postinst.d/; the claim script is a heredoc inside one of them. Extract from the
 # WHOLE set so this harness keeps driving the SHIPPED script rather than silently
@@ -168,7 +157,8 @@ connect_pair() {
   sudo -n ip netns exec "$ns_sw" ip link set peer-b master br0
 }
 
-write_device_wrappers() {
+write_device_wrappers() (
+  umask 077
   local root="$1"
   local bin="$root/bin"
   mkdir -p "$bin"
@@ -193,7 +183,11 @@ SH
   cat >"$bin/ip" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-exec sudo -n /usr/bin/ip netns exec "$REAL_NETNS" /usr/bin/ip "$@"
+if [[ -s "$REAL_DEVICE_ROOT/set-hostname.log" ]]; then
+  read -r probes <"$REAL_DEVICE_ROOT/probes"
+  printf '%s\n' "$((probes + 1))" >"$REAL_DEVICE_ROOT/probes"
+fi
+exec "$REAL_SUDO" -n /usr/bin/ip netns exec "$REAL_NETNS" /usr/bin/ip "$@"
 SH
   cat >"$bin/busctl" <<'SH'
 #!/usr/bin/env bash
@@ -202,7 +196,7 @@ args=("$@")
 if [[ "${args[0]:-}" = --system ]]; then
   args=("${args[@]:1}")
 fi
-exec /usr/bin/busctl --address="unix:path=$REAL_AVAHI_BUS" "${args[@]}"
+exec "$REAL_BUSCTL" --address="unix:path=$REAL_AVAHI_BUS" "${args[@]}"
 SH
   cat >"$bin/avahi-resolve" <<'SH'
 #!/usr/bin/env bash
@@ -223,8 +217,19 @@ if [[ "$name" = ceralive && -n "${REAL_START_BARRIER:-}" ]]; then
     sleep 0.02
   done
 fi
-exec sudo -n env DBUS_SYSTEM_BUS_ADDRESS="unix:path=${REAL_AVAHI_BUS}" \
+exec "$REAL_SUDO" -n env DBUS_SYSTEM_BUS_ADDRESS="unix:path=${REAL_AVAHI_BUS}" \
   /usr/bin/avahi-set-host-name "$name"
+SH
+  cat >"$bin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${3:-}" = "$REAL_DEVICE_ROOT/bin/avahi-set-host-name" ]] || exec /usr/bin/timeout "$@"
+started="$EPOCHREALTIME"
+rc=0
+/usr/bin/timeout "$@" || rc=$?
+printf 'AVAHI_SET_HOSTNAME device=%s at=%s name=%s rc=%s started=%s\n' \
+  "$REAL_DEVICE_ID" "$EPOCHREALTIME" "$4" "$rc" "$started" >>"$REAL_DEVICE_ROOT/set-hostname.log"
+exit "$rc"
 SH
   cat >"$bin/systemctl" <<'SH'
 #!/usr/bin/env bash
@@ -232,7 +237,7 @@ set -euo pipefail
 printf 'systemctl %s\n' "$*" >>"$REAL_CALL_LOG"
 SH
   chmod +x "$bin"/*
-}
+)
 
 start_device() {
   local root="$1" ns="$2" seed="$3"
@@ -321,15 +326,107 @@ stop_device() {
     && kill -KILL -- "-$dbus_pgid" 2>/dev/null || true
 }
 
-run_allocator() {
+end_avahi_observer() {
+  local root="$1" observer_pid="${OBSERVER_PIDS[$1]:-}" drain_pid="${OBSERVER_DRAINS[$1]:-}"
+  [[ -n "$observer_pid" ]] || return 0
+  kill -TERM "$observer_pid" 2>/dev/null || true
+  wait "$observer_pid" 2>/dev/null || true
+  if [[ -n "$drain_pid" ]]; then
+    wait "$drain_pid" || true
+  fi
+  unset 'OBSERVER_PIDS[$root]' 'OBSERVER_DRAINS[$root]'
+}
+
+start_avahi_observer() {
+  local root="$1" fd line remaining last=""
+  local deadline=$((SECONDS + 5))
+  # busctl prints its readiness line only after BecomeMonitor is acknowledged.
+  exec {fd}< <(exec timeout -k 1s 165s "$fixture_sudo" -n env LC_ALL=C SYSTEMD_LOG_COLOR=0 \
+    "$fixture_busctl" --no-pager --address="unix:path=$root/bus" \
+    --match="type='signal',sender='org.freedesktop.Avahi',path='/',interface='org.freedesktop.Avahi.Server',member='StateChanged'" \
+    --match="type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.freedesktop.Avahi'" \
+    monitor 2>&1)
+  OBSERVER_PIDS["$root"]=$!
+  while (( (remaining = deadline - SECONDS) > 0 )) && IFS= read -r -t "$remaining" line <&"$fd"; do
+    last="$line"
+    if [[ "$line" = 'Monitoring bus message stream.' ]]; then
+      # Drain continuously; retain only the last few lines on this private bus.
+      awk '{ lines[NR % 48] = substr($0, 1, 512) }
+           END { for (i = NR > 48 ? NR - 47 : 1; i <= NR; i++) print lines[i % 48] }' \
+        <&"$fd" >"$root/observer.log" &
+      OBSERVER_DRAINS["$root"]=$!
+      exec {fd}<&-
+      return 0
+    fi
+  done
+  exec {fd}<&-
+  printf '%s\n' "${last:0:512}" >"$root/observer.log"
+  return 1
+}
+
+report_avahi_failure() {
+  local root="$1" device_id="$2" subscribed="$3" state name probes source
+  state="$(timeout 2s "$fixture_busctl" --address="unix:path=$root/bus" call \
+    org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetState 2>/dev/null)" || state=unavailable
+  name="$(timeout 2s "$fixture_busctl" --address="unix:path=$root/bus" call \
+    org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetHostName 2>/dev/null)" || name=unavailable
+  read -r probes <"$root/probes"
+  tail -n 12 "$root/set-hostname.log"
+  printf 'AVAHI_FINAL device=%s probes=%s state=%s name=%s at=%s\n' \
+    "$device_id" "$probes" "${state#i }" "${name#s }" "$EPOCHREALTIME"
+  printf 'AVAHI_OBSERVER device=%s subscribed=%s\n' "$device_id" "$subscribed"
+  for source in observer.log avahi.log dbus.log; do
+    printf 'AVAHI_LOG device=%s source=%s\n' "$device_id" "$source"
+    tail -n 48 "$root/$source" | cut -c1-512
+  done
+}
+
+prepare_allocator() (
+  umask 077
+  local root="$1"
+  install -m 0600 /dev/null "$root/probes"
+  install -m 0600 /dev/null "$root/set-hostname.log"
+  install -m 0600 /dev/null "$root/observer.log"
+  printf '0\n' >"$root/probes"
+)
+
+observe_allocator() {
+  local root="$1" device_id="$2"
+  prepare_allocator "$root"
+  if ! start_avahi_observer "$root"; then
+    end_avahi_observer "$root"
+    printf 'AVAHI_OBSERVER_ERROR device=%s reason=subscription-not-acknowledged\n' "$device_id" >&2
+    report_avahi_failure "$root" "$device_id" 0
+    return 1
+  fi
+}
+
+collect_allocator() {
+  local root="$1" device_id="$2" pid="$3" rc=0 subscribed=0
+  wait "$pid" || rc=$?
+  [[ -z "${OBSERVER_DRAINS[$root]:-}" ]] || subscribed=1
+  end_avahi_observer "$root"
+  if (( rc != 0 )); then
+    report_avahi_failure "$root" "$device_id" "$subscribed"
+  fi
+  return "$rc"
+}
+
+run_allocator() (
+  umask 077
   local root="$1" ns="$2" device_id="$3" mode="${4:-}" barrier="${5:-}"
+  # The child inherits the parent's acknowledged observers at launch. A
+  # later subscription in the parent cannot satisfy this check.
+  [[ -n "${OBSERVER_DRAINS[$root]:-}" ]] || {
+    printf 'AVAHI_ALLOCATION_ERROR device=%s reason=observer-not-ready-at-launch\n' "$device_id" >&2
+    return 1
+  }
   local -a args=()
   [[ -z "$mode" ]] || args+=("$mode")
-  # MAX_WAIT is the production default (120), not a tighter test cap: the allocator
-  # shares ONE deadline across its random-backoff retries and both candidates, and a
-  # symmetric double-rename legitimately takes several rounds. A 30 s cap failed
-  # intermittently (CONCURRENT phase 7 s typical, 23 s observed) on a correct allocator.
-  sudo -n env \
+  # Use the shipped shared deadline and per-attempt probe cap (both default
+  # to 120). Either can still win: a probe includes I/O and polling time.
+  "$fixture_sudo" -n env -u CERALIVE_HOSTNAME_MAX_WAIT -u CERALIVE_HOSTNAME_MAX_PROBES \
+    REAL_DEVICE_ROOT="$root" REAL_SUDO="$fixture_sudo" REAL_BUSCTL="$fixture_busctl" \
     REAL_CALL_LOG="$root/calls" \
     REAL_SYSTEM_HOSTNAME="$root/system-hostname" \
     REAL_NETNS="$ns" \
@@ -340,24 +437,23 @@ run_allocator() {
     CERALIVE_HOSTNAME_LOCK_FILE="$root/run/hostname.lock" \
     CERALIVE_HOSTS_FILE="$root/hosts" \
     CERALIVE_HOSTNAME_FILE="$root/hostname" \
+    CERALIVE_MACHINE_ID_FILE="${REAL_MACHINE_ID_FILE:-/etc/machine-id}" \
     HOSTNAMECTL_BIN="$root/bin/hostnamectl" \
     HOSTNAME_BIN="$root/bin/hostname" \
     IP_BIN="$root/bin/ip" \
-    TIMEOUT_BIN=/usr/bin/timeout \
+    TIMEOUT_BIN="$root/bin/timeout" \
     SYNC_BIN=/usr/bin/sync \
     AVAHI_SET_HOSTNAME_BIN="$root/bin/avahi-set-host-name" \
     BUSCTL_BIN="$root/bin/busctl" \
     AVAHI_RESOLVE_BIN="$root/bin/avahi-resolve" \
     SYSTEMCTL_BIN="$root/bin/systemctl" \
     CERALIVE_HOSTNAME_MAX_INDEX=8 \
-    CERALIVE_HOSTNAME_MAX_WAIT=120 \
-    CERALIVE_HOSTNAME_MAX_PROBES=60 \
-    CERALIVE_HOSTNAME_POLL_INTERVAL=1 \
+    CERALIVE_HOSTNAME_POLL_INTERVAL="${REAL_POLL_INTERVAL:-1}" \
     CERALIVE_HOSTNAME_STABLE_CHECKS=2 \
     CERALIVE_HOSTNAME_CALL_TIMEOUT=2 \
     CERALIVE_HOSTNAME_LOCK_WAIT=5 \
     bash "$root/ceralive-set-hostname" "${args[@]}"
-}
+)
 
 avahi_state() {
   local root="$1"
@@ -414,30 +510,48 @@ assert_pair_names() {
 }
 
 wait_for_pair() {
-  local pid_a="$1" pid_b="$2" label="$3" rc_a rc_b
-  set +e
-  wait "$pid_a"; rc_a=$?
-  wait "$pid_b"; rc_b=$?
-  set -e
+  local pid_a="$1" pid_b="$2" label="$3" root_a="$4" root_b="$5" rc_a=0 rc_b=0
+  collect_allocator "$root_a" a "$pid_a" || rc_a=$?
+  collect_allocator "$root_b" b "$pid_b" || rc_b=$?
   printf '%s_RC device-a=%s device-b=%s\n' "$label" "$rc_a" "$rc_b"
   WAIT_PAIR_OK=0
   (( rc_a == 0 && rc_b == 0 )) && WAIT_PAIR_OK=1
   return 0
 }
 
+# Offline regression cases source the fixture, not its privileged entrypoint.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+umask 077
+# D-Bus rejects socket paths over 99 bytes, including the device suffix.
+TMP="$(mktemp -d /var/tmp/ceralive-real-avahi.XXXXXX)"
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+for command in awk avahi-daemon avahi-set-host-name busctl dbus-daemon flock ip \
+               pgrep setsid sudo timeout unshare; do
+  command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
+done
+sudo -n true 2>/dev/null || fail "passwordless sudo is required for network namespaces"
+[[ -r "$POSTINST_ENTRY" ]] || fail "postinst library not found: $POSTINST_ENTRY"
+[[ -d "$POSTINST_D" ]] || fail "postinst module dir not found: $POSTINST_D"
 printf 'REAL_AVAHI_CONTRACT=START tmp=%s\n' "$TMP"
+fixture_sudo=sudo
+fixture_busctl=/usr/bin/busctl
 
 create_pair c 1 yes
 CONCURRENT_A="$TMP/concurrent/device-a"
 CONCURRENT_B="$TMP/concurrent/device-b"
 start_device "$CONCURRENT_A" "${PAIR_A_NS[c]}" seed-ca
 start_device "$CONCURRENT_B" "${PAIR_B_NS[c]}" seed-cb
+observe_allocator "$CONCURRENT_A" a
+observe_allocator "$CONCURRENT_B" b
 barrier="$TMP/concurrent/start"
 run_allocator "$CONCURRENT_A" "${PAIR_A_NS[c]}" a "" "$barrier" \
   >"$TMP/concurrent/device-a.out" 2>&1 & pid_a=$!
 run_allocator "$CONCURRENT_B" "${PAIR_B_NS[c]}" b "" "$barrier" \
   >"$TMP/concurrent/device-b.out" 2>&1 & pid_b=$!
-wait_for_pair "$pid_a" "$pid_b" CONCURRENT
+wait_for_pair "$pid_a" "$pid_b" CONCURRENT "$CONCURRENT_A" "$CONCURRENT_B"
 sed 's/^/CONCURRENT_A: /' "$TMP/concurrent/device-a.out"
 sed 's/^/CONCURRENT_B: /' "$TMP/concurrent/device-b.out"
 (( WAIT_PAIR_OK == 1 )) || fail "CONCURRENT allocator failed"
@@ -455,8 +569,10 @@ stop_device "$CONCURRENT_B"
 create_pair p 3 no
 PREOWNED_A="$TMP/preowned/device-a"
 start_device "$PREOWNED_A" "${PAIR_A_NS[p]}" ceralive
+observe_allocator "$PREOWNED_A" a
 run_allocator "$PREOWNED_A" "${PAIR_A_NS[p]}" a >"$TMP/preowned/device-a.out" 2>&1 & pid_a=$!
-set +e; wait "$pid_a"; preowned_rc=$?; set -e
+preowned_rc=0
+collect_allocator "$PREOWNED_A" a "$pid_a" || preowned_rc=$?
 sed 's/^/PREOWNED_A: /' "$TMP/preowned/device-a.out"
 (( preowned_rc == 0 )) \
   || fail "PREOWNED allocator failed — baked-hostname NO_CHANGE not accepted as ownership"
@@ -470,9 +586,11 @@ MERGE_A="$TMP/late-merge/device-a"
 MERGE_B="$TMP/late-merge/device-b"
 start_device "$MERGE_A" "${PAIR_A_NS[m]}" seed-ma
 start_device "$MERGE_B" "${PAIR_B_NS[m]}" seed-mb
+observe_allocator "$MERGE_A" a
+observe_allocator "$MERGE_B" b
 run_allocator "$MERGE_A" "${PAIR_A_NS[m]}" a >"$TMP/late-merge/device-a.boot.out" 2>&1 & pid_a=$!
 run_allocator "$MERGE_B" "${PAIR_B_NS[m]}" b >"$TMP/late-merge/device-b.boot.out" 2>&1 & pid_b=$!
-wait_for_pair "$pid_a" "$pid_b" ISOLATED_BOOT
+wait_for_pair "$pid_a" "$pid_b" ISOLATED_BOOT "$MERGE_A" "$MERGE_B"
 if (( WAIT_PAIR_OK != 1 )); then
   sed 's/^/ISOLATED_A: /' "$TMP/late-merge/device-a.boot.out"
   sed 's/^/ISOLATED_B: /' "$TMP/late-merge/device-b.boot.out"
@@ -516,11 +634,13 @@ expected_restarts=0
 
 : >"$MERGE_A/calls"
 : >"$MERGE_B/calls"
+observe_allocator "$MERGE_A" a
+observe_allocator "$MERGE_B" b
 run_allocator "$MERGE_A" "${PAIR_A_NS[m]}" a reconcile \
   >"$TMP/late-merge/device-a.reconcile.out" 2>&1 & pid_a=$!
 run_allocator "$MERGE_B" "${PAIR_B_NS[m]}" b reconcile \
   >"$TMP/late-merge/device-b.reconcile.out" 2>&1 & pid_b=$!
-wait_for_pair "$pid_a" "$pid_b" RECONCILE
+wait_for_pair "$pid_a" "$pid_b" RECONCILE "$MERGE_A" "$MERGE_B"
 sed 's/^/RECONCILE_A: /' "$TMP/late-merge/device-a.reconcile.out"
 sed 's/^/RECONCILE_B: /' "$TMP/late-merge/device-b.reconcile.out"
 (( WAIT_PAIR_OK == 1 )) || fail "RECONCILE allocator failed"
