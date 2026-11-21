@@ -46,6 +46,8 @@ from vm_process import CATCHABLE_SIGNALS, Cancellation, run
 
 IDENTITY = Identity("fixture", "rock-5b-plus", "a" * 40, 1, "b" * 64)
 FIXTURE_PRIORITY = {"nice": 9, "ionice": "best-effort: prio 7", "cpu_weight": 10}
+FIXTURE_PHASE_SECONDS = 8
+RESISTANT_REAP_SECONDS = 27
 SUCCESS_GUEST_MODES = ("receipt", "validation", "committed", "exit-sync-error", "mask-restore-error",
                        "raising-handler", "late-exit", "unreadable-exit", "shutdown-gap")
 STARTUP_EXITS = {"success": 0, "failure": 37, "signal": -signal.SIGUSR1,
@@ -151,6 +153,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     during = None
     sent = False
     fail_sync = False
+    resistant = None
     if inherited:
         (root / "status-launcher").write_text(pathlib.Path("/proc/self/status").read_text())
 
@@ -330,6 +333,61 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         (root / "sent").write_text(str(time.monotonic()))
         os.kill(os.getpid(), signum)
 
+    def report_phase(phase: bytes) -> None:
+        fd = os.open(root / "phases", os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            assert os.write(fd, phase) == len(phase)
+        finally:
+            os.close(fd)
+
+    def read_control(expected: bytes, timeout: float | None, label: str) -> bytes:
+        try:
+            ready = readable([0], timeout, FIXTURE_PHASE_SECONDS, label)
+        except AssertionError:
+            report_phase(b"D")
+            raise
+        assert ready, f"{label} timed out"
+        observed = os.read(0, 1)
+        assert observed == expected, f"{label}: expected {expected!r}, got {observed!r}"
+        if observed == b"":
+            report_phase(b"F")  # A successful zero-byte read is the EOF evidence.
+        return observed
+
+    terminate = vm.terminate
+
+    def fixture_terminate(process):
+        send_signal = signal.pidfd_send_signal
+        dispatched = {}
+
+        def observe_signal(pidfd, signum):
+            now = time.monotonic()
+            send_signal(pidfd, signum)
+            dispatched.setdefault(signum, now if signum == signal.SIGKILL else time.monotonic())
+
+        with ExitStack() as signals:
+            if process is resistant:
+                signals.enter_context(patch.object(signal, "pidfd_send_signal", observe_signal))
+            terminate(process)
+        if process is resistant:
+            assert time.monotonic() - float((root / "sent").read_text()) < RESISTANT_REAP_SECONDS
+            # A wait status alone can leave a zombie until this launcher exits.
+            try:
+                pathlib.Path(f"/proc/{process.pid}/stat").stat()
+            except FileNotFoundError:
+                assert process.returncode == -signal.SIGKILL
+                # Timestamp after TERM and before KILL; bookkeeping cannot inflate the interval.
+                elapsed = dispatched[signal.SIGKILL] - dispatched[signal.SIGTERM]
+                (root / "term-grace").write_text(str(elapsed))
+                (root / "reap-observer-pid").write_text(str(os.getpid()))
+                report_phase(b"K")
+                # Keep the launcher alive until the test has observed the reap.
+                os.set_blocking(0, False)
+                report_phase(read_control(b"A", FIXTURE_PHASE_SECONDS, "launcher ACK wait"))
+                report_phase(read_control(b"T", FIXTURE_PHASE_SECONDS, "launcher teardown release"))
+                read_control(b"", FIXTURE_PHASE_SECONDS, "parent release EOF")
+            else:
+                report_phase(b"U")
+
     def fault_at(step: str) -> None:
         if fault is None or fault[1] != step or (root / "injected").exists():
             return
@@ -486,13 +544,25 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return returned_json(path, *args, **kwargs)
 
     def poller():
-        epoll = poll_type()
+        epoll = select.epoll() if mode == "ignore" else poll_type()
 
         class Poll:
             def __getattr__(self, name):
                 return getattr(epoll, name)
 
-            def poll(self, *args):
+            def poll(self, timeout=-1, maxevents=-1):
+                if resistant is not None:
+                    ready = epoll.poll(bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "capture poll"),
+                                       maxevents)
+                    if not sent and any(fd == resistant.stdout.fileno() for fd, _flags in ready):
+                        challenge = (root / "readiness-challenge").read_bytes()
+                        ready_byte = os.read(resistant.stdout.fileno(), len(challenge))
+                        if ready_byte != challenge:
+                            report_phase(b"E")
+                        assert ready_byte == challenge, "stand-in exited before readiness or sent a wrong nonce"
+                        cancel()
+                        report_phase(b"C")
+                    return ready
                 if (not fault and not audit_receipts and not pair
                         and startup not in {"success", "failure", "signal"}
                         and not mode.startswith(("stderr-flood:", "probe-invalid:"))
@@ -505,7 +575,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     cancel()
                     if startup and (root / "startup-ready").exists():
                         return []  # The startup matrix targets entry state, not the existing 1s poll bound.
-                return epoll.poll(*args)
+                return epoll.poll(timeout, maxevents)
 
         return Poll()
 
@@ -513,6 +583,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     capture = ImageJob.capture
 
     def fixture_capture(job, process, seconds):
+        nonlocal resistant
+        if mode == "ignore":
+            resistant = process
         if mode.startswith("stderr-flood:"):
             assert process.stderr is None, "launcher received a guest stderr read end"
             children = pathlib.Path("/proc/thread-self/children").read_text().split()
@@ -656,6 +729,10 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         sys.setprofile(terminal_profile)
     with ExitStack() as patches:
         patches.enter_context(patch.object(vm_startup, "verify_startup", fixture_verify))
+        if mode == "ignore":
+            patches.enter_context(fixture_wait_bounds(FIXTURE_PHASE_SECONDS))
+            # image_vm calls boot() in the already-imported vm module.
+            patches.enter_context(patch.object(vm, "terminate", fixture_terminate))
         patches.enter_context(patch.object(
             vm_process, "TERM_GRACE_SECONDS", 0.2 if startup else vm_process.TERM_GRACE_SECONDS))
         patches.enter_context(patch.object(selectors.EpollSelector, "_selector_cls", staticmethod(poller)))
@@ -721,12 +798,72 @@ class FixturePolicy:
     })
 
 
+def bounded_timeout(timeout: float | None, maximum: int, label: str) -> float:
+    assert isinstance(timeout, (int, float)) and 0 <= timeout <= maximum, (
+        f"{label} must have a finite deadline", timeout, maximum)
+    return timeout
+
+
+def readable(fds: list[int], timeout: float | None, maximum: int, label: str) -> list[int]:
+    return select.select(fds, [], [], bounded_timeout(timeout, maximum, label))[0]
+
+
+@contextmanager
+def fixture_wait_bounds(select_maximum: int):
+    """Guard the wait APIs as well as the fixture helpers that usually call them."""
+    raw_select, raw_communicate, raw_wait = select.select, subprocess.Popen.communicate, subprocess.Popen.wait
+    raw_epoll = select.epoll
+
+    class GuardedEpoll:
+        def __init__(self, *args, **kwargs):
+            self._epoll = raw_epoll(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._epoll, name)
+
+        def poll(self, timeout=-1, maxevents=-1):
+            return self._epoll.poll(bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "epoll API wait"),
+                                    maxevents)
+
+    def guarded_select(readers, writers, errors, timeout=None):
+        return raw_select(readers, writers, errors,
+                          bounded_timeout(timeout, select_maximum, "select API wait"))
+
+    def guarded_communicate(process, input=None, timeout=None):
+        return raw_communicate(process, input,
+                               bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "communicate API wait"))
+
+    def guarded_wait(process, timeout=None):
+        return raw_wait(process, bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "Popen.wait API wait"))
+
+    with patch.multiple(select, select=guarded_select, epoll=GuardedEpoll), patch.multiple(
+            subprocess.Popen, communicate=guarded_communicate, wait=guarded_wait):
+        yield
+
+
+def expect_phase(channel: int, launcher_fd: int, phase: bytes, seconds: float | None, label: str) -> bytes:
+    maximum = RESISTANT_REAP_SECONDS if phase == b"K" else FIXTURE_PHASE_SECONDS
+    ready = readable([channel, launcher_fd], seconds, maximum, "lifecycle phase wait")
+    assert ready, f"deadline expired waiting for {label}"
+    assert channel in ready, f"launcher exited before {label}"
+    observed = os.read(channel, 1)
+    assert observed != b"U", "owned child still has a /proc entry after termination (not reaped)"
+    assert observed != b"E", "stand-in exited before readiness"
+    assert observed != b"D", "launcher control wait must have a finite deadline"
+    assert observed == phase, f"unexpected phase {observed!r} while waiting for {label}"
+    return observed
+
+
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
                       blocked: tuple[signal.Signals, ...] = (),
                       ignored: tuple[signal.Signals, ...] = (),
                       entry_setup: str | None = None) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, ExitStack() as phases:
         root = pathlib.Path(tmp)
+        if mode == "ignore":
+            os.mkfifo(root / "phases", 0o600)
+            channel = os.open(root / "phases", os.O_RDWR | os.O_NONBLOCK)
+            phases.callback(os.close, channel)
         capsule = root / "capsule"
         if mode.startswith("pair:"):
             with tarfile.open(capsule, "w") as archive:
@@ -801,7 +938,10 @@ if mode.startswith("startup:"):
         "umask": os.umask(0o077),
     }}))
 def term(_signum, _frame):
-    (root / "term").touch()
+    if mode == "ignore":
+        (root / "term").write_text(str(time.monotonic()))
+    else:
+        (root / "term").touch()
     if mode == "repeat":
         os.kill(os.getppid(), signal.SIGTERM)
     if mode.startswith("startup:"):
@@ -864,6 +1004,13 @@ if mode in (*{SUCCESS_GUEST_MODES!r}, "audit-mutation") or mode.startswith(("fau
 if mode == "slow":
     # Startup has not initialized the guest or installed a TERM handler.
     time.sleep(60)
+if mode == "ignore":
+    # The fixture must not survive a failed cancellation or cleanup.
+    signal.alarm({RESISTANT_REAP_SECONDS + 2 * FIXTURE_PHASE_SECONDS})
+    assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= {RESISTANT_REAP_SECONDS + 2 * FIXTURE_PHASE_SECONDS}
+    readiness = b"R" + os.urandom(16)
+    (root / "readiness-challenge").write_bytes(readiness)
+    assert os.write(1, readiness) == len(readiness)
 while True:
     signal.pause()
 """)
@@ -901,15 +1048,53 @@ signal.pthread_sigmask(signal.SIG_BLOCK, {tuple(map(int, blocked))!r})
 os.execvp(sys.argv[1], sys.argv[1:])
 """
             command = [sys.executable, "-c", setup, *command]
-        with subprocess.Popen(
-            command,
-            env={"PATH": f"{root}:/usr/bin:/bin", "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1"},
-            start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        ) as launcher:
-            seconds = 27 if mode == "ignore" else 8
+        with ExitStack() as streams:
+            launcher = subprocess.Popen(
+                command,
+                env={"PATH": f"{root}:/usr/bin:/bin", "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1"},
+                stdin=subprocess.PIPE if mode == "ignore" else None,
+                start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            if mode == "ignore":
+                # Popen.__exit__ would add an implicit wait without a deadline.
+                for pipe in (launcher.stdin, launcher.stdout, launcher.stderr):
+                    assert pipe is not None
+                    streams.callback(pipe.close)
+            else:
+                streams.enter_context(launcher)
+
+            def communicate(*, timeout: float | None) -> tuple[bytes, bytes]:
+                return launcher.communicate(
+                    timeout=bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "launcher exit wait"))
+
+            seconds = FIXTURE_PHASE_SECONDS
             try:
-                _, stderr = launcher.communicate(timeout=seconds)
+                if mode == "ignore":
+                    launcher_fd = os.pidfd_open(launcher.pid)
+                    phases.callback(os.close, launcher_fd)
+                    # Keep startup and durable receipt I/O out of the child-reap budget.
+                    expect_phase(channel, launcher_fd, b"C", seconds, "selector cancellation")
+                    expect_phase(channel, launcher_fd, b"K", RESISTANT_REAP_SECONDS, "owned child reap")
+                    observer_fd = os.pidfd_open(int((root / "reap-observer-pid").read_text()))
+                    phases.callback(os.close, observer_fd)
+                    pid = (root / "pid").read_text()
+                    assert not pathlib.Path(f"/proc/{pid}/stat").exists(), "owned child was not reaped before teardown"
+                    assert not readable([observer_fd], 0, 0, "launcher liveness probe"), (
+                        "launcher exited before reap acknowledgement")
+                    assert launcher.stdin is not None
+                    assert os.write(launcher.stdin.fileno(), b"A") == 1
+                    expect_phase(channel, observer_fd, b"A", seconds, "launcher ACK consumption")
+                    assert os.write(launcher.stdin.fileno(), b"T") == 1
+                    if expect_phase(channel, observer_fd, b"T", seconds, "launcher T consumption") == b"T":
+                        launcher.stdin.close()  # Only EOF releases the launcher to tear down.
+                    assert launcher.stdin.closed, "parent did not release teardown after observing T consumption"
+                    expect_phase(channel, observer_fd, b"F", seconds, "launcher EOF observation")
+                _, stderr = communicate(timeout=seconds)
+                if mode == "ignore":
+                    assert not readable([channel], 0, 0, "phase channel drain"), "launcher phase left unread"
             except subprocess.TimeoutExpired as error:
+                if mode == "ignore":
+                    raise AssertionError("launcher did not exit after the owned child was reaped") from error
                 assert (root / "sent").exists(), "fixture never delivered cancellation"
                 pid = (root / "pid").read_text()
                 assert pathlib.Path(f"/proc/{pid}").exists()
@@ -929,10 +1114,10 @@ os.execvp(sys.argv[1], sys.argv[1:])
                         except ProcessLookupError:
                             pass
                     try:
-                        launcher.communicate(timeout=3)
+                        communicate(timeout=3)
                     except subprocess.TimeoutExpired:
                         os.killpg(launcher.pid, signal.SIGKILL)
-                        launcher.communicate()
+                        communicate(timeout=3)
 
         directory = root / "returns/fixture/build"
         if mode in ("priority-failure", "priority-floor"):
@@ -1175,10 +1360,16 @@ os.execvp(sys.argv[1], sys.argv[1:])
         elif mode == "shutdown-gap":
             assert (root / "final-sync").exists()
             assert not (root / "handler-ran").exists(), "SIGUSR1 ran before direct exit"
-        else:
+        elif mode != "ignore":
             assert time.monotonic() - float((root / "sent").read_text()) < seconds
+        if mode == "ignore":
+            elapsed = float((root / "term-grace").read_text())
+            minimum = vm_process.TERM_GRACE_SECONDS - 1
+            assert 0 < minimum <= elapsed, f"SIGKILL before TERM grace: {elapsed:.3f}s, need {minimum:g}s"
         if mode in {"term", "ignore", "repeat", "inherited"}:
             assert (root / "term").exists(), "QEMU did not receive TERM"
+        if mode == "ignore":
+            assert float((root / "sent").read_text()) <= float((root / "term").read_text()) <= time.monotonic()
         if blocked or ignored:
             stop_bits = sum(1 << (sig - 1) for sig in vm.STOP_SIGNALS)
             entry_mask, entry_ignored, _ = signal_status(root / "status-launcher")
@@ -1200,7 +1391,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
 
 
 def test_one_term_in_selector_reaps_term_resistant_qemu() -> None:
-    cancelled_fixture("ignore")
+    with fixture_wait_bounds(RESISTANT_REAP_SECONDS):
+        cancelled_fixture("ignore")
 
 
 def test_inherited_blocked_and_ignored_signals_do_not_reach_children() -> None:
