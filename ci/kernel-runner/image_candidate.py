@@ -15,6 +15,7 @@ import sys
 import tarfile
 
 from image_capsule import INPUT_LIMIT
+from image_candidate_deb import check_deb_archive
 from image_stream import StreamError, unique_object
 from vm_process import run as run_gate
 
@@ -203,6 +204,7 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
                  'PIPELINE_DIR="$1"; source "$1/lib/kernel/only.sh"; kernel_family_boards rk3588', "_", str(ROOT))
     if boards.splitlines() != list(BOARDS):
         raise StreamError("measurement-candidate family board set differs from policy")
+    paths = {}
     for target in BOARDS:
         params = {}
         for line in run("bash", str(ROOT / "lib/resolve.sh"), target, "--variant", "default").splitlines():
@@ -211,11 +213,17 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
         if (params["KERNEL_PACKAGES"], params["KERNEL_SOURCE_PACKAGE_VERSION"], params["ARCH"]) != expected:
             raise StreamError("measurement-candidate shipping manifest identity differs from policy")
         dtb_path = f"{params['KERNEL_SOURCE_DTB_DEB_DIR']}/{params['DTB_NAME']}"
-        run("bash", "-euo", "pipefail", "-c",
-            'source "$1/lib/common.sh"; source "$1/lib/kernel/package.sh"; '
-            'shift; validate_built_kernel_deb "$@"',
-            "_", str(ROOT), str(work / candidate.deb), *expected, dtb_path,
-            failure=f"{KIND} kernel deb board check failed: {target}; DTB presence pinned=present observed=unverified")
+        paths[target] = dtb_path.removeprefix("/")
+        try:
+            run("bash", "-euo", "pipefail", "-c",
+                'source "$1/lib/common.sh"; source "$1/lib/kernel/package.sh"; '
+                'shift; validate_built_kernel_deb "$@"',
+                "_", str(ROOT), str(work / candidate.deb), *expected, dtb_path,
+                failure=f"{KIND} kernel deb board check failed: {target}; DTB presence pinned=present observed=unverified")
+        except StreamError:
+            # The producer lists directories differently; report a concrete type when we can.
+            check_deb_archive(work / candidate.deb, {target: paths[target]}, env, require_present=False)
+            raise
         params.pop("KERNEL_VARIANT", None)  # Match the producer's fingerprint input frame.
         observed = run("bash", str(ROOT / "lib/kernel/released.sh"), "--board", target,
                        "--fingerprint-from", str(metadata), extra_env=params)
@@ -223,6 +231,7 @@ def check_identity(work: Path, candidate: Candidate, env: dict[str, str]) -> Non
             prefix = observed[:16] if SHA.fullmatch(observed) else "unavailable"
             raise StreamError(f"{KIND} family fingerprint mismatch; "
                               f"SHA-256 (first 16) pinned={fp[:16]} observed={prefix}")
+    check_deb_archive(work / candidate.deb, paths, env)
 
 
 def stage_candidate(candidate: Candidate, work: Path, data: Path, env: dict[str, str]) -> None:

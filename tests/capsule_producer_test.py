@@ -361,6 +361,108 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
                            proof(receipt | {"commit": absent_commit}, authorization | {"commit": absent_commit}, content),
                            "producer commit is not a local commit", producer_commit=absent_commit)
 
+        def deb_evidence(data: bytes) -> tuple[dict[str, bytes], dict[str, bytes]]:
+            digest = pin(data)["sha256"]
+            files = content | {deb_name: data, "kernel-artifact.json": json.dumps(
+                metadata | {"deb_sha256": digest}).encode()}
+            files["SHA256SUMS"] = sums({k: v for k, v in files.items() if k != "SHA256SUMS"})
+            return files, proof(receipt, authorization | {"deb_sha256": digest}, files)
+
+        def repinned_deb(label: str, data: bytes, diagnostic: str) -> None:
+            files, evidence = deb_evidence(data)
+            coherently_replace(label, files, evidence, diagnostic)
+
+        fixture_deb = bundle / deb_name
+        data_tar = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(fixture_deb)], timeout=30)
+        ar_names = subprocess.check_output(["ar", "t", str(fixture_deb)], text=True, timeout=30).splitlines()
+        control_name, = (name for name in ar_names if name.startswith("control.tar"))
+        for name in ("debian-binary", control_name):
+            (work / name).write_bytes(subprocess.check_output(["ar", "p", str(fixture_deb), name], timeout=30))
+        archive_canary = "password-canary"
+        with tarfile.open(fileobj=io.BytesIO(data_tar)) as source:
+            dtbs = {board: next(member.name for member in source.getmembers() if member.name.endswith("/" + name))
+                    for board, name in (("orange-pi-5-plus", "rk3588-orangepi-5-plus.dtb"),
+                                        ("rock-5b-plus", "rk3588-rock-5b-plus.dtb"))}
+
+        def changed_deb(board: str, shape: str) -> bytes:
+            target = dtbs[board]
+            other = next(name for name in dtbs.values() if name != target)
+            data = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(data_tar)) as source, tarfile.open(
+                    fileobj=data, mode="w", format=tarfile.PAX_FORMAT if shape == "pax" else tarfile.GNU_FORMAT
+            ) as destination:
+                for member in source:
+                    if member.name == target and shape in {"fifo", "symlink", "hardlink", "directory", "device"}:
+                        replacement = tarfile.TarInfo(target)
+                        replacement.type = {
+                            "fifo": tarfile.FIFOTYPE, "symlink": tarfile.SYMTYPE, "hardlink": tarfile.LNKTYPE,
+                            "directory": tarfile.DIRTYPE, "device": tarfile.CHRTYPE,
+                        }[shape]
+                        if shape in {"symlink", "hardlink"}:
+                            replacement.linkname = Path(other).name if shape == "symlink" else other
+                        destination.addfile(replacement)
+                    elif shape == "ancestor" and member.name == target.rsplit("/", 1)[0]:
+                        replacement = tarfile.TarInfo(member.name)
+                        replacement.type = tarfile.SYMTYPE
+                        replacement.linkname = archive_canary
+                        destination.addfile(replacement)
+                    else:
+                        destination.addfile(member, source.extractfile(member) if member.isfile() else None)
+                if shape in {"duplicate", "duplicate-alias", "absolute", "parent", "pax", "sparse",
+                             "long-protected", "long-unrelated"}:
+                    name = target.removeprefix("./")
+                    added = tarfile.TarInfo({
+                        "duplicate": target, "long-protected": "./" + "x" * 110 + "/../" + name,
+                        "long-unrelated": "./usr/lib/modules/" + "x" * 110,
+                        "absolute": "/" + name, "parent": f"./{archive_canary}/../{name}",
+                    }.get(shape, name))
+                    if shape == "pax":
+                        added.pax_headers = {"path": name}
+                    if shape == "sparse":
+                        added.type = tarfile.GNUTYPE_SPARSE
+                    destination.addfile(added)
+            trailer = b"password-canary".ljust(tarfile.BLOCKSIZE, b"\0") if shape == "trailer" else b""
+            (work / "data.tar.xz").write_bytes(lzma.compress(data.getvalue() + trailer))
+            repacked = work / "archive-shape.deb"
+            repacked.unlink(missing_ok=True)
+            subprocess.run(["ar", "rc", repacked.name, "debian-binary", control_name, "data.tar.xz"], cwd=work,
+                           capture_output=True, check=True, timeout=30)
+            return repacked.read_bytes()
+
+        for board in dtbs:
+            for shape in ("fifo", "symlink"):
+                repinned_deb(f"deb DTB {shape} for {board}", changed_deb(board, shape),
+                             f"{board}; DTB member pinned=regular observed={shape}")
+        board = "orange-pi-5-plus"
+        for shape, diagnostic in (
+            ("hardlink", f"{board}; DTB member pinned=regular observed=hardlink"),
+            ("directory", f"{board}; DTB member pinned=regular observed=directory"),
+            ("device", f"{board}; DTB member pinned=regular observed=device"),
+            ("duplicate", f"{board}; DTB member pinned=regular observed=duplicate"),
+            ("duplicate-alias", f"{board}; DTB member pinned=regular observed=duplicate"),
+            ("absolute", f"{board}; DTB member pinned=regular observed=non-canonical"),
+            ("parent", f"{board}; DTB member pinned=regular observed=non-canonical"),
+            ("long-protected", f"{board}; DTB member pinned=regular observed=non-canonical"),
+            ("ancestor", "DTB member pinned=regular observed=non-directory ancestor"),
+            ("pax", "kernel deb data archive rejected: pax header"),
+            ("sparse", "kernel deb data archive rejected: sparse header"),
+            ("trailer", "kernel deb data archive rejected: nonzero trailer"),
+        ):
+            repinned_deb(f"deb DTB {shape} for {board}", changed_deb(board, shape), diagnostic)
+
+        files, evidence = deb_evidence(changed_deb(board, "long-unrelated"))
+        try:
+            for name, payload in (files | evidence).items():
+                (bundle / name).write_bytes(payload)
+            extended_binding = binding | {"payloads": {k: pin(v) for k, v in files.items()},
+                                          "proof": {k: pin(v) for k, v in evidence.items()}}
+            rc, error = invoke(extended_binding)
+            assert rc == 0 and output.is_file(), error
+        finally:
+            output.unlink(missing_ok=True)
+            for name, payload in original.items():
+                (bundle / name).write_bytes(payload)
+
         rc, error = invoke()
         if rc != 0:
             failures.append(("valid reviewed producer bundle", "successful seal", rc, error.strip()))
