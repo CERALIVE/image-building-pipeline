@@ -29,6 +29,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_urls import InputURLError, canonical_url
+from image_stream import StreamError
 from vm_process import run as run_gate
 
 INDEX_LIMIT = 256 * 1024**2
@@ -381,11 +382,22 @@ def serve(directory: Path, *, managed: bool = False) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("copy", "repository", "valid-release", "decompress-index", "serve",
-                                             "serve-managed"))
+                                             "serve-managed", "refuse-measurement-candidate"))
     parser.add_argument("values", nargs="*")
     args = parser.parse_args()
     directory = Path(os.environ["CERALIVE_SEALED_INPUTS"])
     match args.operation:
+        case "refuse-measurement-candidate":
+            from image_policy import read_policy
+
+            try:
+                delivery = read_policy(directory / "inventory.json")
+                trust = read_policy(directory / "trust.json")
+                if ("measurement_candidate" in delivery or "measurement_candidate" in trust
+                        or any(row["kind"] == "measurement-candidate" for row in delivery["objects"])):
+                    raise StreamError("candidate inputs are only valid for explicit measurement")
+            except (KeyError, OSError, StreamError, TypeError, ValueError):
+                raise SealedError("non-measurement build requires a valid candidate-free input inventory") from None
         case "copy":
             url, destination = args.values
             shutil.copyfile(url_object(directory, url), destination)

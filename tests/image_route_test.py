@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pathlib
+import runpy
 import select
 import shlex
 import signal
@@ -37,7 +38,7 @@ import image_verify
 import image_vm
 import vm
 from image_stream import Identity, Member, StreamError, decode, encode, exact_json, verify_sidecar
-from image_capsule import unpack
+from image_capsule import unpack, verification_capsule
 from image_policy import load_policy
 from image_verify import compare_slot
 from image_urls import InputURLError, canonical_url
@@ -583,6 +584,253 @@ def test_installed_kernel_lock_requires_exact_released_bytes_and_origin() -> Non
             assert not changes, changes
 
 
+def test_installed_candidate_lock_requires_exact_bytes_and_candidate_origin() -> None:
+    expected = (KERNEL_PACKAGE, "7.2.0-ceralive9", "arm64")
+    digest = "d" * 64
+    candidate = dict(zip(("name", "version", "arch"), expected, strict=True)) | {
+        "sha256": digest, "origin": "measurement-candidate"}
+    image_verify.check_kernel_lock([candidate], expected, digest, origin="measurement-candidate")
+    for label, packages in (
+        ("missing", []),
+        ("duplicate", [candidate, candidate]),
+        ("extra kernel", [candidate, candidate | {"name": "linux-image-other"}]),
+        ("name", [candidate | {"name": "linux-image-unreviewed"}]),
+        ("version", [candidate | {"version": "7.2.0-ceralive8"}]),
+        ("architecture", [candidate | {"arch": "amd64"}]),
+        ("digest", [candidate | {"sha256": "e" * 64}]),
+        ("released origin", [candidate | {"origin": "ceralive-kernel"}]),
+        ("built origin", [candidate | {"origin": "source-built"}]),
+        ("origin absent", [{key: value for key, value in candidate.items() if key != "origin"}]),
+    ):
+        try:
+            image_verify.check_kernel_lock(packages, expected, digest, origin="measurement-candidate")
+        except StreamError:
+            continue
+        raise AssertionError(f"installed candidate lock accepted {label}")
+    try:
+        image_verify.check_kernel_lock([candidate], expected, digest)
+    except StreamError:
+        return
+    raise AssertionError("released verification accepted a candidate-origin lock")
+
+
+def test_candidate_capsule_requires_independent_approval_on_each_import() -> None:
+    version = "7.2.0-ceralive9"
+    files = {name: name.encode() for name in (f"{KERNEL_PACKAGE}_{version}_arm64.deb", *KERNEL_FILES)}
+
+    def pin(data: bytes) -> dict[str, str | int]:
+        return {"sha256": hashlib.sha256(data).hexdigest(), "length": len(data)}
+
+    def row(data: bytes, kind: str) -> dict:
+        return pin(data) | {"kind": kind, "urls": []}
+
+    policy = {"package": KERNEL_PACKAGE, "version": version, "arch": "arm64",
+              "validated_boards": ["orange-pi-5-plus", "rock-5b-plus"], "input_fingerprint": "1" * 64,
+              "producer_commit": "2" * 40, "candidate_run_id": "123",
+              "payloads": {name: pin(data) for name, data in files.items()},
+              "proof": {name: pin(name.encode()) for name in (
+                  "candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")}}
+    source = row(b"source", "source-bundle")
+    device = row(b"device", "public-trust")
+    candidate = [row(data, "measurement-candidate") for data in files.values()]
+    data_by_id = {pin(data)["sha256"]: data for data in (b"source", b"device", *files.values())}
+    inventory = {"schema": 1, "source_commit": IDENTITY.commit, "epoch": IDENTITY.epoch, "board": IDENTITY.board,
+                 "source_bundle": source["sha256"], "device_root": device["sha256"], "repositories": {},
+                 "fetched_at": "2026-01-01T00:00:00Z", "measurement_candidate": policy,
+                 "objects": [source, device, *candidate]}
+
+    def pack(delivery: dict) -> bytes:
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:") as archive:
+            for name, data in (("inventory.json", json.dumps(delivery).encode()), *(
+                    ("objects/" + digest, data) for digest, data in data_by_id.items())):
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        return payload.getvalue()
+
+    with tempfile.TemporaryDirectory() as temporary:
+        work = pathlib.Path(temporary)
+        capsule = work / "capsule.tar"
+
+        def import_delivery(payload: bytes, approval: dict | None, name: str):
+            capsule.write_bytes(payload)
+            capsule.chmod(0o600)
+            identity = Identity(IDENTITY.attempt, IDENTITY.board, IDENTITY.commit, IDENTITY.epoch,
+                                hashlib.sha256(payload).hexdigest())
+            return unpack(capsule, work / name, identity, approved_candidate=approval)
+
+        valid = pack(inventory)
+        imported = import_delivery(valid, policy, "measure")
+        assert {item.sha256 for item in imported.objects if item.kind == "measurement-candidate"} == {
+            pin(data)["sha256"] for data in files.values()}
+        returned = work / "returns"
+        returned.mkdir()
+        verifier = io.BytesIO()
+        verification_capsule(io.BytesIO(valid), returned, verifier)
+        verifier.seek(0)
+        with tarfile.open(fileobj=verifier, mode="r:") as archive:
+            assert {member.name for member in archive} == {
+                "inventory.json", *("objects/" + key for key in data_by_id)
+            }, "verifier capsule must carry all five original candidate objects"
+        imported = import_delivery(verifier.getvalue(), policy, "verify")
+        assert all((imported.directory / pin(data)["sha256"]).read_bytes() == data for data in files.values())
+        for name in policy:
+            invalid = inventory | {"measurement_candidate": policy | {name: None}}
+            try:
+                import_delivery(pack(invalid), policy, "invalid-" + name)
+            except StreamError:
+                continue
+            raise AssertionError(f"capsule accepted wrong approval field: {name}")
+        for index, (delivery, approved) in enumerate((
+            (inventory, None),
+            ({key: value for key, value in inventory.items() if key != "measurement_candidate"}, policy),
+            (inventory | {"objects": [source, device, candidate[0] | {"kind": "deb"}, *candidate[1:]]}, policy),
+            (inventory | {"objects": [source, device, candidate[0] | {"length": 1}, *candidate[1:]]}, policy),
+            (inventory | {"objects": [source, device, candidate[0] | {
+                "urls": ["https://apt.ceralive.tv/pool/candidate.deb"]}, *candidate[1:]]}, policy),
+        )):
+            try:
+                import_delivery(pack(delivery), approved, f"invalid-boundary-{index}")
+            except StreamError:
+                continue
+            raise AssertionError(f"capsule accepted invalid delivery boundary case {index}")
+
+
+def test_guest_stages_only_controller_approved_candidate_and_records_exact_lock() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        inputs = root / "inputs"
+        inputs.mkdir()
+        artifact = root / "fixture"
+        version = "7.2.0-ceralive9"
+        deb_name = f"{KERNEL_PACKAGE}_{version}_arm64.deb"
+        subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", 'ROOT="$1"; WORK="$2"; '
+             'source "$ROOT/tests/lib/kernel-release-fixtures.sh"; kernel_test_artifact "$3" "$4" "$ROOT"',
+             "_", str(ROOT), temporary, str(artifact), version],
+            check=True, capture_output=True, timeout=30,
+        )
+        metadata = json.loads((artifact / "kernel-artifact.json").read_text())
+        pins = {}
+        for name in (deb_name, *KERNEL_FILES):
+            body = (artifact / name).read_bytes()
+            digest = hashlib.sha256(body).hexdigest()
+            pins[name] = {"sha256": digest, "length": len(body)}
+            payload = inputs / digest
+            payload.write_bytes(body)
+            payload.chmod(0o600)
+        approval = {key: metadata[key] for key in (
+            "package", "version", "arch", "validated_boards", "input_fingerprint")}
+        approval |= {"payloads": pins, "producer_commit": "a" * 40, "candidate_run_id": "123",
+                     "proof": {name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "length": len(name)}
+                               for name in ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")}}
+        trust = {"measurement_candidate": approval}
+        delivery = {"board": IDENTITY.board, "source_commit": IDENTITY.commit, "epoch": IDENTITY.epoch,
+                    "measurement_candidate": approval,
+                    "objects": [pin | {"kind": "measurement-candidate", "urls": []} for pin in pins.values()]}
+        (inputs / "trust.json").write_text(json.dumps(trust))
+        (inputs / "inventory.json").write_text(json.dumps(delivery))
+        (inputs / "trust.json").chmod(0o600)
+        (inputs / "inventory.json").chmod(0o600)
+        job = root / "controller-job"
+        selected_job = {"schema": 1, "operation": "measure", "identity": asdict(IDENTITY), "trust": trust}
+        job.write_text(json.dumps(selected_job))
+        job.chmod(0o600)
+        helper = runpy.run_path(str(ROOT / "lib/measurement-candidate.py"))["stage"]
+        identity = (KERNEL_PACKAGE, version, "arm64")
+        staging = root / "staging"
+        staging.mkdir()
+        with patch.dict(os.environ, {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}):
+            try:
+                helper(inputs, IDENTITY.board, identity, staging / "local")
+            except StreamError:
+                pass
+            else:
+                raise AssertionError("local policy and inventory admitted a candidate without a controller")
+            with patch.dict(helper.__globals__, {"JOB": job, "INPUTS": inputs}):
+                assert helper(inputs, IDENTITY.board, identity, staging / "debs") == pins[deb_name]["sha256"]
+                assert {file.name: file.read_bytes() for file in (staging / "debs").iterdir()} == {
+                    name: (artifact / name).read_bytes() for name in pins}
+                for label, altered in (
+                    ("probe mode", selected_job | {"operation": "probe"}),
+                    ("full mode", selected_job | {"operation": "full"}),
+                    ("wrong source", selected_job | {"identity": asdict(IDENTITY) | {"commit": "b" * 40}}),
+                    ("wrong epoch", selected_job | {"identity": asdict(IDENTITY) | {"epoch": IDENTITY.epoch + 1}}),
+                    ("wrong board", selected_job | {"identity": asdict(IDENTITY) | {"board": "orange-pi-5-plus"}}),
+                    ("wrong schema type", selected_job | {"schema": True}),
+                    ("different producer", selected_job | {"trust": {"measurement_candidate":
+                        approval | {"producer_commit": "b" * 40}}}),
+                ):
+                    job.write_text(json.dumps(altered))
+                    try:
+                        helper(inputs, IDENTITY.board, identity, staging / "unapproved")
+                    except StreamError:
+                        assert not (staging / "unapproved").exists()
+                    else:
+                        raise AssertionError(f"stager accepted {label}")
+                job.write_text(json.dumps(selected_job | {"operation": "verify"}))
+                assert helper(inputs, IDENTITY.board, identity, staging / "verifier") == pins[deb_name]["sha256"]
+                for wrong_manifest in ((KERNEL_PACKAGE, "7.2.0-ceralive8", "arm64"),
+                                       ("linux-image-7.2.1-ceralive-rk3588", version, "arm64"),
+                                       (KERNEL_PACKAGE, version, "amd64")):
+                    try:
+                        helper(inputs, IDENTITY.board, wrong_manifest, staging / "wrong-manifest")
+                    except StreamError as error:
+                        assert str(error) == "candidate package differs from the shipping manifest", error
+                        assert not (staging / "wrong-manifest").exists()
+                    else:
+                        raise AssertionError(f"stager ignored resolved manifest tuple {wrong_manifest}")
+                for name, pin in pins.items():
+                    path = inputs / pin["sha256"]
+                    body = path.read_bytes()
+                    path.write_bytes(body + b"changed")
+                    try:
+                        helper(inputs, IDENTITY.board, identity, staging / "tampered")
+                    except StreamError:
+                        assert not (staging / "tampered").exists()
+                    else:
+                        raise AssertionError(f"admitted altered {name}")
+                    finally:
+                        path.write_bytes(body)
+        receipt = dict(zip(("name", "version", "arch"), identity, strict=True)) | {
+            "sha256": pins[deb_name]["sha256"], "origin": "measurement-candidate"}
+        receipts = staging / "packages-lock"
+        receipts.mkdir()
+        for name, body in (("debian.dates", "stable\t2026-01-01\n"),
+                           ("measurement-candidate.jsonl", json.dumps(receipt) + "\n")):
+            path = receipts / name
+            path.write_text(body)
+            path.chmod(0o600)
+        status = root / "var/lib/dpkg/status"
+        status.parent.mkdir(parents=True)
+        status.write_text(f"Package: {KERNEL_PACKAGE}\nVersion: {version}\nArchitecture: arm64\n"
+                          "Status: install ok installed\n")
+        merge = runpy.run_path(str(ROOT / "lib/packages-lock.py"))["merge"]
+        lock = root / "lock.json"
+        merge(root, staging, lock, "123", "2026-01-01", "", "", measurement_candidate=True)
+        assert json.loads(lock.read_text())["packages"] == [receipt]
+        staged_deb = staging / "debs" / deb_name
+        original = staged_deb.read_bytes()
+        staged_deb.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        try:
+            merge(root, staging, root / "invalid-lock.json", "123", "2026-01-01", "", "",
+                  measurement_candidate=True)
+        except merge.__globals__["LockError"] as error:
+            assert "staged candidate does not match its lock receipt" in str(error), error
+            assert not (root / "invalid-lock.json").exists()
+        else:
+            raise AssertionError("lock writer accepted a different staged candidate digest")
+        finally:
+            staged_deb.write_bytes(original)
+        try:
+            merge(root, staging, lock, "123", "2026-01-01", "", "")
+        except merge.__globals__["LockError"]:
+            pass
+        else:
+            raise AssertionError("the normal lock writer accepted a candidate receipt")
+
+
 def rejected(payload: bytes, expected: Identity = IDENTITY) -> None:
     with tempfile.TemporaryDirectory() as directory:
         try:
@@ -876,7 +1124,8 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
     spawn, waitpid = subprocess.Popen, os.waitpid
     for code, fault in ((8, "normal"), (4, "normal"), (1, "normal"), (0, "normal"),
                         (8, "premature-reap"), (8, "ignored-during-spawn"), (0, "echild"),
-                        (8, "inherited-ignore"), (0, "wrong-receipt-version"), (0, "wrong-returned-metadata")):
+                        (8, "inherited-ignore"), (0, "wrong-receipt-version"), (0, "wrong-returned-metadata"),
+                        (0, "candidate"), (0, "candidate-wrong-stage-digest"), (0, "candidate-wrong-metadata")):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             home = root / "home"
@@ -905,11 +1154,25 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
             trust["kernel_metadata"] = kernel_metadata_fixture(root, "7.2.0-ceralive9")
             for name, digest in trust["kernel_metadata"].items():
                 (root / ("kernel.SHA256SUMS" if name == "SHA256SUMS" else name)).write_bytes((root / digest).read_bytes())
-            if fault == "wrong-returned-metadata":
+            if fault.startswith("candidate"):
+                pins = {name: {"sha256": digest} for name, digest in trust.pop("kernel_metadata").items()}
+                pins[f"{KERNEL_PACKAGE}_7.2.0-ceralive9_arm64.deb"] = {"sha256": "d" * 64}
+                trust["measurement_candidate"] = {"payloads": pins}
+            if fault in ("wrong-returned-metadata", "candidate-wrong-metadata"):
                 (root / "resolved.config").write_bytes(b"unapproved replacement")
             seen, reaped = [], []
 
             def start(args, **options):
+                if args[0] == "python3" and args[1].endswith("/measurement-candidate.py"):
+                    seen.append("candidate-stage")
+                    assert options["env"]["CERALIVE_BUILD_PURPOSE"] == "rootfs-measurement"
+                    assert args[2:-1] == ["stage", str(root), IDENTITY.board, KERNEL_PACKAGE,
+                                          "7.2.0-ceralive9", "arm64"]
+                    destination = pathlib.Path(args[-1])
+                    destination.mkdir()
+                    (destination / "built-modules.txt").write_bytes((root / "built-modules.txt").read_bytes())
+                    digest = "e" if fault == "candidate-wrong-stage-digest" else "d"
+                    return spawn(["/usr/bin/printf", "%s\n", digest * 64], **options)
                 if "slot_reserve_assert_ext4" in " ".join(args):
                     seen.append("reserve")
                     raise ReserveReached
@@ -952,7 +1215,7 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                         image_verify.verify(ROOT, capsule, {"build_identity": asdict(IDENTITY),
                                                            "artifacts": artifacts, "trust": trust})
                     except ReserveReached:
-                        assert (code, fault) == (0, "normal"), (code, fault, "unverified success")
+                        assert code == 0 and fault in ("normal", "candidate"), (code, fault, "unverified success")
                     except subprocess.CalledProcessError as error:
                         assert fault in ("normal", "inherited-ignore") and error.returncode == code != 0
                     except ChildStatusError as error:
@@ -962,6 +1225,8 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                         assert (fault, str(error)) in (
                             ("wrong-receipt-version", "returned measurement kernel version differs from approved source"),
                             ("wrong-returned-metadata", "returned kernel metadata differs from independently selected release"),
+                            ("candidate-wrong-stage-digest", "candidate verifier staged different kernel bytes"),
+                            ("candidate-wrong-metadata", "returned kernel metadata differs from independently selected candidate"),
                         )
                     else:
                         raise AssertionError("verifier returned before checking reserve")
@@ -970,8 +1235,13 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
             finally:
                 sys.path[:] = before_path
                 signal.signal(signal.SIGCHLD, inherited)
-            assert seen == ([] if fault in ("wrong-receipt-version", "wrong-returned-metadata") else
-                            ["e2fsck", "reserve"] if (code, fault) == (0, "normal") else ["e2fsck"])
+            expected = {
+                "wrong-receipt-version": [], "wrong-returned-metadata": [],
+                "candidate": ["candidate-stage", "e2fsck", "reserve"],
+                "candidate-wrong-stage-digest": ["candidate-stage"],
+                "candidate-wrong-metadata": ["candidate-stage"],
+            }
+            assert seen == expected.get(fault, ["e2fsck", "reserve"] if (code, fault) == (0, "normal") else ["e2fsck"])
 
 
 def test_guest_gate_refuses_ignored_sigchld_before_spawn() -> None:
@@ -1191,11 +1461,15 @@ def test_real_guest_probe_emits_only_the_frame_for_its_outcome() -> None:
                 if error:
                     raise OSError(error, "fixture TCP outcome")
 
+            def unpack_probe(_path, output, _identity, *, approved_candidate):
+                assert approved_candidate is None
+                output.mkdir()
+
             paths = {"/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw": request,
                      "/dev/virtio-ports/ceralive-artifacts": wire}
             with patch.object(image_guest, "HOME", root / "guest"), \
                     patch.object(image_guest, "Path", side_effect=lambda p: paths.get(p, pathlib.Path(p))), \
-                    patch.object(image_guest, "unpack", side_effect=lambda _p, output, _i: output.mkdir()), \
+                    patch.object(image_guest, "unpack", side_effect=unpack_probe), \
                     patch.object(image_guest, "source_checkout", return_value=root / "source"), \
                     patch.object(image_guest, "command", return_value=route), \
                     patch.object(image_guest.socket, "socket") as factory:
@@ -1267,7 +1541,8 @@ def test_measure_checks_loaded_platform_config_and_returns_safe_failure_frame() 
                 paths = {"/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive/image/raw": request,
                          "/dev/virtio-ports/ceralive-artifacts": wire}
 
-                def unpack_builder(_path, output, _identity):
+                def unpack_builder(_path, output, _identity, *, approved_candidate):
+                    assert approved_candidate is None
                     output.mkdir()
                     (output / "data").write_bytes(b"fixture keyring and source")
                     return SimpleNamespace(directory=output, board=IDENTITY.board, device_root="data",
@@ -1900,7 +2175,7 @@ def test_terminal_manifest_rejects_every_wrong_typed_field() -> None:
 def test_released_measurement_claims_require_independent_expected_values() -> None:
     """Receipt shape alone must not authorize a different release, kernel or reserve."""
     failures = []
-    for revision in (8, 9):
+    for revision, origin in ((8, "ceralive-kernel"), (9, "ceralive-kernel"), (9, "measurement-candidate")):
         kernel = (KERNEL_PACKAGE, f"7.2.0-ceralive{revision}", "arm64")
         root = "d" * 64
         members = tuple(Member(name, 1, "a" * 64) for name in (
@@ -1936,7 +2211,12 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
                 "candidate_consumers": {"amdgpu": [], "nvidia": ["nouveau"] if revision == 8 else []},
                 "nouveau_present": revision == 8}, modules) for label in reserves]}
         lock = dict(zip(("name", "version", "arch"), kernel, strict=True)) | {
-            "sha256": "e" * 64, "origin": "ceralive-kernel"}
+            "sha256": "e" * 64, "origin": origin}
+        evidence = image_vm.ReleaseEvidence(kernel, "e" * 64, metadata, origin)
+        candidate = evidence if origin == "measurement-candidate" else None
+        opposite_origin = "ceralive-kernel" if candidate else "measurement-candidate"
+        if candidate:
+            verifier["kernel"] = dict(lock)
         userspace = {"name": "base-files", "version": "13", "arch": "arm64",
                      "sha256": "f" * 64, "origin": "debian:stable"}
         lock_record = {"built_at": "2026-11-21T00:00:00Z", "source_date_epoch": IDENTITY.epoch,
@@ -1946,10 +2226,12 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
             image_vm.measurement_stages(row, IDENTITY, root, members, kernel_version=kernel[1], validity=metadata)
 
         def verifier_check(row):
-            image_vm.validate_verification(row, IDENTITY, inventory, modules, policy, reserves=reserves)
+            image_vm.validate_verification(row, IDENTITY, inventory, modules, policy, reserves=reserves,
+                                           candidate=candidate)
 
         def lock_check(row):
-            image_verify.check_kernel_lock(image_verify.checked_lock(row, IDENTITY.epoch), kernel, "e" * 64)
+            image_verify.check_kernel_lock(image_verify.checked_lock(row, IDENTITY.epoch, origin=origin),
+                                           kernel, "e" * 64, origin=origin)
 
         for label, check, record in (
             ("measurement", measurement_check, measurement), ("verifier", verifier_check, verifier),
@@ -1998,7 +2280,7 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
                 continue
             failures.append((revision, "measurement", key, "substitution accepted"))
         for field, value in (("name", "linux-image-foreign"), ("version", "7.2.0-ceralive7"), ("arch", "amd64"),
-                             ("sha256", "f" * 64), ("origin", "measurement-candidate")):
+                             ("sha256", "f" * 64), ("origin", opposite_origin)):
             try:
                 lock_check(lock_record | {"packages": [lock | {field: value}]})
             except StreamError:
@@ -2045,7 +2327,6 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
                 path = artifacts / name
                 path.write_bytes(body)
                 path.chmod(0o600)
-            evidence = image_vm.ReleaseEvidence(kernel, "e" * 64, metadata)
             assert image_vm.verify_released_receipts(artifacts, digests, IDENTITY, root, evidence) == reserves
             for name, label, body in (
                 ("resolved.json", "resolver package", json.dumps(resolved | {"KERNEL_PACKAGES": "other"}).encode()),
@@ -2053,8 +2334,9 @@ def test_released_measurement_claims_require_independent_expected_values() -> No
                     resolved | {"KERNEL_SOURCE_PACKAGE_VERSION": "7.2.0-ceralive7"}).encode()),
                 ("resolved.json", "resolver arch", json.dumps(resolved | {"ARCH": "amd64"}).encode()),
                 ("rootfs_a.reserve", "changed reserve bytes", body_by_file["rootfs_b.reserve"]),
-                ("packages.lock.json", "lock origin", json.dumps(
-                    lock_record | {"packages": [lock | {"origin": "foreign-release"}]}).encode()),
+                ("packages.lock.json", "lock origin", json.dumps(lock_record | {"packages": [
+                    lock | {"origin": opposite_origin if candidate else "foreign-release"}]}).encode().ljust(
+                        len(body_by_file["packages.lock.json"]))),
                 ("packages.lock.json", "lock kernel digest", json.dumps(
                     lock_record | {"packages": [lock | {"sha256": "f" * 64}]}).encode()),
                 ("measurement.json", "host kernel binding", json.dumps(

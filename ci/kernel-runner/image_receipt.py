@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
@@ -14,6 +15,7 @@ import tarfile
 from tempfile import TemporaryDirectory
 from typing import BinaryIO
 
+from image_candidate_policy import FIELD, INPUT_LIMIT, KIND, parse_approval
 from image_capsule import object_id
 from image_stream import Identity, StreamError, exact_json, unique_object
 
@@ -23,11 +25,12 @@ class ReleaseEvidence:
     kernel: tuple[str, str, str]
     deb_sha256: str
     validity: dict
+    origin: str = "ceralive-kernel"
 
 
 def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: Path,
                       checkpoint: Callable[[], None]) -> ReleaseEvidence:
-    """Reauthenticate public metadata without opening an archive-supplied pathname."""
+    """Reauthenticate public metadata and check the independently selected kernel."""
     scripts = runpy.run_path(str(Path(__file__).resolve().parents[2] / "lib/sealed-inputs.py"))
     try:
         with tarfile.open(fileobj=file, mode="r:") as archive, TemporaryDirectory(
@@ -48,19 +51,35 @@ def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: P
                     or any(type(repo) is not dict for repo in inventory["repositories"].values())
                     or not exact_json([inventory["source_commit"], inventory["epoch"], inventory["board"]],
                                [identity.commit, identity.epoch, identity.board])
-                    or not trust["repositories"] or inventory["repositories"].keys() != trust["repositories"].keys()
-                    or "measurement_candidate" in inventory
-                    or any(row["kind"] == "measurement-candidate" for row in inventory["objects"])):
+                    or not trust["repositories"] or inventory["repositories"].keys() != trust["repositories"].keys()):
                 raise StreamError("invalid released capsule identity")
-            kernel_object = object_id(trust["kernel_metadata"]["kernel-artifact.json"])
-            expected = {kernel_object: ("kernel-metadata", 16 * 1024**2)}
+            rows = inventory["objects"]
+            candidate_rows = [row for row in rows if row["kind"] == KIND]
+            approval = parse_approval(trust[FIELD]) if FIELD in trust else None
+            if approval is None:
+                if FIELD in inventory or candidate_rows:
+                    raise StreamError("invalid released capsule identity")
+                kernel_object = object_id(trust["kernel_metadata"]["kernel-artifact.json"])
+                expected = {kernel_object: ("kernel-metadata", 16 * 1024**2)}
+            else:
+                pins = approval["payloads"]
+                if ("kernel_metadata" in trust or identity.board not in approval["validated_boards"]
+                        or not exact_json(inventory.get(FIELD), approval)
+                        or any(row["kind"] == "kernel-metadata" for row in rows)
+                        or len(candidate_rows) != len(pins)
+                        or any(sum(exact_json(row, pin | {"kind": KIND, "urls": []}) for row in candidate_rows) != 1
+                               for pin in pins.values())):
+                    raise StreamError("candidate capsule differs from independently approved policy")
+                expected = {pin["sha256"]: (KIND, INPUT_LIMIT) for pin in pins.values()}
             for repo in inventory["repositories"].values():
                 for field, kind, limit in (("inrelease", "apt-metadata", 16 * 1024**2),
                                            ("index", "apt-metadata", 256 * 1024**2),
                                            ("keyring", "apt-metadata", 16 * 1024**2)):
-                    expected.setdefault(object_id(repo[field]), (kind, limit))
-            objects = {row["sha256"]: row for row in inventory["objects"]}
-            if len(objects) != len(inventory["objects"]):
+                    digest = object_id(repo[field])
+                    if expected.setdefault(digest, (kind, limit))[0] != kind:
+                        raise StreamError("capsule repository object overlaps a kernel input")
+            objects = {row["sha256"]: row for row in rows}
+            if len(objects) != len(rows):
                 raise StreamError("duplicate capsule evidence object")
             for digest, (kind, limit) in expected.items():
                 checkpoint()
@@ -71,17 +90,23 @@ def released_evidence(file: BinaryIO, identity: Identity, trust: dict, parent: P
                         or not entry.isfile() or entry.issparse()):
                     raise StreamError("invalid released capsule evidence object")
                 observed = hashlib.sha256()
-                with archive.extractfile(entry) as stream, (work / digest).open("xb") as output:
+                with archive.extractfile(entry) as stream, (
+                        nullcontext() if kind == KIND else (work / digest).open("xb")) as output:
                     while chunk := stream.read(1024 * 1024):
                         checkpoint()
                         observed.update(chunk)
-                        output.write(chunk)
+                        if output is not None:
+                            output.write(chunk)
                 if observed.hexdigest() != digest:
                     raise StreamError("released capsule evidence digest mismatch")
             (work / "inventory.json").write_bytes(raw)
             (work / "trust.json").write_text(json.dumps(trust))
             scripts["mirror_validities"](work, purpose="rootfs-measurement")
             validity = json.loads((work / "metadata-validity.json").read_text(), object_pairs_hook=unique_object)
+            if approval is not None:
+                package, version, arch = (approval[key] for key in ("package", "version", "arch"))
+                deb = approval["payloads"][f"{package}_{version}_{arch}.deb"]
+                return ReleaseEvidence((package, version, arch), deb["sha256"], validity, KIND)
             kernel = json.loads((work / kernel_object).read_text(), object_pairs_hook=unique_object)
             package, version, arch = (kernel[field] for field in ("package", "version", "arch"))
             if (type(package) is not str or type(version) is not str or arch != "arm64"

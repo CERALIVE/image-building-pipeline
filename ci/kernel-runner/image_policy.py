@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import re
 from urllib.parse import urlsplit
 
 from image_capsule import object_id, original_url
+from image_candidate_policy import FIELD, parse_approval
 from image_stream import StreamError, checked_open, retry_check, unique_object
 
 
@@ -113,6 +114,17 @@ def archive_policies(rows: dict, client_origins: Collection[str] = ()) -> dict[s
 
 def load_policy(path: Path, client_origins: Collection[str] = ()) -> PublicPolicy:
     return parse_policy(read_policy(path), client_origins)
+
+
+def load_job_trust(path: Path, *, measurement: bool) -> dict:
+    """Only an explicit measurement job can carry a path-free candidate approval."""
+    row = read_policy(path)
+    if not measurement or FIELD not in row:
+        return asdict(parse_policy(row, ()))
+    candidate = parse_approval(row.pop(FIELD))
+    trust = asdict(parse_policy(row, (), candidate_sealing=True))
+    trust.pop("kernel_metadata")
+    return trust | {FIELD: candidate}
 
 
 def read_policy(path: Path) -> dict:

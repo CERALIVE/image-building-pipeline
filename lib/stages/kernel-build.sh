@@ -21,7 +21,33 @@
 # ---------------------------------------------------------------------------
 stage_kernel_build() {
   local -a reuse=()
-  if [[ "${DRY_RUN:-0}" != 1 && "${kernel_from_source}" == 1 ]]; then
+  if [[ "${DRY_RUN:-0}" != 1 && "${kernel_from_source}" == 1 &&
+        "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement && -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    local kernel_mode
+    kernel_mode="$(python3 "${HERE}/measurement-candidate.py" mode "${CERALIVE_SEALED_INPUTS}" "${board}")" \
+      || die "sealed measurement kernel approval rejected"
+    if [[ "${kernel_mode}" == measurement-candidate ]]; then
+      local digest candidate_params candidate_name="${KERNEL_PACKAGES}_${KERNEL_SOURCE_PACKAGE_VERSION}_${ARCH}.deb"
+      digest="$(python3 "${HERE}/measurement-candidate.py" stage "${CERALIVE_SEALED_INPUTS}" "${board}" \
+        "${KERNEL_PACKAGES}" "${KERNEL_SOURCE_PACKAGE_VERSION}" "${ARCH}" "${kernel_build_dir}")" \
+        || die "sealed measurement kernel staging failed"
+      mkdir -p "${staging}/packages-lock"
+      python3 - "${KERNEL_PACKAGES}" "${KERNEL_SOURCE_PACKAGE_VERSION}" "${ARCH}" "${digest}" \
+        >"${staging}/packages-lock/measurement-candidate.jsonl" <<'PY'
+import json, sys
+name, version, arch, digest = sys.argv[1:]
+print(json.dumps(dict(name=name, version=version, arch=arch, sha256=digest, origin="measurement-candidate")))
+PY
+      [[ -f "${kernel_build_dir}/${candidate_name}" ]] || die "measurement candidate staging is incomplete"
+      candidate_params="$("${RESOLVE_SH}" "${board}" --variant "${variant}" --kernel-apt)" \
+        || die "measurement candidate manifest resolution failed"
+      eval "${candidate_params}"
+      export CERALIVE_KERNEL_SOURCE_SUPPRESSED_PKGS="${KERNEL_SOURCE_SUPPRESSED_PACKAGES}"
+      kernel_origin=measurement-candidate
+    fi
+  fi
+  if [[ "${DRY_RUN:-0}" != 1 && "${kernel_from_source}" == 1 &&
+        "${kernel_origin:-}" != measurement-candidate ]]; then
     local selected="" params
     if [[ -f "${staging}/packages-lock/fetch.jsonl" ]]; then
       selected="$(python3 - "${staging}/packages-lock/fetch.jsonl" "${KERNEL_PACKAGES}" "${KERNEL_SOURCE_PACKAGE_VERSION}" "${staging}/debs" <<'PY'
@@ -53,7 +79,7 @@ PY
       die "kernel_not_on_apt: production images never compile a kernel"
     fi
   fi
-  if [[ "${kernel_from_source}" == "1" ]]; then
+  if [[ "${kernel_from_source}" == "1" && "${kernel_origin:-}" != measurement-candidate ]]; then
     if (( ${#reuse[@]} )); then
       log_info "[2b/9] reusing released kernel artifact (variant '${KERNEL_VARIANT:-${variant}}') → ${kernel_build_dir}"
     else

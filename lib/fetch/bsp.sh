@@ -28,6 +28,12 @@ bsp_fetch_kernel() {
     || die "kernel_origin_mismatch: invalid platform kernel identity"
   local index="${_FIRST_PARTY_INDEX:-}" record rc=0 filename digest resolved url
   [[ -n "${index}" ]] || index="$(debcache_apt_index "${debs}/.apt-state-firstparty")"
+  if [[ "${CERALIVE_BUILD_PURPOSE:-full}" == rootfs-measurement && -n "${CERALIVE_SEALED_INPUTS:-}" ]]; then
+    local kernel_mode
+    kernel_mode="$(python3 "${HERE}/measurement-candidate.py" mode "${CERALIVE_SEALED_INPUTS}" "${CERALIVE_BOARD:?}")" \
+      || die "sealed measurement kernel approval rejected"
+    [[ "${kernel_mode}" != measurement-candidate ]] || return 0
+  fi
   record="$(index_lookup_optional "${index}" "${package}" "${selected}" "${ARCH}")" || rc=$?
   if (( rc == INDEX_LOOKUP_NOT_FOUND )); then
     local declarations

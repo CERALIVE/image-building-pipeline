@@ -219,6 +219,15 @@ not point at HEAD, a bundle for that version already exists (even with identical
 bytes), or the store is outside the repository. It reads tags and never creates
 or moves one.
 
+A private, unpublished bundle may be reviewed for the separate
+[sealed measurement path](image-measurement.md). Approve the kernel build
+window and private bundle location before running the producer. Guest base
+rollout, base digest approval, capsule reseal, and approval of the resulting
+capsule digest are separate decisions. Measurement approval is not release
+authorization: full-image and release jobs still require the exact signed
+first-party APT kernel and reject sealed candidate input even if that kernel is
+available.
+
 `--published` and `--floor` read published kernel versions and their metadata
 through `gh`. Set `CERALIVE_KERNEL_HISTORY_DIR` to a local directory of
 `<version>/` metadata directories to read them from disk instead.

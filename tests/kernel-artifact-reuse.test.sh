@@ -13,6 +13,7 @@ trap finish EXIT
 export ROOT WORK
 repo="${WORK}/repo"
 kernel_test_repo "${repo}"
+cp "${ROOT}/.mkosi-version" "${repo}/.mkosi-version"
 kernel_test_version "${repo}" 7.2.0-ceralive2
 export CERALIVE_KERNEL_HISTORY_DIR="${WORK}/history"
 if [[ -n "${KERNEL_REUSE_FIXTURE_BUNDLE:-}" ]]; then
@@ -132,6 +133,47 @@ for board in rock-5b-plus orange-pi-5-plus; do
 done
 [[ ! -e "${WORK}/runtime.log" && ! -e "${repo}/mkosi/cache/kernel-artifacts" ]]
 ok 'APT reuse never invokes a compiler/container or the local kernel artifact cache'
+
+candidate_inputs="${WORK}/candidate-inputs"
+mkdir -p "${candidate_inputs}"
+python3 - "${candidate_inputs}" "${WORK}/history/7.2.0-ceralive2" "${name}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+directory, bundle = map(Path, sys.argv[1:3])
+deb = sys.argv[3]
+payloads = {}
+objects = []
+for name in (deb, "kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"):
+    data = (bundle / name).read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    (directory / digest).write_bytes(data)
+    payloads[name] = {"sha256": digest, "length": len(data)}
+    objects.append(payloads[name] | {"kind": "measurement-candidate", "urls": []})
+artifact = json.loads((bundle / "kernel-artifact.json").read_text())
+binding = {key: artifact[key] for key in ("package", "version", "arch", "validated_boards", "input_fingerprint")}
+binding.update(payloads=payloads, producer_commit="a" * 40, candidate_run_id="123", proof={
+    name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "length": len(name)}
+    for name in ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")
+})
+(directory / "inventory.json").write_text(json.dumps({"measurement_candidate": binding, "objects": objects}))
+(directory / "trust.json").write_text(json.dumps({"measurement_candidate": binding}))
+PY
+release_with_candidate() (
+  export CERALIVE_BUILD_MODE=production CERALIVE_REQUIRE_KERNEL_APT=1
+  export CERALIVE_SEALED_INPUTS="${candidate_inputs}"
+  bash "${repo}/lib/orchestrate.sh" --board rock-5b-plus \
+    --manifest "${repo}/manifests/boards/rock-5b-plus.yaml" "$@"
+)
+before_candidate="$(wc -l <"${WORK}/curl.log")"
+refuse 'release refuses a sealed candidate even when the exact signed APT kernel is available' \
+  'sealed measurement candidate is not permitted' release_with_candidate --release
+refuse 'full image refuses a sealed candidate even when the exact signed APT kernel is available' \
+  'sealed measurement candidate is not permitted' release_with_candidate
+[[ "$(wc -l <"${WORK}/curl.log")" == "${before_candidate}" && ! -e "${WORK}/runtime.log" ]]
+
 APT_CERALIVE_URL=https://foreign.invalid refuse 'foreign configured origin refuses before download' \
   kernel_origin_mismatch fetch_kernel "${WORK}/foreign"
 sed "s|Filename: pool/|Filename: https://foreign.invalid/|" "${WORK}/apt/Packages" >"${WORK}/other-origin"
@@ -179,6 +221,8 @@ refuse 'unvalidated Orange board fails without compiling' validated_boards \
   stage_kernel orange-pi-5-plus "${WORK}/unvalidated-board"
 printf 'Package: unrelated\nVersion: 1\nArchitecture: arm64\nFilename: pool/unrelated.deb\nSHA256: %064d\n\n' 0 >"${WORK}/apt/Packages"
 sign_index
+refuse 'release refuses a sealed candidate when no signed APT kernel is available' \
+  'sealed measurement candidate is not permitted' release_with_candidate --release
 CERALIVE_REQUIRE_KERNEL_APT=1 refuse 'production missing version refuses with no build fallback' \
   kernel_not_on_apt fetch_kernel "${WORK}/unpublished-production"
 fetch_kernel "${WORK}/unpublished-local"

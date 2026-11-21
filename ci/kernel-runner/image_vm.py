@@ -22,9 +22,10 @@ import tarfile
 from tempfile import TemporaryDirectory
 import time
 
+from image_candidate_policy import FIELD
 from image_capsule import INPUT_LIMIT, digest_file, verification_capsule
 from image_lifecycle import ImageJob, create_directory, receipt, reconcile, report_error, sync_directory, unlink_observed
-from image_policy import load_policy
+from image_policy import load_job_trust
 from image_receipt import ReleaseEvidence, released_evidence
 from image_resources import CAPS, GIB, AdmissionError, cgroup_admission, disk_admission, disk_headroom, require_host_lock
 from image_stream import (
@@ -32,7 +33,7 @@ from image_stream import (
     list_directory, listed_entry, read_header, retry_check, unique_object, verify_sidecar,
 )
 from image_verify import (FIRMWARE_FLOOR, approved_modules, candidate_consumers, check_kernel_lock, checked_lock,
-                          check_nouveau_evidence, firmware_path)
+                          check_nouveau_evidence, firmware_path, kernel_receipt)
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -171,9 +172,9 @@ def scan_retained_outputs(store: Path, identity: Identity, trust_identity: tuple
 
 
 def admit_output_store(store: Path, identity: Identity, base: Path, base_sha256: str,
-                       trust_policy: Path) -> tuple[dict, int]:
+                       trust_policy: Path, measurement: bool = False) -> tuple[dict, int]:
     """Recompute the store and capacity observation together on every attempt."""
-    trust = asdict(load_policy(trust_policy))
+    trust = load_job_trust(trust_policy, measurement=measurement)
     retained = scan_retained_outputs(store, identity, (base_sha256, trust["root_der_sha256"]))
     disk_admission(store, store, retained)
     return trust, retained
@@ -263,8 +264,9 @@ def verified_firmware_policy(path: Path, digest: str) -> tuple[dict[str, str], s
 def verify_released_receipts(artifacts: Path, inventory: dict, identity: Identity,
                              public_root: str, approved: ReleaseEvidence) -> dict[str, str]:
     """Verify returned claims against the capsule and the independent verifier's inputs."""
-    lock = checked_lock(returned_json(artifacts / "packages.lock.json", private=True), identity.epoch)
-    check_kernel_lock(lock, approved.kernel, approved.deb_sha256)
+    lock = checked_lock(returned_json(artifacts / "packages.lock.json", private=True), identity.epoch,
+                        origin=approved.origin)
+    check_kernel_lock(lock, approved.kernel, approved.deb_sha256, origin=approved.origin)
     resolved = returned_json(artifacts / "resolved.json", private=True)
     if tuple(resolved[key] for key in ("KERNEL_PACKAGES", "KERNEL_SOURCE_PACKAGE_VERSION", "ARCH")) != approved.kernel:
         raise StreamError("verified resolver kernel differs from the independently approved release")
@@ -310,13 +312,14 @@ def check_retention_scan(slot: dict, references: list[str], candidates: set[str]
 
 def validate_verification(row, identity: Identity, inventory: dict, modules: list[str],
                           policy: tuple[dict[str, str], set[str]], *,
-                          reserves: dict[str, str] | None = None) -> None:
+                          reserves: dict[str, str] | None = None, candidate: ReleaseEvidence | None = None) -> None:
     if type(row) is not dict:
         raise StreamError("invalid verifier receipt")
     slots = row.get("slots")
+    kernel = {} if candidate is None else {"kernel": kernel_receipt(candidate.kernel, candidate.deb_sha256)}
     if (type(slots) is not list or len(slots) != 2
             or not exact_json(row, {"schema": 1, "verified": True, "build_identity": asdict(identity),
-                                    "artifacts": inventory, "slots": slots})):
+                                    "artifacts": inventory, "slots": slots} | kernel)):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
     labels = set()
     types, preserved = policy
@@ -590,7 +593,7 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     except FileNotFoundError:
         if listed_entry(Path(store.anchor), str(store.relative_to(store.anchor))) is not None:
             raise AdmissionError("cannot establish private output store ownership")
-        load_policy(args.trust_policy)  # Refuse an unusable policy before running the backing tool.
+        load_job_trust(args.trust_policy, measurement=args.image_mode == "measure")
         base_fd = validate_base(base, args.base_sha256, cancellation)
         if base_fd is not None:
             inputs.callback(os.close, base_fd)
@@ -601,7 +604,8 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     cancellation.check()
     reconcile(store)
     try:
-        trust, retained = retry_check(admit_output_store, store, identity, base, args.base_sha256, args.trust_policy)
+        trust, retained = retry_check(admit_output_store, store, identity, base, args.base_sha256, args.trust_policy,
+                                      args.image_mode == "measure")
     except OSError as error:
         raise AdmissionError(f"cannot complete private output store admission scan: {error}") from error
     if base_fd is None:
@@ -632,8 +636,9 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
                 or not exact_json(result, {"schema": 1, "identity": asdict(identity), "network_denied": True})):
             raise StreamError("offline probe receipt mismatch")
         return None
-    modules = approved_modules(read_return_record(artifacts / "built-modules.txt", private=True),
-                               trust["kernel_metadata"]["built-modules.txt"])
+    module_digest = (trust[FIELD]["payloads"]["built-modules.txt"]["sha256"] if FIELD in trust
+                     else trust["kernel_metadata"]["built-modules.txt"])
+    modules = approved_modules(read_return_record(artifacts / "built-modules.txt", private=True), module_digest)
     capsule = directory / "verifier-input.tar"
     verifier_fd = os.open(capsule, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     inputs.callback(os.close, verifier_fd)
@@ -656,7 +661,7 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     policy = verified_firmware_policy(artifacts / "resolved.json", inventory["resolved.json"])
     reserves = verify_released_receipts(artifacts, inventory, identity, trust["root_der_sha256"], approved)
     validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules, policy,
-                          reserves=reserves)
+                          reserves=reserves, candidate=approved if FIELD in trust else None)
     unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),

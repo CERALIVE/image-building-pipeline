@@ -32,6 +32,10 @@ rootfs_measurement_resolved() {
     || die "rootfs measurement requires the shipping arm64 kernel and both populated RK3588 slots"
   "${CHECK_RELEASE_VARIANT_SH}" --variant "${KERNEL_VARIANT:-${variant}}" \
     || die "rootfs measurement requires the shipping kernel variant"
+  local kernel_mode
+  kernel_mode="$(python3 "${HERE}/measurement-candidate.py" mode "${CERALIVE_SEALED_INPUTS}" "${board}")" \
+    || die "rootfs measurement kernel approval rejected"
+  [[ "${kernel_mode}" != measurement-candidate ]] || return 0
   python3 - "${HERE}" "${CERALIVE_SEALED_INPUTS}" "${KERNEL_PACKAGES}" \
     "${KERNEL_SOURCE_PACKAGE_VERSION:?}" "${board}" <<'PY' \
     || die "rootfs measurement manifest differs from the approved released kernel"

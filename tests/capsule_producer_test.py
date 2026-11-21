@@ -891,6 +891,7 @@ def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str
 
 
 def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
+    from image_candidate_policy import FIELD, KIND, METADATA, PROOF
     from image_receipt import released_evidence
 
     with fixture("debian-waiver") as (work, inventory, _args, _env, requests, remote):
@@ -905,6 +906,37 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
         board = inventory["board"]
         kernel = "linux-image-7.2.0-ceralive-rk3588"
         digest = "d" * 64
+
+        def candidate_capsule() -> tuple[dict, dict, dict[str, bytes]]:
+            version = "7.2.0-ceralive9"
+            files = {name: name.encode() for name in (f"{kernel}_{version}_arm64.deb", *METADATA)}
+            approvals = {name: {"sha256": hashlib.sha256(body).hexdigest(), "length": len(body)}
+                         for name, body in files.items()}
+            approval = {"package": kernel, "version": version, "arch": "arm64",
+                        "validated_boards": ["rock-5b-plus", "orange-pi-5-plus"],
+                        "input_fingerprint": "2" * 64, "producer_commit": "a" * 40, "candidate_run_id": "123",
+                        "payloads": approvals, "proof": {
+                            name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "length": len(name)}
+                            for name in PROOF}}
+            rows = [row for row, _ in members]
+            rows.extend(pin | {"kind": KIND, "urls": []} for pin in approvals.values())
+            bodies = {row["sha256"]: body for row, body in members}
+            bodies.update((approvals[name]["sha256"], body) for name, body in files.items())
+            policy = {key: value for key, value in trust.items() if key != "kernel_metadata"} | {FIELD: approval}
+            delivery = inventory | {"objects": [
+                {key: row[key] for key in ("sha256", "length", "kind", "urls")} for row in rows],
+                FIELD: deepcopy(approval)}
+            return policy, delivery, bodies
+
+        def pack(entries: list[tuple[str, bytes]]) -> io.BytesIO:
+            payload = io.BytesIO()
+            with tarfile.open(fileobj=payload, mode="w") as archive:
+                for name, body in entries:
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(body)
+                    archive.addfile(entry, io.BytesIO(body))
+            payload.seek(0)
+            return payload
 
         def capsule_bytes(revision: int, fault: str = "") -> io.BytesIO:
             kernel_fields = {"package": kernel, "version": f"7.2.0-ceralive{revision}",
@@ -955,28 +987,19 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
             rows.append((kernel_row, metadata))
             if fault == "duplicate-object":
                 rows.append((kernel_row, metadata))
-            payload = io.BytesIO()
-            with tarfile.open(fileobj=payload, mode="w") as archive:
-                delivery = inventory | {"repositories": repos, "objects": [
-                    {key: row[key] for key in ("sha256", "length", "kind", "urls")} for row, _ in rows]}
-                if fault == "wrong-source":
-                    delivery = delivery | {"source_commit": "f" * 40}
-                if fault == "wrong-capsule-board":
-                    delivery = delivery | {"board": "orange-pi-5-plus"}
-                if fault == "wrong-repository-type":
-                    delivery = delivery | {"repositories": []}
-                if fault == "candidate-key":
-                    delivery = delivery | {"measurement_candidate": {}}
-                objects = {"objects/" + row["sha256"]: body for row, body in rows}
-                entries = [("inventory.json", json.dumps(delivery).encode()), *objects.items()]
-                if fault == "duplicate-member":
-                    entries.append(("objects/" + pin, metadata))
-                for name, body in entries:
-                    entry = tarfile.TarInfo(name)
-                    entry.size = len(body)
-                    archive.addfile(entry, io.BytesIO(body))
-            payload.seek(0)
-            return payload
+            delivery = inventory | {"repositories": repos, "objects": [
+                {key: row[key] for key in ("sha256", "length", "kind", "urls")} for row, _ in rows]}
+            delivery |= {
+                "wrong-source": {"source_commit": "f" * 40},
+                "wrong-capsule-board": {"board": "orange-pi-5-plus"},
+                "wrong-repository-type": {"repositories": []},
+                "candidate-key": {FIELD: {}},
+            }.get(fault, {})
+            objects = {"objects/" + row["sha256"]: body for row, body in rows}
+            entries = [("inventory.json", json.dumps(delivery).encode()), *objects.items()]
+            if fault == "duplicate-member":
+                entries.append(("objects/" + pin, metadata))
+            return pack(entries)
 
         identity = Identity("host-fixture", board, inventory["source_commit"], inventory["epoch"], "b" * 64)
         for revision in (8, 9):
@@ -1021,6 +1044,38 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
             except AttributeError as error:
                 raise AssertionError(f"invalid capsule crashed the reader: {fault}") from error
             raise AssertionError(f"accepted an invalid capsule: {fault}")
+
+        policy, delivery, bodies = candidate_capsule()
+        version = policy[FIELD]["version"]
+        candidate_digest = policy[FIELD]["payloads"][f"{kernel}_{version}_arm64.deb"]["sha256"]
+
+        def candidate_evidence(capsule: dict, payloads: dict[str, bytes]):
+            return released_evidence(pack([("inventory.json", json.dumps(capsule).encode()), *(
+                ("objects/" + key, body) for key, body in payloads.items())]), identity, policy, work, lambda: None)
+
+        evidence = candidate_evidence(delivery, bodies)
+        assert evidence.kernel == (kernel, version, "arm64")
+        assert evidence.origin == KIND
+        assert evidence.deb_sha256 == candidate_digest
+        assert evidence.validity == {"schema": 1, "purpose": "rootfs-measurement", "repositories": list(validity.values())}
+        candidate_rows = delivery["objects"]
+        slot = next(i for i, row in enumerate(candidate_rows) if row["sha256"] == candidate_digest)
+        row = candidate_rows[slot]
+        for label, capsule, objects in (
+            ("missing approval", {key: value for key, value in delivery.items() if key != FIELD}, bodies),
+            ("different producer", delivery | {FIELD: delivery[FIELD] | {"producer_commit": "b" * 40}}, bodies),
+            ("sixth candidate", delivery | {"objects": [*candidate_rows, row]}, bodies),
+            ("released object", delivery | {"objects": [*candidate_rows, row | {"kind": "kernel-metadata"}]}, bodies),
+            ("payload URL", delivery | {"objects": [*candidate_rows[:slot],
+                row | {"urls": ["https://apt.ceralive.tv/pool/fixture.deb"]}, *candidate_rows[slot + 1:]]}, bodies),
+            *(("changed " + name, delivery, bodies | {pin["sha256"]: b"x" * pin["length"]})
+              for name, pin in policy[FIELD]["payloads"].items()),
+        ):
+            try:
+                candidate_evidence(capsule, objects)
+            except StreamError:
+                continue
+            raise AssertionError(f"host admitted invalid candidate evidence: {label}")
         assert not requests, requests
 
 
