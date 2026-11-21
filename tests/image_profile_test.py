@@ -154,7 +154,6 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     sent = False
     fail_sync = False
     resistant = None
-    teardown_released = False
     if inherited:
         (root / "status-launcher").write_text(pathlib.Path("/proc/self/status").read_text())
 
@@ -350,12 +349,13 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         assert ready, f"{label} timed out"
         observed = os.read(0, 1)
         assert observed == expected, f"{label}: expected {expected!r}, got {observed!r}"
+        if observed == b"":
+            report_phase(b"F")  # A successful zero-byte read is the EOF evidence.
         return observed
 
     terminate = vm.terminate
 
     def fixture_terminate(process):
-        nonlocal teardown_released
         terminate(process)
         if process is resistant:
             assert time.monotonic() - float((root / "sent").read_text()) < RESISTANT_REAP_SECONDS
@@ -370,7 +370,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 os.set_blocking(0, False)
                 report_phase(read_control(b"A", FIXTURE_PHASE_SECONDS, "launcher ACK wait"))
                 report_phase(read_control(b"T", FIXTURE_PHASE_SECONDS, "launcher teardown release"))
-                teardown_released = read_control(b"", FIXTURE_PHASE_SECONDS, "parent release EOF") == b""
+                read_control(b"", FIXTURE_PHASE_SECONDS, "parent release EOF")
             else:
                 report_phase(b"U")
 
@@ -390,8 +390,6 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 print(destination.relative_to(root / "returns"), file=log)
         if (destination in {directory / "exit.json", directory / "teardown.json"}
                 or pair and destination.name in {"teardown.json", "exit.json"}):
-            if mode == "ignore":
-                assert teardown_released, "launcher reached teardown without observing parent release EOF"
             # Compare real descriptor targets before the launcher exits.
             live = {os.readlink(fd) for fd in pathlib.Path("/proc/self/fd").iterdir()
                     if fd.is_symlink() and fd.exists()}
@@ -532,7 +530,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         return returned_json(path, *args, **kwargs)
 
     def poller():
-        epoll = poll_type()
+        epoll = select.epoll() if mode == "ignore" else poll_type()
 
         class Poll:
             def __getattr__(self, name):
@@ -543,10 +541,11 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                     ready = epoll.poll(bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "capture poll"),
                                        maxevents)
                     if not sent and any(fd == resistant.stdout.fileno() for fd, _flags in ready):
-                        ready_byte = os.read(resistant.stdout.fileno(), 1)
-                        if ready_byte != b"R":
+                        challenge = (root / "readiness-challenge").read_bytes()
+                        ready_byte = os.read(resistant.stdout.fileno(), len(challenge))
+                        if ready_byte != challenge:
                             report_phase(b"E")
-                        assert ready_byte == b"R", "stand-in exited before readiness"
+                        assert ready_byte == challenge, "stand-in exited before readiness or sent a wrong nonce"
                         cancel()
                         report_phase(b"C")
                     return ready
@@ -773,6 +772,18 @@ def readable(fds: list[int], timeout: float | None, maximum: int, label: str) ->
 def fixture_wait_bounds(select_maximum: int):
     """Guard the wait APIs as well as the fixture helpers that usually call them."""
     raw_select, raw_communicate, raw_wait = select.select, subprocess.Popen.communicate, subprocess.Popen.wait
+    raw_epoll = select.epoll
+
+    class GuardedEpoll:
+        def __init__(self, *args, **kwargs):
+            self._epoll = raw_epoll(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._epoll, name)
+
+        def poll(self, timeout=-1, maxevents=-1):
+            return self._epoll.poll(bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "epoll API wait"),
+                                    maxevents)
 
     def guarded_select(readers, writers, errors, timeout=None):
         return raw_select(readers, writers, errors,
@@ -785,7 +796,7 @@ def fixture_wait_bounds(select_maximum: int):
     def guarded_wait(process, timeout=None):
         return raw_wait(process, bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "Popen.wait API wait"))
 
-    with patch.object(select, "select", guarded_select), patch.multiple(
+    with patch.multiple(select, select=guarded_select, epoll=GuardedEpoll), patch.multiple(
             subprocess.Popen, communicate=guarded_communicate, wait=guarded_wait):
         yield
 
@@ -954,7 +965,9 @@ if mode == "ignore":
     # The fixture must not survive a failed cancellation or cleanup.
     signal.alarm({RESISTANT_REAP_SECONDS + 2 * FIXTURE_PHASE_SECONDS})
     assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= {RESISTANT_REAP_SECONDS + 2 * FIXTURE_PHASE_SECONDS}
-    assert os.write(1, b"R") == 1
+    readiness = b"R" + os.urandom(16)
+    (root / "readiness-challenge").write_bytes(readiness)
+    assert os.write(1, readiness) == len(readiness)
 while True:
     signal.pause()
 """)
@@ -1032,6 +1045,7 @@ os.execvp(sys.argv[1], sys.argv[1:])
                     if expect_phase(channel, observer_fd, b"T", seconds, "launcher T consumption") == b"T":
                         launcher.stdin.close()  # Only EOF releases the launcher to tear down.
                     assert launcher.stdin.closed, "parent did not release teardown after observing T consumption"
+                    expect_phase(channel, observer_fd, b"F", seconds, "launcher EOF observation")
                 _, stderr = communicate(timeout=seconds)
                 if mode == "ignore":
                     assert not readable([channel], 0, 0, "phase channel drain"), "launcher phase left unread"
