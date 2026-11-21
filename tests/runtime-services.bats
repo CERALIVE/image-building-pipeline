@@ -106,6 +106,12 @@ SH
   write_device_wrappers "$root"
   local fixture_sudo="$root/device" fixture_busctl="$root/device"
   export REAL_DEVICE_ROOT="$root" REAL_SCENARIO="$scenario"
+  if [[ "$scenario" == no-observer ]]; then
+    prepare_allocator "$root"
+    REAL_POLL_INTERVAL=0 REAL_MACHINE_ID_FILE="$root/machine-id" \
+      run_allocator "$root" stub a
+    return $?
+  fi
   observe_allocator "$root" a || return 1
   REAL_POLL_INTERVAL="$poll_interval" REAL_MACHINE_ID_FILE="$root/machine-id" \
     run_allocator "$root" stub a &
@@ -119,6 +125,16 @@ SH
   [ "$status" -eq 1 ]
   [[ "$output" == *"AVAHI_OBSERVER_ERROR device=a reason=subscription-not-acknowledged"* ]]
   [[ ! -s "$root/allocator-started" && ! -e "$root/state/host_index" ]]
+}
+
+@test "hostname: real Avahi fixture rejects an allocator launched without an observer" {
+  local root="$BATS_TEST_TMPDIR/no-observer"
+  run run_real_avahi_stub_claim "$root" no-observer
+  printf '%s\n' "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == "AVAHI_ALLOCATION_ERROR device=a reason=observer-not-ready-at-launch" ]]
+  [[ -f "$root/allocator-started" && ! -s "$root/allocator-started" ]]
+  [ ! -e "$root/state/host_index" ]
 }
 
 @test "hostname: real Avahi fixture can finish a claim after probe 60" {
