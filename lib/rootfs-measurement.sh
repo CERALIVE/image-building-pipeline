@@ -27,12 +27,34 @@ rootfs_measurement_resolved() {
   shipping_variant="$(python3 "${HERE}/resolve.py" get "${family_manifest}" default_variant)" \
     || die "rootfs measurement default kernel variant could not be resolved"
   [[ "${FAMILY}" == rk3588 && "${ARCH}" == arm64 &&
-      "${KERNEL_SOURCE_PACKAGE_VERSION:-}" == 7.2.0-ceralive8 &&
       "${SINGLE_SLOT_FALLBACK:-false}" == false &&
       "${KERNEL_VARIANT:-}" == "${shipping_variant}" ]] \
-    || die "rootfs measurement requires ceralive8 and both populated RK3588 slots"
+    || die "rootfs measurement requires the shipping arm64 kernel and both populated RK3588 slots"
   "${CHECK_RELEASE_VARIANT_SH}" --variant "${KERNEL_VARIANT:-${variant}}" \
     || die "rootfs measurement requires the shipping kernel variant"
+  python3 - "${HERE}" "${CERALIVE_SEALED_INPUTS}" "${KERNEL_PACKAGES}" \
+    "${KERNEL_SOURCE_PACKAGE_VERSION:?}" "${board}" <<'PY' \
+    || die "rootfs measurement manifest differs from the approved released kernel"
+import hashlib, json, pathlib, sys
+
+lib, directory, package, version, board = sys.argv[1:]
+sys.path.insert(0, lib)
+from kernel_release import SHA256, KernelReleaseError, artifact
+
+try:
+    directory = pathlib.Path(directory)
+    digest = json.loads((directory / "trust.json").read_text())["kernel_metadata"]["kernel-artifact.json"]
+    if not SHA256.fullmatch(digest):
+        sys.exit("invalid approved kernel metadata digest")
+    path = directory / digest
+    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        sys.exit("approved kernel artifact hash mismatch")
+    record = artifact(path)
+    if (record.identity.package, record.identity.version) != (package, version) or board not in record.boards:
+        sys.exit("approved kernel artifact does not match manifest package, version or board")
+except (OSError, ValueError, KeyError, TypeError, KernelReleaseError) as error:
+    sys.exit(str(error))
+PY
 }
 
 rootfs_measurement_complete() {

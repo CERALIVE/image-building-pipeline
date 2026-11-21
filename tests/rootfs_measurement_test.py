@@ -156,24 +156,45 @@ setup_rtmp_gateway
                 assert result.returncode != 0 and "differs from the public recipe pin" in result.stderr
 
 
-def test_measurement_refuses_newer_kernel_nondefault_variant_and_single_slot() -> None:
+def test_measurement_requires_approved_manifest_kernel_shipping_variant_and_both_slots() -> None:
     script = '''
 die() { printf '%s\\n' "$*" >&2; exit 1; }
 source "$1/lib/rootfs-measurement.sh"
 HERE="$1/lib"; family_manifest="$1/manifests/families/rk3588.yaml"
-FAMILY=rk3588; ARCH=arm64; CHECK_RELEASE_VARIANT_SH=/bin/true; variant=default
+FAMILY=rk3588; ARCH=arm64; CHECK_RELEASE_VARIANT_SH="$1/ci/check-release-variant.sh"; variant=default
+board=rock-5b-plus; KERNEL_PACKAGES=linux-image-7.2.0-ceralive-rk3588
 KERNEL_SOURCE_PACKAGE_VERSION="$2"; KERNEL_VARIANT="$3"; SINGLE_SLOT_FALLBACK="$4"
+ARCH="$5"; CERALIVE_SEALED_INPUTS="$6"
 rootfs_measurement_resolved
 '''
     with tempfile.TemporaryDirectory() as temporary:
-        for args in (("7.2.0-ceralive8", "edge", "false"),
-                     ("7.2.0-ceralive9", "edge", "false"),
-                     ("7.2.0-ceralive8", "edge-test", "false"),
-                     ("7.2.0-ceralive8", "edge", "true")):
+        sealed = Path(temporary)
+        for selected, approved, variant, slots, arch, valid_hash, success in (
+            ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge", "false", "arm64", True, True),
+            ("7.2.0-ceralive9", "7.2.0-ceralive9", "edge", "false", "arm64", True, True),
+            ("7.2.0-ceralive8", "7.2.0-ceralive9", "edge", "false", "arm64", True, False),
+            ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge-test", "false", "arm64", True, False),
+            ("7.2.0-ceralive8", "7.2.0-ceralive8", "vendor", "false", "arm64", True, False),
+            ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge", "true", "arm64", True, False),
+            ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge", "false", "amd64", True, False),
+            ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge", "false", "arm64", False, False),
+        ):
+            obj = json.dumps({
+                "package": "linux-image-7.2.0-ceralive-rk3588", "version": approved,
+                "arch": "arm64", "kernel_release": "7.2.0-ceralive-rk3588",
+                "deb_sha256": "a" * 64, "input_fingerprint": "b" * 64, "kernel_epoch": 123,
+                "validated_boards": ["orange-pi-5-plus", "rock-5b-plus"],
+                "builder_closure": {"base_image": "fixture", "packages": ["gcc=1"],
+                                    "compiler": "gcc", "dockerfile_sha256": "c" * 64},
+            }).encode()
+            digest = hashlib.sha256(obj).hexdigest()
+            (sealed / "trust.json").write_text(json.dumps({"kernel_metadata": {"kernel-artifact.json": digest}}))
+            (sealed / digest).write_bytes(obj if valid_hash else obj + b"\n")
+            args = (selected, variant, slots, arch, str(sealed))
             result = subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(ROOT), *args],
                                     env={"PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary},
                                     capture_output=True, text=True, timeout=10)
-            assert (result.returncode == 0) == (args == ("7.2.0-ceralive8", "edge", "false")), result.stderr
+            assert (result.returncode == 0) == success, (selected, approved, args, result.stderr)
 
 
 def test_slot_retention_keeps_the_actual_writer_output_after_scratch_cleanup() -> None:

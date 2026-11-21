@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the real launcher lifecycle against small Python children, never a VM."""
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import atexit
 import builtins
 from contextlib import ExitStack, contextmanager, suppress
@@ -594,6 +594,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         target = job.directory / "artifacts"
         target.mkdir()
         (target / "fixture").write_bytes(b"public artifact")
+        fixture_modules(target)
 
     capsule = root / "capsule"
     base = root / "base"
@@ -690,9 +691,34 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         runpy.run_path(sys.argv[0], run_name="__main__")
 
 
+FIXTURE_MODULES = b"drivers/net/fixture.ko\n"
+FIXTURE_FIRMWARE = {
+    "removed": ["amdgpu"], "retained": sorted(image_vm.FIRMWARE_FLOOR), "firmware_references": [],
+    "examined_firmware_references": 1, "nouveau_present": False, "candidate_consumers": {"amdgpu": []},
+    "examined_modules": ["fixture.ko"],
+    "retention_scan": {"candidate_rows": {"amdgpu": []},
+                       "candidate_types": {},
+                       "present": dict.fromkeys(sorted(image_vm.FIRMWARE_FLOOR), True) | {"amdgpu": False},
+                       "examined_firmware_references": 1},
+}
+
+
+def fixture_modules(directory: pathlib.Path) -> None:
+    path = directory / "built-modules.txt"
+    path.write_bytes(FIXTURE_MODULES)
+    path.chmod(0o600)
+    policy = directory / "resolved.json"
+    policy.write_text(json.dumps({"FIRMWARE_SWEEP_PREFIXES": "amdgpu", "FIRMWARE_SWEEP_FILES": "",
+                                  "FIRMWARE_PRESERVED_ROOTS": "brcm"}))
+    policy.chmod(0o600)
+
+
 @dataclass(frozen=True, slots=True)
 class FixturePolicy:
     root_der_sha256: str = "d" * 64
+    kernel_metadata: dict[str, str] = field(default_factory=lambda: {
+        "built-modules.txt": hashlib.sha256(FIXTURE_MODULES).hexdigest(),
+    })
 
 
 def cancelled_fixture(mode: str, signum: signal.Signals = signal.SIGTERM, *,
@@ -827,8 +853,8 @@ if mode.startswith("pair:"):
         from image_stream import Identity, encode
         result = {{"schema": 1, "verified": True, "build_identity": payload["build_identity"],
                   "artifacts": payload["artifacts"], "slots": [
-                      {{"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
-                        "nvidia_references": ["nvidia/nouveau.ko"]}} for slot in ("rootfs_a", "rootfs_b")]}}
+                      {{"slot": slot, "reserve": "reserve", **{FIXTURE_FIRMWARE!r}}}
+                      for slot in ("rootfs_a", "rootfs_b")]}}
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
@@ -1554,6 +1580,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                     image_lifecycle.receipt(directory / "teardown.json", state)
                     if payload["operation"] == "measure":
                         (artifacts / "fixture").write_bytes(b"public artifact")
+                        fixture_modules(artifacts)
                     else:
                         assert os.path.samefile(request["capsule"], capsule)
                         if action == "replace":
@@ -1562,8 +1589,8 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
                             "slots": [
-                                {"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
-                                 "nvidia_references": ["nvidia/nouveau.ko"]} for slot in ("rootfs_a", "rootfs_b")
+                                {"slot": slot, "reserve": "reserve", **FIXTURE_FIRMWARE}
+                                for slot in ("rootfs_a", "rootfs_b")
                             ],
                         }))
                     return artifacts
