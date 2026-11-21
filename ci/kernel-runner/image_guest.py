@@ -15,6 +15,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import selectors
 import signal
 import tarfile
@@ -22,7 +23,7 @@ from tempfile import TemporaryFile
 import time
 from typing import Literal
 
-from image_capsule import Capsule, unpack
+from image_capsule import Capsule, digest_file, object_id, unpack
 from image_stream import (
     BUILD_LOG_LIMIT, IO_ATTEMPTS, RETRYABLE_IO, Identity, StreamError, encode, list_directory, listed_entry,
     retry_check, retry_io, unique_object, write_all,
@@ -34,6 +35,7 @@ MIRROR_READY_SECONDS = 600
 MIRROR_STOP_SECONDS = 20
 MIRROR_RETRY = RETRYABLE_IO | {errno.EINTR}
 UNREACHABLE = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
+KERNEL_METADATA = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
 BuilderFailureCode = Literal["builder_engine_inspect_error", "builder_engine_export_error",
                              "builder_config_unavailable", "builder_platform_mismatch",
                              "builder_config_digest_mismatch"]
@@ -180,6 +182,33 @@ def resolve(source: Path, board: str, env: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def kernel_identity(params: dict[str, str]) -> tuple[str, str, str]:
+    return params["KERNEL_PACKAGES"], params["KERNEL_SOURCE_PACKAGE_VERSION"], params["ARCH"]
+
+
+def stage_kernel_metadata(source: Path, capsule: Capsule, params: dict[str, str],
+                          approved: dict[str, str], destination: Path) -> str:
+    """Stage only independently approved release metadata for the manifest kernel."""
+    sys.path.insert(0, str(source / "lib"))
+    from kernel_release import KernelReleaseError, verified_metadata
+
+    package, version, arch = kernel_identity(params)
+    destination.mkdir(parents=True)
+    for name in KERNEL_METADATA:
+        digest = object_id(approved[name])
+        path = destination / name
+        shutil.copyfile(capsule.directory / digest, path)
+        if digest_file(path) != digest:
+            raise StreamError("released kernel metadata differs from approved digest")
+    try:
+        released = verified_metadata(version, destination)
+    except KernelReleaseError as error:
+        raise StreamError("released kernel metadata failed validation against the manifest") from error
+    if (released.identity.package != package or arch != "arm64" or capsule.board not in released.boards):
+        raise StreamError("approved released kernel does not match manifest package, architecture or board")
+    return released.identity.deb_sha256
+
+
 def check_builder_config(tag: str, arch: str, expected: str, env: dict[str, str]) -> None:
     """Hash the engine-exported config bytes, not an inspect ID or reserialized JSON."""
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected):
@@ -262,11 +291,9 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     env["ARMBIAN_APT_KEYRING"] = str(directory / trust["repositories"]["bsp"]["keyring"])
     shutil.copyfile(directory / trust["repositories"]["debian-source"]["keyring"],
                     "/usr/share/keyrings/debian-archive-keyring.gpg")
-    history = HOME / "kernel-history/7.2.0-ceralive8"
-    history.mkdir(parents=True)
-    for name in ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"):
-        digest = trust["kernel_metadata"][name]
-        shutil.copyfile(directory / digest, history / name)
+    params = resolve(source, capsule.board, env)
+    history = HOME / "kernel-history" / params["KERNEL_SOURCE_PACKAGE_VERSION"]
+    stage_kernel_metadata(source, capsule, params, trust["kernel_metadata"], history)
     env["CERALIVE_KERNEL_HISTORY_DIR"] = str(history.parent)
     mediamtx = command(["bash", "-euo", "pipefail", "-c",
         'source "$1"; printf "%s" "$MEDIAMTX_SHA256_arm64"', "_",
@@ -284,7 +311,6 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
         run_gate(["docker", "load", "-i", str(archive)], env=env, timeout=600,
                  stdout=subprocess.DEVNULL)
         check_builder_config(builder["tag"], builder["arch"], builder["image_id"], env)
-    params = resolve(source, capsule.board, env)
     swap = HOME / "swap"
     run_gate(["fallocate", "-l", "4G", str(swap)], env=env, timeout=60)
     swap.chmod(0o600)
@@ -351,7 +377,7 @@ def measure(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]
     for name in ("rootfs_a.ext4", "rootfs_b.ext4", "rootfs_a.reserve", "rootfs_b.reserve",
                  "rootfs_a.header", "rootfs_b.header", "boot.scr", "boot.scr.sha256"):
         records.append((name, slots / name))
-    for name in ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"):
+    for name in KERNEL_METADATA:
         records.append(("kernel.SHA256SUMS" if name == "SHA256SUMS" else name,
                         staging / "kernel-build" / name))
     return records

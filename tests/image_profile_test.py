@@ -827,8 +827,8 @@ if mode.startswith("pair:"):
         from image_stream import Identity, encode
         result = {{"schema": 1, "verified": True, "build_identity": payload["build_identity"],
                   "artifacts": payload["artifacts"], "slots": [
-                      {{"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
-                        "nvidia_references": ["nvidia/nouveau.ko"]}} for slot in ("rootfs_a", "rootfs_b")]}}
+                      {{"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["brcm"],
+                        "firmware_references": []}} for slot in ("rootfs_a", "rootfs_b")]}}
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
@@ -1562,8 +1562,8 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
                             "slots": [
-                                {"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["nvidia"],
-                                 "nvidia_references": ["nvidia/nouveau.ko"]} for slot in ("rootfs_a", "rootfs_b")
+                                {"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["brcm"],
+                                 "firmware_references": []} for slot in ("rootfs_a", "rootfs_b")
                             ],
                         }))
                     return artifacts

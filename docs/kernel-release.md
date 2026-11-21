@@ -25,7 +25,8 @@ When ready, run the deferred revision-8 baseline measurements (todo 19) using
 the approved image-building-pipeline source commit
 `9d74a7dee0c92b01ec2af85614a04889874e6783` as the capsule's `source_commit`.
 That tree still resolves `7.2.0-ceralive8`, which the offline measurement route
-requires along with the shipping variant and both populated RK3588 slots.
+uses from the released archive. The offline measurement route follows the
+approved source bundle's shipping variant and requires both populated RK3588 slots.
 Follow the [offline measurement runbook](image-measurement.md), including
 its authorization and admission steps. Retain each board's `measurement.json`
 and verifier `acceptance.json` in the private output store. Record the verified
