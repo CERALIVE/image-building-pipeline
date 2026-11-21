@@ -4,6 +4,7 @@
 from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from collections.abc import Iterator
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 import gzip
@@ -45,6 +46,11 @@ CANDIDATE_META = ("kernel-artifact.json", "resolved.config", "built-modules.txt"
 CANDIDATE_PROOF = ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")
 LOCAL_STATUS = {"publication": "local-unpublishable", "kernel_floor": "skipped-local",
                 "github_release_history": "skipped-local"}
+INVALID_ARTIFACT_STATUS = (
+    ("publication", ("published", False, "local-unpublishable ")),
+    ("kernel_floor", ("none", 0, "skipped-loca")),
+    ("github_release_history", ("checked-remote", ["skipped-local"], "checked-local-snapsho")),
+)
 
 
 def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
@@ -306,6 +312,60 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
         local_receipt = receipt | LOCAL_STATUS
         local_auth = authorization | {"mode": "local-unpublishable"}
         local_proof = proof(local_receipt, local_auth, local_payload)
+        from kernel_release import KernelReleaseError, verified_metadata
+
+        guest_stage = runpy.run_path(str(ROOT / "lib/measurement-candidate.py"))["stage"]
+        guest_identity = Identity("fixture", reviewed["board"], reviewed["source_commit"], reviewed["epoch"], "a" * 64)
+        for status_field, invalid_values in INVALID_ARTIFACT_STATUS:
+            for invalid_value in invalid_values:
+                label = f"artifact marker {status_field}={invalid_value!r}"
+                changed = LOCAL_STATUS | {status_field: invalid_value}
+                files = local_payload | {"kernel-artifact.json": json.dumps(metadata | changed).encode()}
+                files["SHA256SUMS"] = sums({name: data for name, data in files.items() if name != "SHA256SUMS"})
+                evidence = proof(local_receipt | changed, local_auth | {"mode": changed["publication"]}, files)
+                with tempfile.TemporaryDirectory(dir=work) as directory:
+                    guest = Path(directory)
+                    inputs = guest / "inputs"
+                    inputs.mkdir(mode=0o700)
+                    for name, data in files.items():
+                        for path in (guest / name, inputs / pin(data)["sha256"]):
+                            path.touch(mode=0o600, exist_ok=False)
+                            path.write_bytes(data)
+                    try:
+                        verified_metadata(version, guest, measurement=True)
+                    except KernelReleaseError as error:
+                        assert str(error) == "invalid local candidate metadata status", (label, error)
+                    else:
+                        failures.append(f"library accepted invalid {label}")
+                    guest_pins = {name: pin(data) for name, data in files.items()}
+                    approval = binding | {"payloads": guest_pins, "proof": {k: pin(v) for k, v in evidence.items()}}
+                    guest_trust = {field: approval}
+                    guest_objects = [row | {"kind": CANDIDATE_KIND, "urls": []} for row in guest_pins.values()]
+                    guest_inventory = {key: reviewed[key] for key in ("board", "source_commit", "epoch")}
+                    job = guest / "job.json"
+                    for path, record in (
+                        (inputs / "trust.json", guest_trust),
+                        (inputs / "inventory.json", guest_inventory | {field: approval, "objects": guest_objects}),
+                        (job, {"schema": 1, "operation": "verify", "identity": asdict(guest_identity), "trust": guest_trust}),
+                    ):
+                        path.touch(mode=0o600, exist_ok=False)
+                        path.write_text(json.dumps(record))
+                    output_dir = guest / "staged"
+                    with patch.dict(os.environ, {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}), \
+                            patch.dict(guest_stage.__globals__, {"JOB": job, "INPUTS": inputs}):
+                        try:
+                            guest_stage(inputs, reviewed["board"], (package, version, "arm64"), output_dir)
+                        except StreamError as error:
+                            assert str(error) == "invalid measurement-candidate payload checksum or metadata", (label, error)
+                            assert not output_dir.exists(), label
+                        else:
+                            failures.append(f"guest staged invalid {label}")
+                try:
+                    coherently_replace(f"sealer {label}", files, evidence, "artifact status")
+                except AssertionError as error:
+                    failures.append(f"sealer did not reject {label} before prefetch: {error}")
+                finally:
+                    output.unlink(missing_ok=True)
         for status_field in LOCAL_STATUS:
             for value in ("unexpected", False):
                 coherently_replace(f"invalid local receipt {status_field}={value!r}", local_payload,
@@ -1116,6 +1176,16 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
         local_policy, local_delivery, local_bodies = candidate_capsule(LOCAL_STATUS)
         local = candidate_evidence(local_delivery, local_bodies, local_policy)
         assert (local.origin, local.deb_sha256, local.local) == (KIND, candidate_digest, LOCAL_STATUS)
+        for status_field, invalid_values in INVALID_ARTIFACT_STATUS:
+            for invalid_value in invalid_values:
+                changed = LOCAL_STATUS | {status_field: invalid_value}
+                bad_policy, bad_delivery, bad_bodies = candidate_capsule(changed)
+                try:
+                    candidate_evidence(bad_delivery, bad_bodies, bad_policy)
+                except StreamError as error:
+                    assert str(error) == "invalid local candidate metadata status", (changed, error)
+                else:
+                    raise AssertionError(f"host admitted invalid artifact marker {status_field}={invalid_value!r}")
         normal_receipt = acceptance_record(identity, "1" * 64, "2" * 64, {}, 123.0, identity, evidence)
         local_receipt = acceptance_record(identity, "1" * 64, "2" * 64, {}, 123.0, identity, local)
         assert "kernel" not in normal_receipt

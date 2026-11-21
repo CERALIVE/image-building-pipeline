@@ -590,12 +590,13 @@ reviewed package must match the existing unique signed-index lookup, original
 URL, SHA-256 and Debian control identity. Nothing is installed, unpacked into
 a rootfs, executed from packages or re-signed.
 
-#### Unreleased RK3588 measurement candidate: host sealing only
+#### Unreleased RK3588 measurement candidate
 
 The host producer can seal one explicitly approved private bundle from
-`ci/kernel-release.py` (without `--bench-report`). This does **not** admit it
-at runtime. The current launcher policy and baked capsule reader reject this
-format; the guest, verifier, full build and release paths are unchanged.
+`ci/kernel-release.py` (without `--bench-report`). Sealing alone does **not**
+authorize runtime use. Only the explicit measurement path below can admit it
+with an independently approved policy, capsule digest and compatible guest
+base. Full image and release paths reject it.
 
 For this mode, replace `kernel_metadata` in the public policy with this
 `measurement_candidate` object, and put
@@ -656,8 +657,9 @@ Approve each operational step separately:
 
 1. Choose a private bundle location and a dedicated runner or quiet build
    window. Do not publish the bundle as a public Actions artifact.
-2. Review the new guest seed, then approve the rebuilt guest base and its
-   digest. This code change does not update any running base.
+2. Confirm the approved guest base supports sealed measurement candidates.
+   If it does not, review the new guest seed and approve the rebuilt base
+   digest before use. Local candidate mode does not change the guest seed.
 3. Reseal the approved bundle and source checkout, then review and approve
    the new capsule digest independently of the base approval.
 

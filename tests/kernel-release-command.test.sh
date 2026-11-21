@@ -119,10 +119,18 @@ ok 'storage-free candidate marks skipped history and cannot supply publication a
 choose local-history
 mkdir "${WORK}/history/7.2.0-ceralive2"
 if invoke_local >"${WORK}/refused" 2>&1; then bad 'local candidate ignored supplied release history'; fi
-grep -q 'does not exceed published 7.2.0-ceralive2\|immutable identity.*refused' "${WORK}/refused"
+grep -Fq 'does not exceed published 7.2.0-ceralive2' "${WORK}/refused"
 [[ ! -e "${store}" ]]
 rmdir "${WORK}/history/7.2.0-ceralive2"
 ok 'local candidate still refuses a lower version with supplied release history'
+choose checked-local-history
+mkdir "${WORK}/history/7.1.0-ceralive1"
+invoke_local
+for record in candidate.json kernel-artifact.json; do
+  jq -e '.github_release_history == "checked-local-snapshot"' "${store}/${selected}/${record}" >/dev/null
+done
+rmdir "${WORK}/history/7.1.0-ceralive1"
+ok 'successful local build records checked history in both metadata records'
 choose mode-conflict
 refuse 'floor snapshot and local build are mutually exclusive' 'not allowed with argument' --local-unpublishable
 [[ ! -e "${KERNEL_CLI_LOG}" ]]
@@ -130,6 +138,21 @@ if invoke_local --publish >"${WORK}/refused" 2>&1; then bad 'local flag allowed 
 assert_contains 'explicit local publication refusal' "${WORK}/refused" \
   '--local-unpublishable cannot be used with --publish'
 [[ ! -e "${KERNEL_CLI_LOG}" ]]
+(umask 077; jq -n --arg commit "${commit}" --arg sha "$(jq -r .deb_sha256 "${WORK}/input/kernel-artifact.json")" \
+  '{type:"kernel-lane",candidate_run_id:"12345",tag:"kernel/v7.2.0-ceralive1",
+    commit:$commit,deb_sha256:$sha,boards:(
+      {happy:{result:"pass",evidence:["proof/happy.txt"]},
+       forced_rollback:{result:"pass",evidence:["proof/rollback.txt"]},
+       restored:{result:"pass",evidence:["proof/restored.txt"]}} |
+      {"rock-5b-plus":.,"orange-pi-5-plus":.})}' >"${WORK}/bench.json")
+if invoke_local --bench-report "${WORK}/bench.json" >"${WORK}/refused" 2>&1; then
+  bad 'local bench report was accepted'
+elif grep -Fxq -- 'kernel-release.py: error: --local-unpublishable cannot carry a publication bench report' \
+    "${WORK}/refused" && [[ ! -e "${KERNEL_CLI_LOG}" && ! -e "${store}" ]]; then
+  ok 'local bench report refused before gates or bundle creation'
+else
+  bad 'local bench report did not hit the early refusal'
+fi
 choose happy
 invoke
 bundle="${store}/${selected}"
@@ -201,13 +224,6 @@ PY
 PYTHONPATH="${WORK}/injection" refuse 'syscall-time collision is create-only' 'immutable candidate already exists'
 assert_eq 'atomic collision sentinel unchanged' atomic-preserved "$(<"${store}/${selected}/sentinel")"
 choose bench
-jq -n --arg commit "${commit}" --arg sha "$(jq -r .deb_sha256 "${WORK}/input/kernel-artifact.json")" \
-  '{type:"kernel-lane",candidate_run_id:"12345",tag:"kernel/v7.2.0-ceralive1",
-    commit:$commit,deb_sha256:$sha,boards:(
-      {happy:{result:"pass",evidence:["proof/happy.txt"]},
-       forced_rollback:{result:"pass",evidence:["proof/rollback.txt"]},
-       restored:{result:"pass",evidence:["proof/restored.txt"]}} |
-      {"rock-5b-plus":.,"orange-pi-5-plus":.})}' >"${WORK}/bench.json"
 invoke --bench-report "${WORK}/bench.json" --channel stable
 cmp "${WORK}/bench.json" "${store}/${selected}/bench-${selected}.json"
 assert_eq 'bench raw-byte digest bound to authorization inputs' \
