@@ -692,6 +692,13 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
 
 
 FIXTURE_MODULES = b"drivers/net/fixture.ko\n"
+FIXTURE_FIRMWARE = {
+    "removed": ["amdgpu"], "retained": ["brcm"], "firmware_references": [],
+    "examined_firmware_references": 1, "nouveau_present": False, "candidate_consumers": {"amdgpu": []},
+    "examined_modules": ["fixture.ko"],
+    "retention_scan": {"candidate_rows": {"amdgpu": []}, "present": {"amdgpu": False, "brcm": True},
+                       "examined_firmware_references": 1},
+}
 
 
 def fixture_modules(directory: pathlib.Path) -> None:
@@ -840,9 +847,8 @@ if mode.startswith("pair:"):
         from image_stream import Identity, encode
         result = {{"schema": 1, "verified": True, "build_identity": payload["build_identity"],
                   "artifacts": payload["artifacts"], "slots": [
-                      {{"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["brcm"],
-                        "firmware_references": [], "examined_firmware_references": 1, "nouveau_present": False,
-                        "candidate_consumers": {{"amdgpu": []}}}} for slot in ("rootfs_a", "rootfs_b")]}}
+                      {{"slot": slot, "reserve": "reserve", **{FIXTURE_FIRMWARE!r}}}
+                      for slot in ("rootfs_a", "rootfs_b")]}}
         encode(sys.stdout.buffer, [("verification.json", json.dumps(result).encode())],
                Identity(**payload["identity"]))
     sys.exit(0)
@@ -1577,9 +1583,7 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                             "schema": 1, "verified": True, "build_identity": payload["build_identity"],
                             "artifacts": payload["artifacts"],
                             "slots": [
-                                {"slot": slot, "reserve": "reserve", "removed": ["amdgpu"], "retained": ["brcm"],
-                                 "firmware_references": [], "examined_firmware_references": 1, "nouveau_present": False,
-                                 "candidate_consumers": {"amdgpu": []}}
+                                {"slot": slot, "reserve": "reserve", **FIXTURE_FIRMWARE}
                                 for slot in ("rootfs_a", "rootfs_b")
                             ],
                         }))

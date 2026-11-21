@@ -108,6 +108,11 @@ firmware_sweep_module_refs() (
   # modules.builtin list, or non-empty built-in metadata records. An orphan
   # empty metadata file is absence of proof, not an empty inventory.
   (( ${#mods[@]} + ${#builtin_lists[@]} + records > 0 )) || return 1
+  if [[ "${2:-}" == --examined-modules ]]; then
+    for ko in "${mods[@]}"; do
+      printf '\t%s\n' "${ko#"${moddir}/"}"
+    done
+  fi
   printf '%s' "${refs}" | awk 'NF' | sort -u
 )
 

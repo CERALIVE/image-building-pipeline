@@ -30,7 +30,7 @@ from image_stream import (
     BUILD_LOG_LIMIT, HEADER_LIMIT, MAGIC, MANIFEST_LIMIT, Identity, StreamError, checked_open, decode, exact_json,
     list_directory, listed_entry, read_header, retry_check, unique_object, verify_sidecar,
 )
-from image_verify import approved_nouveau, candidate_consumers, check_nouveau_evidence, firmware_path
+from image_verify import approved_modules, candidate_consumers, check_nouveau_evidence, firmware_path
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -231,7 +231,28 @@ def measurement_stages(row, identity: Identity, public_root: str, members) -> di
     return stages
 
 
-def validate_verification(row, identity: Identity, inventory: dict, nouveau_present: bool) -> None:
+def check_retention_scan(slot: dict, references: list[str], candidates: dict) -> None:
+    """Reconcile emitted firmware rows with the observations used to decide retention."""
+    scan = slot["retention_scan"]
+    if type(scan) is not dict or scan.keys() != {"candidate_rows", "present", "examined_firmware_references"}:
+        raise StreamError("invalid firmware retention scan")
+    rows = {name: [row for row in references if (path := row.partition("\t")[0]) == name
+                   or path.startswith(name + "/")] for name in candidates}
+    if not exact_json(scan["candidate_rows"], rows):
+        raise StreamError("candidate references disagree with the retention scan")
+    present = scan["present"]
+    if (type(present) is not dict or any(type(value) is not bool for value in present.values())
+            or any(not firmware_path(name) for name in present)):
+        raise StreamError("invalid firmware retention inventory")
+    if not exact_json(slot["retained"], sorted(name for name, exists in present.items() if exists)):
+        raise StreamError("retained firmware disagrees with the retention scan")
+    if not exact_json(slot["removed"], sorted(name for name, exists in present.items() if not exists)):
+        raise StreamError("removed firmware disagrees with the retention scan")
+    if not exact_json(slot["examined_firmware_references"], scan["examined_firmware_references"]):
+        raise StreamError("firmware count disagrees with the retention scan")
+
+
+def validate_verification(row, identity: Identity, inventory: dict, modules: list[str]) -> None:
     if type(row) is not dict:
         raise StreamError("invalid verifier receipt")
     slots = row.get("slots")
@@ -240,10 +261,12 @@ def validate_verification(row, identity: Identity, inventory: dict, nouveau_pres
                                     "artifacts": inventory, "slots": slots})):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
     labels = set()
+    nouveau_present = "nouveau.ko" in modules
     for slot in slots:
         if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained",
                                                      "firmware_references", "examined_firmware_references",
-                                                     "candidate_consumers", "nouveau_present"}
+                                                     "candidate_consumers", "nouveau_present",
+                                                     "examined_modules", "retention_scan"}
                 or type(slot["slot"]) is not str or slot["slot"] not in ("rootfs_a", "rootfs_b")
                 or type(slot["reserve"]) is not str or not slot["reserve"]
                 or any(type(slot[key]) is not list or any(type(item) is not str for item in slot[key])
@@ -266,6 +289,9 @@ def validate_verification(row, identity: Identity, inventory: dict, nouveau_pres
                 or not exact_json(consumers, candidate_consumers(list(consumers), references))):
             raise StreamError("invalid candidate firmware consumers")
         check_nouveau_evidence(nouveau_present, references)
+        if not exact_json(slot["examined_modules"], modules):
+            raise StreamError("examined modules disagree with the approved module inventory")
+        check_retention_scan(slot, references, consumers)
         labels.add(slot["slot"])
     if labels != {"rootfs_a", "rootfs_b"}:
         raise StreamError("missing or duplicate verifier slot")
@@ -533,8 +559,8 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
                 or not exact_json(result, {"schema": 1, "identity": asdict(identity), "network_denied": True})):
             raise StreamError("offline probe receipt mismatch")
         return None
-    nouveau_present = approved_nouveau(read_return_record(artifacts / "built-modules.txt", private=True),
-                                       trust["kernel_metadata"]["built-modules.txt"])
+    modules = approved_modules(read_return_record(artifacts / "built-modules.txt", private=True),
+                               trust["kernel_metadata"]["built-modules.txt"])
     capsule = directory / "verifier-input.tar"
     verifier_fd = os.open(capsule, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     inputs.callback(os.close, verifier_fd)
@@ -554,7 +580,7 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
-    validate_verification(returned_json(verified / "verification.json"), identity, inventory, nouveau_present)
+    validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules)
     unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),

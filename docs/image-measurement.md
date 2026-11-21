@@ -770,16 +770,24 @@ clean ext4 reserves. A missing sweep candidate fails if Bluetooth needs it or
 if a module or built-in references that candidate and the firmware package
 owns anything at or below it. The requested file need not be one the package
 ships. The verifier also checks preserved roots and rejects leftover sweep
-candidates with neither a driver reference nor Bluetooth use. Each slot
-reports candidate-matching reference rows and the module names responsible
-for each candidate. The host requires these to agree and checks the positive
-scan count even when there are no candidate matches. Both host and verifier
-check the approved `built-modules.txt` digest and derive Nouveau presence from
-its contents, not the kernel version or a receipt flag. If Nouveau is listed,
-each slot must show at least one NVIDIA firmware reference from that module.
-If it is absent, an empty candidate proof is valid only when no candidate
-has reported consumers. The module list names compiled modules, not their
-firmware requests; the independent slot scan supplies the actual requests.
+candidates with neither a driver reference nor Bluetooth use. Each slot reports
+two views of the firmware check. The retention view records the reference rows
+that informed each candidate decision, path presence, and the count of distinct
+rows read. The emitted view separately selects the flat candidate reference rows
+from the reader output and reports the removed and retained sets and scan count.
+The consumer map comes from the retention rows, not the emitted rows. The host
+requires exact agreement on candidate rows, consumers, paths and count, including
+a positive count when no references match candidates.
+
+The host compares the installed module names examined by the slot reader with
+the names in the digest-pinned `built-modules.txt`, with module compression
+suffixes removed. It derives Nouveau presence from that inventory, not the
+kernel version or a receipt flag. If Nouveau is listed, each slot must show an
+NVIDIA firmware reference from it. If it is absent, a positive scan with no
+candidate consumers may legitimately have no candidate rows. The module list
+does not encode firmware requests. Agreement detects a fault in either reported
+view, including a lost candidate row; it does not independently repeat `modinfo`
+on the host or authenticate a common-mode error in the underlying reader.
 Read-only guest mounts compare slot contents with the
 emitted tar plus independently recompiled boot payload; ext4's empty
 `lost+found` is filesystem housekeeping. Only a matching verifier result
