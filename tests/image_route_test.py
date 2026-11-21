@@ -71,7 +71,9 @@ def kernel_metadata_fixture(objects, version, deb="d" * 64):
     result = {}
     for name, data in files.items():
         digest = hashlib.sha256(data).hexdigest()
-        (objects / digest).write_bytes(data)
+        obj = objects / digest
+        obj.write_bytes(data)
+        obj.chmod(0o600)
         result[name] = digest
     return result
 
@@ -714,7 +716,9 @@ def test_guest_stages_only_controller_approved_candidate_and_records_exact_lock(
         metadata = json.loads((artifact / "kernel-artifact.json").read_text())
         pins = {}
         for name in (deb_name, *KERNEL_FILES):
-            body = (artifact / name).read_bytes()
+            fixture = artifact / name
+            fixture.chmod(0o600)
+            body = fixture.read_bytes()
             digest = hashlib.sha256(body).hexdigest()
             pins[name] = {"sha256": digest, "length": len(body)}
             payload = inputs / digest
@@ -806,11 +810,13 @@ def test_guest_stages_only_controller_approved_candidate_and_records_exact_lock(
         status.parent.mkdir(parents=True)
         status.write_text(f"Package: {KERNEL_PACKAGE}\nVersion: {version}\nArchitecture: arm64\n"
                           "Status: install ok installed\n")
+        status.chmod(0o600)
         merge = runpy.run_path(str(ROOT / "lib/packages-lock.py"))["merge"]
         lock = root / "lock.json"
         merge(root, staging, lock, "123", "2026-01-01", "", "", measurement_candidate=True)
         assert json.loads(lock.read_text())["packages"] == [receipt]
         staged_deb = staging / "debs" / deb_name
+        staged_deb.chmod(0o600)
         original = staged_deb.read_bytes()
         staged_deb.write_bytes(bytes([original[0] ^ 1]) + original[1:])
         try:
@@ -1139,7 +1145,9 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                 "boot.scr", "boot.scr.sha256", "rootfs_a.ext4")}
             trust = {"root_der_sha256": "fixture-root", "kernel_metadata": dict.fromkeys(metadata, "approved")}
             for name in (*artifacts, "approved"):
-                (root / name).touch()
+                fixture = root / name
+                fixture.touch()
+                fixture.chmod(0o600)
             params = {"BOARD_ID": IDENTITY.board, "DTB_NAME": "fixture", "SERIAL_CONSOLE": "fixture",
                       "KERNEL_PACKAGES": KERNEL_PACKAGE, "ARCH": "arm64",
                       "KERNEL_SOURCE_PACKAGE_VERSION": "7.2.0-ceralive9"}
@@ -1170,7 +1178,9 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                                           "7.2.0-ceralive9", "arm64"]
                     destination = pathlib.Path(args[-1])
                     destination.mkdir()
-                    (destination / "built-modules.txt").write_bytes((root / "built-modules.txt").read_bytes())
+                    modules = destination / "built-modules.txt"
+                    modules.write_bytes((root / "built-modules.txt").read_bytes())
+                    modules.chmod(0o600)
                     digest = "e" if fault == "candidate-wrong-stage-digest" else "d"
                     return spawn(["/usr/bin/printf", "%s\n", digest * 64], **options)
                 if "slot_reserve_assert_ext4" in " ".join(args):
@@ -1179,7 +1189,9 @@ def test_verifier_requires_observed_e2fsck_exit() -> None:
                 if args[0] != "e2fsck":
                     if "boot-payload" in args:
                         for name in ("boot.scr", "boot.scr.sha256"):
-                            (home / "compiled-boot" / name).touch()
+                            fixture = home / "compiled-boot" / name
+                            fixture.touch()
+                            fixture.chmod(0o600)
                     return spawn(["/bin/true"], **options)
                 seen.append("e2fsck")
                 assert args == ["e2fsck", "-fn", str(root / "rootfs_a.ext4")]

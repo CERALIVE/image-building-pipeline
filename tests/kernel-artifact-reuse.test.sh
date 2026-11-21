@@ -149,7 +149,9 @@ objects = []
 for name in (deb, "kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"):
     data = (bundle / name).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    (directory / digest).write_bytes(data)
+    payload = directory / digest
+    payload.write_bytes(data)
+    payload.chmod(0o600)
     payloads[name] = {"sha256": digest, "length": len(data)}
     objects.append(payloads[name] | {"kind": "measurement-candidate", "urls": []})
 artifact = json.loads((bundle / "kernel-artifact.json").read_text())
@@ -158,20 +160,34 @@ binding.update(payloads=payloads, producer_commit="a" * 40, candidate_run_id="12
     name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "length": len(name)}
     for name in ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")
 })
-(directory / "inventory.json").write_text(json.dumps({"measurement_candidate": binding, "objects": objects}))
-(directory / "trust.json").write_text(json.dumps({"measurement_candidate": binding}))
+for target, inventory, trust in (
+    (directory, {"measurement_candidate": binding, "objects": objects}, {"measurement_candidate": binding}),
+    (directory / "inventory-field", {"measurement_candidate": binding, "objects": []}, {}),
+    (directory / "trust-field", {"objects": []}, {"measurement_candidate": binding}),
+    (directory / "object-kind", {"objects": objects[:1]}, {}),
+):
+    target.mkdir(exist_ok=True)
+    for name, data in (("inventory.json", inventory), ("trust.json", trust)):
+        path = target / name
+        path.write_text(json.dumps(data))
+        path.chmod(0o600)
 PY
 release_with_candidate() (
   export CERALIVE_BUILD_MODE=production CERALIVE_REQUIRE_KERNEL_APT=1
-  export CERALIVE_SEALED_INPUTS="${candidate_inputs}"
+  export CERALIVE_SEALED_INPUTS="$1"
+  shift
   bash "${repo}/lib/orchestrate.sh" --board rock-5b-plus \
     --manifest "${repo}/manifests/boards/rock-5b-plus.yaml" "$@"
 )
 before_candidate="$(wc -l <"${WORK}/curl.log")"
 refuse 'release refuses a sealed candidate even when the exact signed APT kernel is available' \
-  'sealed measurement candidate is not permitted' release_with_candidate --release
+  'sealed measurement candidate is not permitted' release_with_candidate "${candidate_inputs}" --release
+for marker in inventory-field trust-field object-kind; do
+  refuse "release refuses the candidate ${marker} alone with the exact signed APT kernel available" \
+    'sealed measurement candidate is not permitted' release_with_candidate "${candidate_inputs}/${marker}" --release
+done
 refuse 'full image refuses a sealed candidate even when the exact signed APT kernel is available' \
-  'sealed measurement candidate is not permitted' release_with_candidate
+  'sealed measurement candidate is not permitted' release_with_candidate "${candidate_inputs}"
 [[ "$(wc -l <"${WORK}/curl.log")" == "${before_candidate}" && ! -e "${WORK}/runtime.log" ]]
 
 APT_CERALIVE_URL=https://foreign.invalid refuse 'foreign configured origin refuses before download' \
@@ -222,7 +238,7 @@ refuse 'unvalidated Orange board fails without compiling' validated_boards \
 printf 'Package: unrelated\nVersion: 1\nArchitecture: arm64\nFilename: pool/unrelated.deb\nSHA256: %064d\n\n' 0 >"${WORK}/apt/Packages"
 sign_index
 refuse 'release refuses a sealed candidate when no signed APT kernel is available' \
-  'sealed measurement candidate is not permitted' release_with_candidate --release
+  'sealed measurement candidate is not permitted' release_with_candidate "${candidate_inputs}" --release
 CERALIVE_REQUIRE_KERNEL_APT=1 refuse 'production missing version refuses with no build fallback' \
   kernel_not_on_apt fetch_kernel "${WORK}/unpublished-production"
 fetch_kernel "${WORK}/unpublished-local"

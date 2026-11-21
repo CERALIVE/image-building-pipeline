@@ -169,7 +169,10 @@ rootfs_measurement_resolved
 '''
     with tempfile.TemporaryDirectory() as temporary:
         sealed = Path(temporary)
-        (sealed / "inventory.json").write_text('{"objects":[]}\n')
+        inventory = sealed / "inventory.json"
+        inventory.write_text('{"objects":[]}\n')
+        inventory.chmod(0o600)
+        trust = sealed / "trust.json"
         for selected, approved, variant, slots, arch, valid_hash, success in (
             ("7.2.0-ceralive8", "7.2.0-ceralive8", "edge", "false", "arm64", True, True),
             ("7.2.0-ceralive9", "7.2.0-ceralive9", "edge", "false", "arm64", True, True),
@@ -189,8 +192,11 @@ rootfs_measurement_resolved
                                     "compiler": "gcc", "dockerfile_sha256": "c" * 64},
             }).encode()
             digest = hashlib.sha256(obj).hexdigest()
-            (sealed / "trust.json").write_text(json.dumps({"kernel_metadata": {"kernel-artifact.json": digest}}))
-            (sealed / digest).write_bytes(obj if valid_hash else obj + b"\n")
+            trust.write_text(json.dumps({"kernel_metadata": {"kernel-artifact.json": digest}}))
+            trust.chmod(0o600)
+            payload = sealed / digest
+            payload.write_bytes(obj if valid_hash else obj + b"\n")
+            payload.chmod(0o600)
             args = (selected, variant, slots, arch, str(sealed))
             result = subprocess.run(["bash", "-euo", "pipefail", "-c", script, "_", str(ROOT), *args],
                                     env={"PATH": os.environ["PATH"], "HOME": temporary, "TMPDIR": temporary},
