@@ -356,7 +356,18 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
     terminate = vm.terminate
 
     def fixture_terminate(process):
-        terminate(process)
+        send_signal = signal.pidfd_send_signal
+        dispatched = {}
+
+        def observe_signal(pidfd, signum):
+            now = time.monotonic()
+            send_signal(pidfd, signum)
+            dispatched.setdefault(signum, now if signum == signal.SIGKILL else time.monotonic())
+
+        with ExitStack() as signals:
+            if process is resistant:
+                signals.enter_context(patch.object(signal, "pidfd_send_signal", observe_signal))
+            terminate(process)
         if process is resistant:
             assert time.monotonic() - float((root / "sent").read_text()) < RESISTANT_REAP_SECONDS
             # A wait status alone can leave a zombie until this launcher exits.
@@ -364,6 +375,9 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
                 pathlib.Path(f"/proc/{process.pid}/stat").stat()
             except FileNotFoundError:
                 assert process.returncode == -signal.SIGKILL
+                # Timestamp after TERM and before KILL; bookkeeping cannot inflate the interval.
+                elapsed = dispatched[signal.SIGKILL] - dispatched[signal.SIGTERM]
+                (root / "term-grace").write_text(str(elapsed))
                 (root / "reap-observer-pid").write_text(str(os.getpid()))
                 report_phase(b"K")
                 # Keep the launcher alive until the test has observed the reap.
@@ -898,7 +912,10 @@ if mode.startswith("startup:"):
         "umask": os.umask(0o077),
     }}))
 def term(_signum, _frame):
-    (root / "term").touch()
+    if mode == "ignore":
+        (root / "term").write_text(str(time.monotonic()))
+    else:
+        (root / "term").touch()
     if mode == "repeat":
         os.kill(os.getppid(), signal.SIGTERM)
     if mode.startswith("startup:"):
@@ -1319,8 +1336,14 @@ os.execvp(sys.argv[1], sys.argv[1:])
             assert not (root / "handler-ran").exists(), "SIGUSR1 ran before direct exit"
         elif mode != "ignore":
             assert time.monotonic() - float((root / "sent").read_text()) < seconds
+        if mode == "ignore":
+            elapsed = float((root / "term-grace").read_text())
+            minimum = vm_process.TERM_GRACE_SECONDS - 1
+            assert 0 < minimum <= elapsed, f"SIGKILL before TERM grace: {elapsed:.3f}s, need {minimum:g}s"
         if mode in {"term", "ignore", "repeat", "inherited"}:
             assert (root / "term").exists(), "QEMU did not receive TERM"
+        if mode == "ignore":
+            assert float((root / "sent").read_text()) <= float((root / "term").read_text()) <= time.monotonic()
         if blocked or ignored:
             stop_bits = sum(1 << (sig - 1) for sig in vm.STOP_SIGNALS)
             entry_mask, entry_ignored, _ = signal_status(root / "status-launcher")
