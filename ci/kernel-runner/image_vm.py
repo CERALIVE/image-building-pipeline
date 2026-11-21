@@ -30,6 +30,7 @@ from image_stream import (
     BUILD_LOG_LIMIT, HEADER_LIMIT, MAGIC, MANIFEST_LIMIT, Identity, StreamError, checked_open, decode, exact_json,
     list_directory, listed_entry, read_header, retry_check, unique_object, verify_sidecar,
 )
+from image_verify import approved_nouveau, candidate_consumers, check_nouveau_evidence, firmware_path
 from vm_process import Cancelled, Cancellation, run
 
 IMAGE_ERRORS = (ValueError, KeyError, TypeError, RuntimeError, AdmissionError,
@@ -230,7 +231,7 @@ def measurement_stages(row, identity: Identity, public_root: str, members) -> di
     return stages
 
 
-def validate_verification(row, identity: Identity, inventory: dict) -> None:
+def validate_verification(row, identity: Identity, inventory: dict, nouveau_present: bool) -> None:
     if type(row) is not dict:
         raise StreamError("invalid verifier receipt")
     slots = row.get("slots")
@@ -241,15 +242,30 @@ def validate_verification(row, identity: Identity, inventory: dict) -> None:
     labels = set()
     for slot in slots:
         if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained",
-                                                     "firmware_references", "examined_firmware_references"}
+                                                     "firmware_references", "examined_firmware_references",
+                                                     "candidate_consumers", "nouveau_present"}
                 or type(slot["slot"]) is not str or slot["slot"] not in ("rootfs_a", "rootfs_b")
                 or type(slot["reserve"]) is not str or not slot["reserve"]
                 or any(type(slot[key]) is not list or any(type(item) is not str for item in slot[key])
                        for key in ("removed", "retained", "firmware_references"))
                 or not slot["removed"] or not slot["retained"]
                 or type(slot["examined_firmware_references"]) is not int
-                or slot["examined_firmware_references"] < max(1, len(slot["firmware_references"]))):
+                or slot["examined_firmware_references"] < max(1, len(slot["firmware_references"]))
+                or type(slot["nouveau_present"]) is not bool
+                or type(slot["candidate_consumers"]) is not dict):
             raise StreamError("invalid verifier slot record")
+        if slot["nouveau_present"] != nouveau_present:
+            raise StreamError("reported Nouveau presence differs from the approved module inventory")
+        references = slot["firmware_references"]
+        consumers = slot["candidate_consumers"]
+        removed = set(slot["removed"])
+        retained = set(slot["retained"])
+        if (not removed <= consumers.keys() or not consumers.keys() <= removed | retained
+                or any(type(name) is not str or not firmware_path(name) for name in consumers)
+                or len(references) != len(set(references))
+                or not exact_json(consumers, candidate_consumers(list(consumers), references))):
+            raise StreamError("invalid candidate firmware consumers")
+        check_nouveau_evidence(nouveau_present, references)
         labels.add(slot["slot"])
     if labels != {"rootfs_a", "rootfs_b"}:
         raise StreamError("missing or duplicate verifier slot")
@@ -517,6 +533,8 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
                 or not exact_json(result, {"schema": 1, "identity": asdict(identity), "network_denied": True})):
             raise StreamError("offline probe receipt mismatch")
         return None
+    nouveau_present = approved_nouveau(read_return_record(artifacts / "built-modules.txt", private=True),
+                                       trust["kernel_metadata"]["built-modules.txt"])
     capsule = directory / "verifier-input.tar"
     verifier_fd = os.open(capsule, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     inputs.callback(os.close, verifier_fd)
@@ -536,7 +554,7 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
                            "trust": trust, "build_identity": asdict(identity), "artifacts": inventory}}
     verified = execute(base, directory / "verify", request, cancellation, jobs)
     cancellation.check()
-    validate_verification(returned_json(verified / "verification.json"), identity, inventory)
+    validate_verification(returned_json(verified / "verification.json"), identity, inventory, nouveau_present)
     unlink_observed(capsule, verifier_info)
     return directory / "acceptance.json", {
         "schema": 1, "identity": asdict(identity),

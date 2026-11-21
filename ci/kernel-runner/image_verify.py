@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import runpy
 import stat
 import subprocess
@@ -120,8 +121,46 @@ def _compare_slot(root: Path, archive: Path, boot: dict[str, Path]) -> None:
                     raise StreamError("slot boot payload differs from trusted compilation")
 
 
+def approved_nouveau(modules: bytes, digest: str) -> bool:
+    """Read the released module inventory only after checking the independent policy pin."""
+    if hashlib.sha256(modules).hexdigest() != digest:
+        raise StreamError("module inventory differs from independently approved release")
+    paths = modules.decode("ascii").splitlines()
+    if not paths or not all(firmware_path(path) and path.endswith(".ko") for path in paths):
+        raise StreamError("invalid released module inventory")
+    return any(path.rsplit("/", 1)[-1] == "nouveau.ko" for path in paths)
+
+
+def firmware_path(path: str) -> bool:
+    return (re.fullmatch(r"[A-Za-z0-9_.,+/-]+", path) is not None
+            and not {"", ".", ".."}.intersection(path.split("/")))
+
+
+def candidate_consumers(candidates: list[str], references: list[str]) -> dict[str, list[str]]:
+    """Project exact reader rows to the module names responsible for each candidate."""
+    consumers: dict[str, set[str]] = {candidate: set() for candidate in candidates}
+    for row in references:
+        path, _, owner = row.partition("\t")
+        leaf = owner.rsplit("/", 1)[-1]
+        module = re.fullmatch(r"([A-Za-z0-9_-]+)\.ko(?:\.(?:xz|zst|gz))?", leaf)
+        builtin = re.fullmatch(r"([A-Za-z0-9_]+(?::[A-Za-z0-9_]+)*) \(built-in\)", owner)
+        matched = [name for name in candidates if path == name or path.startswith(name + "/")]
+        if not firmware_path(path) or not matched or not ((module and firmware_path(owner)) or builtin):
+            raise StreamError("invalid candidate firmware reference")
+        names = [module[1]] if module else builtin[1].split(":")
+        for candidate in matched:
+            consumers[candidate].update(names)
+    return {name: sorted(names) for name, names in consumers.items()}
+
+
+def check_nouveau_evidence(expected: bool, references: list[str]) -> None:
+    nouveau = [row for row in references if re.search(r"(?:\t|/)nouveau\.ko(?:\.(?:xz|zst|gz))?$", row)]
+    if (expected and not any(row.startswith("nvidia/") for row in nouveau)) or (not expected and nouveau):
+        raise StreamError("Nouveau firmware proof differs from the approved module inventory")
+
+
 def check_firmware(source: Path, slot: Path, params: dict[str, str],
-                   env: dict[str, str]) -> dict[str, list[str] | int]:
+                   env: dict[str, str], nouveau_present: bool) -> dict:
     """Check sweep results; the tar closure gate checks individual firmware objects."""
     firmware = slot / "usr/lib/firmware"
     refs = run_gate(["bash", "-euo", "pipefail", "-c",
@@ -155,20 +194,23 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
     candidates = (params["FIRMWARE_SWEEP_PREFIXES"] + " " + params["FIRMWARE_SWEEP_FILES"]).split()
     for name in candidates:
         matched = [(path, line) for path, line in references if path == name or path.startswith(name + "/")]
+        proof.update(line for _, line in matched)
         runtime = any(path == name or path.startswith(name + "/") for path in bluetooth)
         present = listed_entry(firmware, name) is not None
         if present:
             if not matched and not runtime:
                 raise StreamError(f"firmware sweep left an unreferenced candidate: {name}")
             retained.add(name)
-            proof.update(line for _, line in matched)
         else:
             # The sweep protects the whole candidate, even if the particular
             # requested file was never packaged.
             if runtime or (matched and any(path == name or path.startswith(name + "/") for path in owned)):
                 raise StreamError(f"firmware sweep removed a referenced candidate: {name}")
             removed.add(name)
-    return {"removed": sorted(removed), "retained": sorted(retained), "firmware_references": sorted(proof),
+    evidence = sorted(proof)
+    check_nouveau_evidence(nouveau_present, evidence)
+    return {"removed": sorted(removed), "retained": sorted(retained), "firmware_references": evidence,
+            "candidate_consumers": candidate_consumers(candidates, evidence), "nouveau_present": nouveau_present,
             "examined_firmware_references": len(refs)}
 
 
@@ -204,6 +246,8 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
         raise StreamError("returned measurement kernel version differs from approved source")
     metadata = HOME / "released-kernel"
     kernel_digest = stage_kernel_metadata(source, capsule, params, job["trust"]["kernel_metadata"], metadata)
+    nouveau_present = approved_nouveau((metadata / "built-modules.txt").read_bytes(),
+                                       job["trust"]["kernel_metadata"]["built-modules.txt"])
     for name in KERNEL_METADATA:
         supplied = artifacts["kernel.SHA256SUMS" if name == "SHA256SUMS" else name]
         if digest_file(supplied) != job["trust"]["kernel_metadata"][name]:
@@ -273,7 +317,7 @@ def verify(source: Path, capsule: Capsule, job: dict) -> list[tuple[str, Path]]:
             check_kernel_lock(lock["packages"], expected_kernel, kernel_digest)
             if digest_file(mount / "etc/rauc/ceralive-keyring.pem") != digest_file(inputs / capsule.device_root):
                 raise StreamError("installed device root bytes differ from approved public root")
-            firmware = retry_check(check_firmware, source, mount, params, env)
+            firmware = retry_check(check_firmware, source, mount, params, env, nouveau_present)
             slots.append({"slot": label, "reserve": reserve.strip(), **firmware})
         finally:
             run_gate(["umount", str(mount)], env=env, timeout=60)

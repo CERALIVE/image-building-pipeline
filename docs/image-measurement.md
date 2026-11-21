@@ -770,9 +770,16 @@ clean ext4 reserves. A missing sweep candidate fails if Bluetooth needs it or
 if a module or built-in references that candidate and the firmware package
 owns anything at or below it. The requested file need not be one the package
 ships. The verifier also checks preserved roots and rejects leftover sweep
-candidates with neither a driver reference nor Bluetooth use. On each slot,
-the host requires a positive count of all references read by the verifier,
-even if none match retained sweep candidates. No particular driver is required.
+candidates with neither a driver reference nor Bluetooth use. Each slot
+reports candidate-matching reference rows and the module names responsible
+for each candidate. The host requires these to agree and checks the positive
+scan count even when there are no candidate matches. Both host and verifier
+check the approved `built-modules.txt` digest and derive Nouveau presence from
+its contents, not the kernel version or a receipt flag. If Nouveau is listed,
+each slot must show at least one NVIDIA firmware reference from that module.
+If it is absent, an empty candidate proof is valid only when no candidate
+has reported consumers. The module list names compiled modules, not their
+firmware requests; the independent slot scan supplies the actual requests.
 Read-only guest mounts compare slot contents with the
 emitted tar plus independently recompiled boot payload; ext4's empty
 `lost+found` is filesystem housekeeping. Only a matching verifier result
