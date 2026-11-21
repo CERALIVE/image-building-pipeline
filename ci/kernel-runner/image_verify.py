@@ -30,9 +30,10 @@ def parent_fd(root: Path, name: str):
     fd = os.open(root, os.O_DIRECTORY)
     try:
         for part in parts[:-1]:
-            child = os.open(part, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
+            parent = fd
+            fd = os.open(part, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            # A failed close can already have released the parent fd.
+            os.close(parent)
         yield fd, parts[-1]
     finally:
         os.close(fd)
@@ -285,7 +286,8 @@ def checked_lock(lock: dict, epoch: int, *, origin: str = "ceralive-kernel") -> 
                 or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
                 or (row["origin"] == "measurement-candidate"
                     and (origin != "measurement-candidate" or not row["name"].startswith("linux-image-")))):
-            raise StreamError("invalid released package lock entry")
+            label = "candidate" if origin == "measurement-candidate" else "released"
+            raise StreamError(f"invalid {label} package lock entry")
         key = row["name"], row["arch"]
         if key in identities:
             raise StreamError("duplicate installed package lock entry")

@@ -1123,6 +1123,46 @@ def test_slot_content_read_error_restarts_the_comparison() -> None:
         assert injected == [0] and attempts == [archive, archive]
 
 
+def test_parent_fd_preserves_close_error_and_releases_child() -> None:
+    real_open, real_close = os.open, os.close
+    opened: list[int] = []
+    released: set[int] = set()
+    failure = OSError(errno.EIO, "fixture parent close failed after releasing fd")
+
+    def track_open(path: pathlib.Path | str, flags: int, *, dir_fd: int | None = None) -> int:
+        fd = real_open(path, flags, dir_fd=dir_fd)
+        opened.append(fd)
+        return fd
+
+    def close_after_release(fd: int) -> None:
+        real_close(fd)
+        released.add(fd)
+        if fd == opened[0]:
+            raise failure
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        (root / "sub").mkdir(mode=0o700)
+        try:
+            with patch.object(image_verify.os, "open", track_open), patch.object(
+                    image_verify.os, "close", close_after_release):
+                try:
+                    with image_verify.parent_fd(root, "sub/file"):
+                        raise AssertionError("directory walk continued after a close error")
+                except OSError as error:
+                    assert error is failure, error
+            for fd in opened:
+                try:
+                    os.fstat(fd)
+                except OSError as error:
+                    assert error.errno == errno.EBADF, error
+                else:
+                    raise AssertionError("directory walk leaked an open descriptor")
+        finally:
+            for fd in set(opened) - released:
+                real_close(fd)
+
+
 def test_verifier_requires_observed_e2fsck_exit() -> None:
     class ReserveReached(Exception):
         pass
@@ -2431,6 +2471,22 @@ def receipt_value_faults(record):
             else:
                 yield path, "0" * 64 if len(value) == 64 else "altered"
     return variants(record, ())
+
+
+def test_invalid_package_lock_entry_identifies_its_lane() -> None:
+    for origin, label in (("ceralive-kernel", "released"), ("measurement-candidate", "candidate")):
+        entry = {"name": KERNEL_PACKAGE, "version": "7.2.0-ceralive9", "arch": "arm64",
+                 "sha256": "d" * 64, "origin": origin}
+        lock = {"built_at": "2026-11-21T00:00:00Z", "source_date_epoch": IDENTITY.epoch,
+                "debian_release_dates": {"stable": "2026-11-19"}, "packages": [entry]}
+        assert image_verify.checked_lock(lock, IDENTITY.epoch, origin=origin) == [entry]
+        lock["packages"] = [entry | {"sha256": "invalid"}]
+        try:
+            image_verify.checked_lock(lock, IDENTITY.epoch, origin=origin)
+        except StreamError as error:
+            assert str(error) == f"invalid {label} package lock entry", (origin, str(error))
+        else:
+            raise AssertionError(f"{label} lock accepted an invalid package digest")
 
 
 if __name__ == "__main__":
