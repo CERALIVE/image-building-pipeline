@@ -697,6 +697,7 @@ FIXTURE_FIRMWARE = {
     "examined_firmware_references": 1, "nouveau_present": False, "candidate_consumers": {"amdgpu": []},
     "examined_modules": ["fixture.ko"],
     "retention_scan": {"candidate_rows": {"amdgpu": []},
+                       "candidate_types": {},
                        "present": dict.fromkeys(sorted(image_vm.FIRMWARE_FLOOR), True) | {"amdgpu": False},
                        "examined_firmware_references": 1},
 }

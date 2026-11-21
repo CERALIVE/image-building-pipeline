@@ -211,14 +211,23 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
             raise StreamError(f"preserved firmware directory is absent: {name}")
     removed = set()
     sweep_rows = {}
+    candidate_types = {}
+    prefixes = set(params["FIRMWARE_SWEEP_PREFIXES"].split())
     candidates = (params["FIRMWARE_SWEEP_PREFIXES"] + " " + params["FIRMWARE_SWEEP_FILES"]).split()
     for name in candidates:
         matched = [(path, line) for path, line in references if path == name or path.startswith(name + "/")]
         sweep_rows[name] = sorted(line for _, line in matched)
         runtime = any(path == name or path.startswith(name + "/") for path in bluetooth)
-        present = listed_entry(firmware, name) is not None
+        info = listed_entry(firmware, name)
+        present = info is not None
         decisions[name] = present
-        if present:
+        if info is not None:
+            kind = ("directory" if stat.S_ISDIR(info.st_mode)
+                    else "file" if stat.S_ISREG(info.st_mode) else "other")
+            expected = "directory" if name in prefixes else "file"
+            if kind != expected:
+                raise StreamError(f"retained firmware candidate is not a {expected}: {name}")
+            candidate_types[name] = kind
             if not matched and not runtime:
                 raise StreamError(f"firmware sweep left an unreferenced candidate: {name}")
             retained.add(name)
@@ -234,7 +243,7 @@ def check_firmware(source: Path, slot: Path, params: dict[str, str],
     return {"removed": sorted(removed), "retained": sorted(retained), "firmware_references": evidence,
             "candidate_consumers": consumers, "nouveau_present": nouveau_present,
             "examined_firmware_references": len(refs), "examined_modules": modules,
-            "retention_scan": {"candidate_rows": sweep_rows, "present": decisions,
+            "retention_scan": {"candidate_rows": sweep_rows, "present": decisions, "candidate_types": candidate_types,
                                "examined_firmware_references": len({row for _, row in references})}}
 
 

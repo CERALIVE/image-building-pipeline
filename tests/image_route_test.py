@@ -145,6 +145,8 @@ def test_measure_populates_only_manifest_selected_release_history() -> None:
 
 
 def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roots() -> None:
+    single_file = "r8a779x_usb3_rom.mem"
+    wrong_prefix_types = ("prefix-file", "prefix-symlink-to-dir", "prefix-dangling-symlink")
     for revision, case, failure in (
         (8, "missing-nvidia-unshipped-ref", "removed a referenced candidate: nvidia"),
         (8, "", ""), (9, "", ""), (9, "unused-nvidia", "unreferenced candidate: nvidia"),
@@ -157,6 +159,9 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
         (9, "no-refs", "found no installed-module or built-in firmware references"),
         (9, "only-noncandidate-refs", ""),
         (9, "other-candidate", ""),
+        *((8, kind, "not a directory: nvidia") for kind in wrong_prefix_types),
+        (9, "regular-file-candidate", ""),
+        (9, "directory-at-file-candidate", f"not a file: {single_file}"),
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -178,7 +183,11 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             nvidia_ref = ("nvidia/never-shipped.bin" if case in ("missing-nvidia-unshipped-ref", "never-shipped-nvidia")
                           else "nvidia/retained.bin")
             nouveau_output = ":" if case == "suppressed-nouveau" else f"printf '{nvidia_ref}\\n'"
-            other_output = "printf 'nvidia/retained.bin\\n'" if case == "other-candidate" else ":"
+            other_output = (
+                "printf 'nvidia/retained.bin\\n'" if case == "other-candidate"
+                else f"printf '{single_file}\\n'" if case in ("regular-file-candidate", "directory-at-file-candidate")
+                else ":"
+            )
             modinfo.write_text(f"#!/bin/sh\ncase \"$3\" in */nouveau.ko) {nouveau_output};; "
                                f"*/other.ko) {other_output};; *) exit 1;; esac\n")
             modinfo.chmod(0o755)
@@ -201,6 +210,8 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             roots = ("brcm", "rtl_bt", "rtw88", "rtw89", "rockchip", "mediatek", "iwlwifi", "mrvl/prestera")
             supplied = ("tegra/retained.bin", "nvidia/retained.bin", "intel/ibt-fixture",
                         *(name + "/fixture.bin" for name in roots))
+            if case in ("regular-file-candidate", "directory-at-file-candidate"):
+                supplied += (single_file,)
             if case == "never-shipped-nvidia":
                 supplied = tuple(name for name in supplied if not name.startswith("nvidia/"))
             claims = root / "var/lib/dpkg/info/armbian-firmware-full.list"
@@ -209,6 +220,7 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
             for name in supplied:
                 if ((name.startswith("nvidia/") and revision == 9 and case not in ("unused-nvidia", "other-candidate"))
                         or (case in ("missing-nvidia", "missing-nvidia-unshipped-ref") and name.startswith("nvidia/"))
+                        or (case in wrong_prefix_types and name.startswith("nvidia/"))
                         or (case in ("missing-builtin", "no-refs", "only-noncandidate-refs", "suppressed-nouveau")
                             and name.startswith("tegra/"))
                         or (case == "preserved" and name.startswith("iwlwifi/"))):
@@ -216,6 +228,13 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
                 file = firmware / name
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b"firmware")
+            if case == "prefix-file":
+                (firmware / "nvidia").write_bytes(b"not a directory")
+            elif case in ("prefix-symlink-to-dir", "prefix-dangling-symlink"):
+                (firmware / "nvidia").symlink_to("brcm" if case == "prefix-symlink-to-dir" else "absent")
+            elif case == "directory-at-file-candidate":
+                (firmware / single_file).unlink()
+                (firmware / single_file).mkdir()
             if case == "incomplete":
                 (modules / "modules.builtin.modinfo").unlink()
             params = {
@@ -251,13 +270,19 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
                 if revision == 8:
                     assert f"{nvidia_ref}\t7.2.0-ceralive-rk3588/nouveau.ko" in proof["firmware_references"]
                     assert proof["candidate_consumers"]["nvidia"] == ["nouveau"]
-                assert proof["examined_firmware_references"] == (2 if revision == 8 or case == "other-candidate" else 1)
+                assert proof["examined_firmware_references"] == (
+                    2 if revision == 8 or case in ("other-candidate", "regular-file-candidate") else 1)
+                if case == "regular-file-candidate":
+                    assert single_file in proof["retained"]
+                    assert proof["retention_scan"]["candidate_types"][single_file] == "file"
+                    assert proof["candidate_consumers"][single_file] == ["other"]
                 receipt = {
                     "schema": 1, "verified": True, "build_identity": asdict(IDENTITY), "artifacts": {},
                     "slots": [proof | {"slot": slot, "reserve": "fixture"} for slot in ("rootfs_a", "rootfs_b")],
                 }
                 image_vm.validate_verification(receipt, IDENTITY, {}, expected, domain)
-                if (revision, case) in ((8, ""), (9, "other-candidate"), (9, "only-noncandidate-refs")):
+                if (revision, case) in ((8, ""), (9, "other-candidate"), (9, "only-noncandidate-refs"),
+                                         (9, "regular-file-candidate")):
                     assert_single_firmware_faults_are_rejected(receipt, expected, domain)
                 if case == "other-candidate":
                     assert proof["candidate_consumers"]["nvidia"] == ["other"]
@@ -282,7 +307,7 @@ def test_slot_firmware_follows_installed_and_builtin_consumers_and_preserves_roo
                     reject_firmware_receipt(altered, expected, domain, "omitted referenced candidate after scanning")
 
 
-def reject_firmware_receipt(receipt: dict, modules: list[str], policy: tuple[set[str], set[str]], case) -> None:
+def reject_firmware_receipt(receipt: dict, modules: list[str], policy: tuple[dict[str, str], set[str]], case) -> None:
     try:
         image_vm.validate_verification(receipt, IDENTITY, {}, modules, policy)
     except StreamError:
@@ -292,7 +317,7 @@ def reject_firmware_receipt(receipt: dict, modules: list[str], policy: tuple[set
 
 
 def assert_single_firmware_faults_are_rejected(receipt: dict, modules: list[str],
-                                               policy: tuple[set[str], set[str]]) -> None:
+                                               policy: tuple[dict[str, str], set[str]]) -> None:
     """Mutate one wire value without changing its independent witness."""
     def alter(value):
         if type(value) is str:
@@ -352,6 +377,7 @@ def assert_single_firmware_faults_are_rejected(receipt: dict, modules: list[str]
             del missing["candidate_consumers"][candidate]
             del missing["retention_scan"]["candidate_rows"][candidate]
             del missing["retention_scan"]["present"][candidate]
+            missing["retention_scan"]["candidate_types"].pop(candidate, None)
             for field in ("removed", "retained"):
                 if candidate in missing[field]:
                     missing[field].remove(candidate)
@@ -360,6 +386,11 @@ def assert_single_firmware_faults_are_rejected(receipt: dict, modules: list[str]
                 if any(row in rows for rows in missing["retention_scan"]["candidate_rows"].values())
             ]
             reject_firmware_receipt(changed, modules, policy, (modules, index, "omit candidate", candidate))
+        for candidate, kind in slot["retention_scan"]["candidate_types"].items():
+            for wrong_kind in ("file" if kind == "directory" else "directory", "symlink", "other"):
+                changed = deepcopy(receipt)
+                changed["slots"][index]["retention_scan"]["candidate_types"][candidate] = wrong_kind
+                reject_firmware_receipt(changed, modules, policy, (index, candidate, "wrong type", wrong_kind))
         changed = deepcopy(receipt)
         changed["slots"][index]["retained"].remove("brcm")
         changed["slots"][index]["retention_scan"]["present"]["brcm"] = False
@@ -387,6 +418,7 @@ def firmware_receipt_slot(slot: dict, modules: list[str]) -> dict:
         "retained": sorted(set(slot["retained"]) | image_verify.FIRMWARE_FLOOR),
         "examined_modules": modules,
         "retention_scan": {"candidate_rows": rows,
+                           "candidate_types": dict.fromkeys(set(rows) & set(slot["retained"]), "directory"),
                            "present": (dict.fromkeys(image_verify.FIRMWARE_FLOOR, True)
                                        | dict.fromkeys(slot["retained"], True) | dict.fromkeys(slot["removed"], False)),
                            "examined_firmware_references": slot.get("examined_firmware_references", 1)},
@@ -402,7 +434,7 @@ def test_host_firmware_policy_uses_exact_resolver_artifact() -> None:
         path.chmod(0o600)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert image_vm.verified_firmware_policy(path, digest) == (
-            {"nvidia", "amdgpu", "radio.bin"}, {"brcm", "iwlwifi"})
+            {"nvidia": "directory", "amdgpu": "directory", "radio.bin": "file"}, {"brcm", "iwlwifi"})
         path.write_text(json.dumps(policy | {"FIRMWARE_SWEEP_PREFIXES": "amdgpu"}))
         try:
             image_vm.verified_firmware_policy(path, digest)
@@ -441,7 +473,7 @@ def test_host_binds_candidate_references_to_the_approved_module_list() -> None:
                        "candidate_consumers": {"amdgpu": [], "nvidia" if driver else "intel": [driver] if driver else []},
                        "nouveau_present": driver == "nouveau"}, expected) for slot in ("rootfs_a", "rootfs_b")],
         }
-        domain = ({"amdgpu", "nvidia" if driver else "intel"}, set())
+        domain = (dict.fromkeys(("amdgpu", "nvidia" if driver else "intel"), "directory"), set())
         image_vm.validate_verification(receipt, IDENTITY, {}, expected, domain)
         failures = [
             ({"nouveau_present": int(driver == "nouveau")}, "invalid verifier slot record"),
@@ -492,7 +524,7 @@ def test_host_rejects_empty_firmware_proof_without_evidence_of_inspection() -> N
             for slot in invalid["slots"]:
                 slot["examined_firmware_references"] = count
         try:
-            image_vm.validate_verification(invalid, IDENTITY, {}, ["fixture.ko"], ({"nvidia"}, set()))
+            image_vm.validate_verification(invalid, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
         except StreamError:
             pass
         else:
@@ -507,12 +539,12 @@ def test_host_accepts_firmware_proof_without_driver_references() -> None:
                    "nouveau_present": False, "candidate_consumers": {"nvidia": []}}, ["fixture.ko"])
                   for label in ("rootfs_a", "rootfs_b")],
     }
-    image_vm.validate_verification(receipt, IDENTITY, {}, ["fixture.ko"], ({"nvidia"}, set()))
+    image_vm.validate_verification(receipt, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
     for field in ("removed", "retained"):
         invalid = deepcopy(receipt)
         invalid["slots"][0][field] = []
         try:
-            image_vm.validate_verification(invalid, IDENTITY, {}, ["fixture.ko"], ({"nvidia"}, set()))
+            image_vm.validate_verification(invalid, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
         except StreamError:
             pass
         else:
@@ -521,7 +553,7 @@ def test_host_accepts_firmware_proof_without_driver_references() -> None:
                                                  "nvidia/other.bin\tsecond (built-in)"]
     receipt["slots"][0]["candidate_consumers"] = {"nvidia": ["first", "second"]}
     try:
-        image_vm.validate_verification(receipt, IDENTITY, {}, ["fixture.ko"], ({"nvidia"}, set()))
+        image_vm.validate_verification(receipt, IDENTITY, {}, ["fixture.ko"], ({"nvidia": "directory"}, set()))
     except StreamError as error:
         assert "invalid verifier slot record" in str(error)
     else:
@@ -1824,7 +1856,8 @@ def test_measurement_and_verifier_records_reject_every_wrong_typed_field() -> No
     ]}
     for record, check, args in (
         (row, image_vm.measurement_stages, (IDENTITY, root, members)),
-        (verifier, image_vm.validate_verification, (IDENTITY, inventory, ["nouveau.ko"], ({"amdgpu", "nvidia"}, set()))),
+        (verifier, image_vm.validate_verification,
+         (IDENTITY, inventory, ["nouveau.ko"], (dict.fromkeys(("amdgpu", "nvidia"), "directory"), set()))),
     ):
         check(record, *args)
         for path, invalid in wrong_typed_records(record):

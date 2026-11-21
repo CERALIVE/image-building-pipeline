@@ -783,6 +783,7 @@ a positive count when no references match candidates.
 |---|---|---|
 | Complete candidate domain | Per-candidate slot decisions and consumer keys | The exact `resolved.json` bytes in the verified artifact inventory: the verifier checks these against the approved source's resolver before scanning either slot. Every declared prefix and file needs a decision even with no references. |
 | Removed and retained paths | Flat path lists | The retention scan's path-presence decisions; every candidate is covered, the fixed RK3588 floor is present, and optional preserved entries are limited to resolver policy. |
+| Retained candidate type | Type observed without following symlinks in the mounted slot | Bound `resolved.json` requires a real directory for a sweep prefix and a regular file for a single-file candidate. The type map must cover exactly the retained candidates. |
 | Candidate reference rows and consumers | Flat emitted request rows | The per-candidate rows that informed retention, and the consumer names derived from those rows. |
 | Total inspected references | Positive flat scan count | Distinct rows counted in the retention scan, including noncandidate rows. |
 | Examined installed modules | Independent walk of the mounted slot's installed module files | Digest-pinned `built-modules.txt` basenames, with installed compression suffixes removed. Older source readers, including `9d74a7de`, need no inventory-reporting option. |

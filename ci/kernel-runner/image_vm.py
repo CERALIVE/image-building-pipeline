@@ -231,7 +231,7 @@ def measurement_stages(row, identity: Identity, public_root: str, members) -> di
     return stages
 
 
-def verified_firmware_policy(path: Path, digest: str) -> tuple[set[str], set[str]]:
+def verified_firmware_policy(path: Path, digest: str) -> tuple[dict[str, str], set[str]]:
     """Use only the resolver bytes checked against approved source by the verifier."""
     data = read_return_record(path, private=True)
     if hashlib.sha256(data).hexdigest() != digest:
@@ -246,13 +246,15 @@ def verified_firmware_policy(path: Path, digest: str) -> tuple[set[str], set[str
             or not all(firmware_path(name) for name in candidates.union(preserved))
             or candidates.intersection(FIRMWARE_FLOOR.union(preserved))):
         raise StreamError("invalid resolved firmware policy domain")
-    return candidates, set(preserved)
+    return dict.fromkeys(prefixes, "directory") | dict.fromkeys(files, "file"), set(preserved)
 
 
 def check_retention_scan(slot: dict, references: list[str], candidates: set[str], preserved: set[str]) -> None:
     """Reconcile emitted firmware rows with the observations used to decide retention."""
     scan = slot["retention_scan"]
-    if type(scan) is not dict or scan.keys() != {"candidate_rows", "present", "examined_firmware_references"}:
+    if type(scan) is not dict or scan.keys() != {
+        "candidate_rows", "present", "candidate_types", "examined_firmware_references",
+    }:
         raise StreamError("invalid firmware retention scan")
     rows = {name: [row for row in references if (path := row.partition("\t")[0]) == name
                    or path.startswith(name + "/")] for name in candidates}
@@ -274,7 +276,8 @@ def check_retention_scan(slot: dict, references: list[str], candidates: set[str]
         raise StreamError("firmware count disagrees with the retention scan")
 
 
-def validate_verification(row, identity: Identity, inventory: dict, modules: list[str], policy: tuple[set[str], set[str]]) -> None:
+def validate_verification(row, identity: Identity, inventory: dict, modules: list[str],
+                          policy: tuple[dict[str, str], set[str]]) -> None:
     if type(row) is not dict:
         raise StreamError("invalid verifier receipt")
     slots = row.get("slots")
@@ -283,7 +286,8 @@ def validate_verification(row, identity: Identity, inventory: dict, modules: lis
                                     "artifacts": inventory, "slots": slots})):
         raise StreamError("independent verifier disagrees with host-selected identity or inventory")
     labels = set()
-    candidates, preserved = policy
+    types, preserved = policy
+    candidates = set(types)
     nouveau_present = "nouveau.ko" in modules
     for slot in slots:
         if (type(slot) is not dict or slot.keys() != {"slot", "reserve", "removed", "retained",
@@ -317,6 +321,9 @@ def validate_verification(row, identity: Identity, inventory: dict, modules: lis
         if not exact_json(slot["examined_modules"], modules):
             raise StreamError("examined modules disagree with the approved module inventory")
         check_retention_scan(slot, references, candidates, preserved)
+        if not exact_json(slot["retention_scan"]["candidate_types"],
+                          {name: types[name] for name in candidates & retained}):
+            raise StreamError("retained firmware candidate types disagree with the approved policy")
         labels.add(slot["slot"])
     if labels != {"rootfs_a", "rootfs_b"}:
         raise StreamError("missing or duplicate verifier slot")
