@@ -19,12 +19,18 @@ def canonical_url(value: str) -> str:
     except ValueError as exc:
         raise InputURLError("invalid sealed origin URL") from exc
     if (url.scheme != "https" or not url.hostname or url.username is not None or url.password is not None
-            or port is not None or url.query or url.fragment or "%" in url.netloc
+            or port is not None or "?" in value or "#" in value or "%" in url.netloc
             or "\\" in value or re.search(r"%(?![0-9a-fA-F]{2})", url.path)
             or re.search(r"%(?:2f|5c|00)", url.path, re.IGNORECASE)):
         raise InputURLError("sealed objects require exact HTTPS origin URLs")
     path = unquote_to_bytes(url.path)
     if any(byte < 32 or byte == 127 for byte in path) or any(part in (b".", b"..") for part in path.split(b"/")):
         raise InputURLError("sealed URL path traversal")
-    encoded = quote_from_bytes(path, safe="/:@!$&'()*+,;=~._-")
+    # APT also escapes literal '+' in filenames; other reserved escapes retain
+    # their distinction from the corresponding literal path character.
+    def normalize_escape(match: re.Match[str]) -> str:
+        return quote_from_bytes(bytes.fromhex(match[0][1:]), safe="+")
+
+    encoded = re.sub(r"%[0-9a-fA-F]{2}", normalize_escape,
+                     quote_from_bytes(url.path.encode(), safe="/%:@!$&'()*+,;=~._-"))
     return urlunsplit((url.scheme, url.netloc, encoded, "", ""))

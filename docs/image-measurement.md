@@ -701,6 +701,14 @@ mapping opens. `--apt-get` and
 `--apt-file-method` can locate a trusted native APT installation outside the
 system prefix.
 
+For an offline audit of a retained capsule, keep the reviewed inventory
+separate from the archive. After `unpack` checks the archive digest and payload
+hashes, `verify_reviewed_objects` checks the reviewed digest, length, kind,
+and canonical URLs against the sealed objects. APT can quote `+` as `%2B`
+in a filename path; this alias does not authorize a changed origin, query,
+or distinct path. Record only the allowlisted `VERIFY_PAYLOADS` diagnostic
+code in a failure receipt, not verifier stderr, URLs, or paths.
+
 ```sh
 python3 ci/prepare-image-capsule.py \
   --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
