@@ -350,6 +350,7 @@ def prepare(args: argparse.Namespace) -> str:
 
 def refreshed_inventory(reviewed: dict, selected: dict, plan: dict, input_directory: Path) -> dict:
     """Replace only the replayed Debian binary rows, preserving other inputs."""
+    input_directory = input_directory.resolve(strict=True)
     replaced = {pin.sha256 for pin in selected.values()}
     packages = [row for row in reviewed["packages"] if row["sha256"] not in replaced]
     objects = []
@@ -357,7 +358,7 @@ def refreshed_inventory(reviewed: dict, selected: dict, plan: dict, input_direct
         if row["sha256"] in replaced:
             continue
         if "path" in row and not Path(row["path"]).is_absolute():
-            row = row | {"path": str(input_directory.absolute() / row["path"])}
+            row = row | {"path": str(input_directory / row["path"])}
         objects.append(row)
     for pin in plan.values():
         packages.append({field: getattr(pin, field) for field in
@@ -368,7 +369,7 @@ def refreshed_inventory(reviewed: dict, selected: dict, plan: dict, input_direct
     output = reviewed | {"packages": packages, "objects": objects}
     if CANDIDATE_FIELD in output:
         bundle = Path(output[CANDIDATE_FIELD]["bundle"])
-        output[CANDIDATE_FIELD] = {"bundle": str(input_directory.absolute() / bundle)}
+        output[CANDIDATE_FIELD] = {"bundle": str(input_directory / bundle)}
     return output
 
 

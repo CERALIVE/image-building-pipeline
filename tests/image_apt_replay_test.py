@@ -129,28 +129,32 @@ def regenerate_then_verify_in_another_directory() -> None:
                     (cache / row["sha256"]).write_bytes(remote[url])
         source = work / "reviewed.json"
         source.write_text(json.dumps(inventory))
-        private = work / "corrected"
-        private.mkdir(mode=0o700)
-        corrected = private / "inventory.json"
         identity = args.index("--client-identity-config")
         del args[identity:identity + 2]
-        destination = args.index("--output") + 1
-        args[destination] = str(corrected)
         args += ["--apt-get", str(apt), "--apt-file-method", str(method),
                  "--replay-metadata", str(cache)]
-        result = run([*args, "--write-replayed-inventory"], env)
-        assert result.returncode == 0, (result.stdout, result.stderr)
-        assert corrected.stat().st_mode & 0o777 == 0o600
-        pins = json.loads(corrected.read_text())["packages"]
-        ssl, = [pin for pin in pins if pin["name"] == "libssl3t64"]
-        assert (ssl["repository"], ssl["version"]) == ("debian-trixie", "3.5.9-1~deb13u1")
-        args[args.index("--inventory") + 1] = str(corrected)
-        verify_only = private / "verify-only"
-        args[destination] = str(verify_only)
-        result = run(args, env)
-        assert result.returncode == 0 and "2 Debian packages" in result.stdout, (
-            result.stdout, result.stderr)
-        assert requests == [] and not verify_only.exists()
+        input_arg = args.index("--inventory") + 1
+        output_arg = args.index("--output") + 1
+        relative = Path("..") / os.path.relpath(source, Path.cwd().parent)
+        for case, input_path in (("absolute", source), ("relative", relative)):
+            private = work / case
+            private.mkdir(mode=0o700)
+            corrected = private / "inventory.json"
+            args[input_arg] = str(input_path)
+            args[output_arg] = str(corrected)
+            result = run([*args, "--write-replayed-inventory"], env)
+            assert result.returncode == 0, (case, result.stdout, result.stderr)
+            assert corrected.stat().st_mode & 0o777 == 0o600
+            pins = json.loads(corrected.read_text())["packages"]
+            ssl, = [pin for pin in pins if pin["name"] == "libssl3t64"]
+            assert (ssl["repository"], ssl["version"]) == ("debian-trixie", "3.5.9-1~deb13u1")
+            args[input_arg] = str(corrected)
+            verify_only = private / "verify-only"
+            args[output_arg] = str(verify_only)
+            result = run(args, env)
+            assert result.returncode == 0 and "2 Debian packages" in result.stdout, (
+                case, result.stdout, result.stderr)
+            assert requests == [] and not verify_only.exists()
 
 
 if __name__ == "__main__":
