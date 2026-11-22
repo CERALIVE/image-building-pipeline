@@ -663,10 +663,20 @@ def measure_admitted(args, identity, cancellation, jobs, acquired_at, build_dead
     validate_verification(returned_json(verified / "verification.json"), identity, inventory, modules, policy,
                           reserves=reserves, candidate=approved if FIELD in trust else None)
     unlink_observed(capsule, verifier_info)
-    return directory / "acceptance.json", {
+    return directory / "acceptance.json", acceptance_record(
+        identity, args.base_sha256, trust["root_der_sha256"], inventory, acquired_at, verification, approved)
+
+
+def acceptance_record(identity: Identity, base_sha256: str, root_sha256: str, inventory: dict,
+                      acquired_at: float, verification: Identity, approved: ReleaseEvidence) -> dict:
+    """Write the pinned local status only in the host receipt, not the guest's wire format."""
+    row = {
         "schema": 1, "identity": asdict(identity),
-        "base_sha256": args.base_sha256, "artifacts": inventory, "content_verified": True,
-        "public_root_der_sha256": trust["root_der_sha256"],
+        "base_sha256": base_sha256, "artifacts": inventory, "content_verified": True,
+        "public_root_der_sha256": root_sha256,
         "lock_unit_started_at": acquired_at,
         "verification_input_sha256": verification.input_sha256,
     }
+    if approved.local:
+        row["kernel"] = kernel_receipt(approved.kernel, approved.deb_sha256) | approved.local
+    return row

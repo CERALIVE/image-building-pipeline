@@ -4,6 +4,7 @@
 from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from collections.abc import Iterator
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime, parsedate_to_datetime
 import gzip
@@ -43,6 +44,13 @@ LOCAL_PATH_CANARY = "private-client-key-path-canary"
 CANDIDATE_KIND = "measurement-candidate"
 CANDIDATE_META = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
 CANDIDATE_PROOF = ("candidate.json", "publish-authorization.inputs.json", "BUNDLE.SHA256SUMS")
+LOCAL_STATUS = {"publication": "local-unpublishable", "kernel_floor": "skipped-local",
+                "github_release_history": "skipped-local"}
+INVALID_ARTIFACT_STATUS = (
+    ("publication", ("published", False, "local-unpublishable ")),
+    ("kernel_floor", ("none", 0, "skipped-loca")),
+    ("github_release_history", ("checked-remote", ["skipped-local"], "checked-local-snapsho")),
+)
 
 
 def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
@@ -87,7 +95,9 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
 
         original = content | proof(receipt, authorization, content)
         for name, data in original.items():
-            (bundle / name).write_bytes(data)
+            path = bundle / name
+            path.write_bytes(data)
+            path.chmod(0o600)
         binding = {
             "package": package, "version": version, "arch": "arm64",
             "validated_boards": metadata["validated_boards"], "input_fingerprint": metadata["input_fingerprint"],
@@ -266,6 +276,7 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
                 finally:
                     path.unlink(missing_ok=True)
                     path.write_bytes(original[name])
+                    path.chmod(0o600)
         extra = bundle / "password-canary.deb"
         extra.write_bytes(b"sixth payload")
         rejected("extra sixth payload", "measurement-candidate bundle closure")
@@ -296,6 +307,102 @@ def test_candidate_sealing_binds_the_exact_private_producer_bundle() -> None:
                            "producer deb digest")
         coherently_replace("producer is already published", content,
                            proof(receipt | {"publication": "published"}, authorization, content), "producer receipt state")
+        local_payload = content | {"kernel-artifact.json": json.dumps(metadata | LOCAL_STATUS).encode()}
+        local_payload["SHA256SUMS"] = sums({k: v for k, v in local_payload.items() if k != "SHA256SUMS"})
+        local_receipt = receipt | LOCAL_STATUS
+        local_auth = authorization | {"mode": "local-unpublishable"}
+        local_proof = proof(local_receipt, local_auth, local_payload)
+        from kernel_release import KernelReleaseError, verified_metadata
+
+        guest_stage = runpy.run_path(str(ROOT / "lib/measurement-candidate.py"))["stage"]
+        guest_identity = Identity("fixture", reviewed["board"], reviewed["source_commit"], reviewed["epoch"], "a" * 64)
+        for status_field, invalid_values in INVALID_ARTIFACT_STATUS:
+            for invalid_value in invalid_values:
+                label = f"artifact marker {status_field}={invalid_value!r}"
+                changed = LOCAL_STATUS | {status_field: invalid_value}
+                files = local_payload | {"kernel-artifact.json": json.dumps(metadata | changed).encode()}
+                files["SHA256SUMS"] = sums({name: data for name, data in files.items() if name != "SHA256SUMS"})
+                evidence = proof(local_receipt | changed, local_auth | {"mode": changed["publication"]}, files)
+                with tempfile.TemporaryDirectory(dir=work) as directory:
+                    guest = Path(directory)
+                    inputs = guest / "inputs"
+                    inputs.mkdir(mode=0o700)
+                    for name, data in files.items():
+                        for path in (guest / name, inputs / pin(data)["sha256"]):
+                            path.touch(mode=0o600, exist_ok=False)
+                            path.write_bytes(data)
+                    try:
+                        verified_metadata(version, guest, measurement=True)
+                    except KernelReleaseError as error:
+                        assert str(error) == "invalid local candidate metadata status", (label, error)
+                    else:
+                        failures.append(f"library accepted invalid {label}")
+                    guest_pins = {name: pin(data) for name, data in files.items()}
+                    approval = binding | {"payloads": guest_pins, "proof": {k: pin(v) for k, v in evidence.items()}}
+                    guest_trust = {field: approval}
+                    guest_objects = [row | {"kind": CANDIDATE_KIND, "urls": []} for row in guest_pins.values()]
+                    guest_inventory = {key: reviewed[key] for key in ("board", "source_commit", "epoch")}
+                    job = guest / "job.json"
+                    for path, record in (
+                        (inputs / "trust.json", guest_trust),
+                        (inputs / "inventory.json", guest_inventory | {field: approval, "objects": guest_objects}),
+                        (job, {"schema": 1, "operation": "verify", "identity": asdict(guest_identity), "trust": guest_trust}),
+                    ):
+                        path.touch(mode=0o600, exist_ok=False)
+                        path.write_text(json.dumps(record))
+                    output_dir = guest / "staged"
+                    with patch.dict(os.environ, {"CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}), \
+                            patch.dict(guest_stage.__globals__, {"JOB": job, "INPUTS": inputs}):
+                        try:
+                            guest_stage(inputs, reviewed["board"], (package, version, "arm64"), output_dir)
+                        except StreamError as error:
+                            assert str(error) == "invalid measurement-candidate payload checksum or metadata", (label, error)
+                            assert not output_dir.exists(), label
+                        else:
+                            failures.append(f"guest staged invalid {label}")
+                try:
+                    coherently_replace(f"sealer {label}", files, evidence, "artifact status")
+                except AssertionError as error:
+                    failures.append(f"sealer did not reject {label} before prefetch: {error}")
+                finally:
+                    output.unlink(missing_ok=True)
+        for status_field in LOCAL_STATUS:
+            for value in ("unexpected", False):
+                coherently_replace(f"invalid local receipt {status_field}={value!r}", local_payload,
+                                   proof(local_receipt | {status_field: value}, local_auth, local_payload),
+                                   "producer receipt state")
+            reduced = {k: v for k, v in local_receipt.items() if k != status_field}
+            coherently_replace(f"missing local receipt {status_field}", local_payload,
+                               proof(reduced, local_auth, local_payload), "producer receipt record")
+            dup = local_proof["candidate.json"].replace(f'"{status_field}":'.encode(),
+                                                       f'"{status_field}": null, "{status_field}":'.encode(), 1)
+            records = {"candidate.json": dup, "publish-authorization.inputs.json": local_proof["publish-authorization.inputs.json"]}
+            coherently_replace(f"duplicate local receipt {status_field}", local_payload,
+                               records | {"BUNDLE.SHA256SUMS": sums(local_payload | records)},
+                               "producer receipt record")
+            bad_metadata = {key: value for key, value in (metadata | LOCAL_STATUS).items() if key != status_field}
+            bad_payload = local_payload | {"kernel-artifact.json": json.dumps(bad_metadata).encode()}
+            bad_payload["SHA256SUMS"] = sums({k: v for k, v in bad_payload.items() if k != "SHA256SUMS"})
+            coherently_replace(f"missing artifact status {status_field}", bad_payload,
+                               proof(local_receipt, local_auth, bad_payload), "artifact status")
+        coherently_replace("local candidate with normal auth mode", local_payload,
+                           proof(local_receipt, authorization, local_payload), "producer receipt state")
+        coherently_replace("local candidate with no artifact status", content,
+                           proof(local_receipt, local_auth, content), "producer receipt record")
+        for name, data in (local_payload | local_proof).items():
+            (bundle / name).write_bytes(data)
+            (bundle / name).chmod(0o600)
+        local_binding = binding | {"payloads": {k: pin(v) for k, v in local_payload.items()},
+                                   "proof": {k: pin(v) for k, v in local_proof.items()}}
+        rc, diagnostic = invoke(local_binding)
+        assert rc == 0 and output.is_file(), diagnostic
+        with tarfile.open(output) as archive:
+            kernel_meta = local_binding["payloads"]["kernel-artifact.json"]["sha256"]
+            sealed = json.load(archive.extractfile("objects/" + kernel_meta))
+            assert {key: sealed[key] for key in LOCAL_STATUS} == LOCAL_STATUS
+        output.unlink()
+        for name, data in original.items():
+            (bundle / name).write_bytes(data)
         coherently_replace("missing commit in producer receipt", content,
                            proof({k: v for k, v in receipt.items() if k != "commit"}, authorization, content),
                            "producer receipt record")
@@ -535,7 +642,7 @@ def assert_prefetch_mismatch(repository: str | None, role: str, label: str, *, s
         root = store(b"public root fixture", "public-trust")
         keyring = store(b"archive keyring fixture", "apt-metadata")
         builder = store(b"builder fixture", "builder-image")
-        kernel = {name: store(name.encode(), "kernel-metadata") for name in
+        kernel = {name: store(b"{}" if name == "kernel-artifact.json" else name.encode(), "kernel-metadata") for name in
                   ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")}
         policies = {}
         repositories = {}
@@ -702,7 +809,10 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
         packages = []
         metadata = {}
         for name in ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS"):
-            metadata[name] = store(name.encode(), "kernel-metadata")
+            data = b'{}' if name == "kernel-artifact.json" else name.encode()
+            if case == "local-as-released" and name == "kernel-artifact.json":
+                data = json.dumps(LOCAL_STATUS).encode()
+            metadata[name] = store(data, "kernel-metadata")
         builders = [{"object": store(("builder " + arch).encode(), "builder-image"),
                      "tag": "fixture:" + arch, "image_id": "sha256:" + "1" * 64, "arch": arch}
                     for arch in ("arm64", "amd64")]
@@ -893,6 +1003,7 @@ def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str
 def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
     from image_candidate_policy import FIELD, KIND, METADATA, PROOF
     from image_receipt import released_evidence
+    from image_vm import acceptance_record
 
     with fixture("debian-waiver") as (work, inventory, _args, _env, requests, remote):
         trust = json.loads((work / "policy.json").read_text())
@@ -907,9 +1018,10 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
         kernel = "linux-image-7.2.0-ceralive-rk3588"
         digest = "d" * 64
 
-        def candidate_capsule() -> tuple[dict, dict, dict[str, bytes]]:
+        def candidate_capsule(status: dict | None = None) -> tuple[dict, dict, dict[str, bytes]]:
             version = "7.2.0-ceralive9"
             files = {name: name.encode() for name in (f"{kernel}_{version}_arm64.deb", *METADATA)}
+            files["kernel-artifact.json"] = json.dumps(status or {}).encode()
             approvals = {name: {"sha256": hashlib.sha256(body).hexdigest(), "length": len(body)}
                          for name, body in files.items()}
             approval = {"package": kernel, "version": version, "arch": "arm64",
@@ -947,6 +1059,7 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
                 "wrong-version-format": {"version": "7.2.0-ceralive09"},
                 "wrong-validated-board": {"validated_boards": ["orange-pi-5-plus"]},
                 "wrong-validated-boards-type": {"validated_boards": board},
+                "local-as-released": LOCAL_STATUS,
             }
             metadata = json.dumps(kernel_fields | metadata_faults.get(fault, {})).encode()
             pin = hashlib.sha256(metadata).hexdigest()
@@ -1035,6 +1148,7 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
             ("candidate-object", "invalid released capsule identity"),
             ("duplicate-member", "duplicate or excessive capsule members"),
             ("wrong-length", "invalid released capsule evidence object"),
+            ("local-as-released", "local candidate metadata is not publishable or released"),
         ):
             try:
                 released_evidence(capsule_bytes(9, fault), identity, trust, work, lambda: None)
@@ -1049,14 +1163,36 @@ def test_host_reauthenticates_original_release_bytes_for_receipts() -> None:
         version = policy[FIELD]["version"]
         candidate_digest = policy[FIELD]["payloads"][f"{kernel}_{version}_arm64.deb"]["sha256"]
 
-        def candidate_evidence(capsule: dict, payloads: dict[str, bytes]):
+        def candidate_evidence(capsule: dict, payloads: dict[str, bytes], trust_policy: dict = policy):
             return released_evidence(pack([("inventory.json", json.dumps(capsule).encode()), *(
-                ("objects/" + key, body) for key, body in payloads.items())]), identity, policy, work, lambda: None)
+                ("objects/" + key, body) for key, body in payloads.items())]), identity, trust_policy, work,
+                lambda: None)
 
         evidence = candidate_evidence(delivery, bodies)
         assert evidence.kernel == (kernel, version, "arm64")
         assert evidence.origin == KIND
         assert evidence.deb_sha256 == candidate_digest
+        assert evidence.local is None
+        local_policy, local_delivery, local_bodies = candidate_capsule(LOCAL_STATUS)
+        local = candidate_evidence(local_delivery, local_bodies, local_policy)
+        assert (local.origin, local.deb_sha256, local.local) == (KIND, candidate_digest, LOCAL_STATUS)
+        for status_field, invalid_values in INVALID_ARTIFACT_STATUS:
+            for invalid_value in invalid_values:
+                changed = LOCAL_STATUS | {status_field: invalid_value}
+                bad_policy, bad_delivery, bad_bodies = candidate_capsule(changed)
+                try:
+                    candidate_evidence(bad_delivery, bad_bodies, bad_policy)
+                except StreamError as error:
+                    assert str(error) == "invalid local candidate metadata status", (changed, error)
+                else:
+                    raise AssertionError(f"host admitted invalid artifact marker {status_field}={invalid_value!r}")
+        normal_receipt = acceptance_record(identity, "1" * 64, "2" * 64, {}, 123.0, identity, evidence)
+        local_receipt = acceptance_record(identity, "1" * 64, "2" * 64, {}, 123.0, identity, local)
+        assert "kernel" not in normal_receipt
+        assert local_receipt == normal_receipt | {"kernel": {
+            "name": kernel, "version": version, "arch": "arm64", "sha256": candidate_digest,
+            "origin": KIND, **LOCAL_STATUS,
+        }}
         assert evidence.validity == {"schema": 1, "purpose": "rootfs-measurement", "repositories": list(validity.values())}
         candidate_rows = delivery["objects"]
         slot = next(i for i, row in enumerate(candidate_rows) if row["sha256"] == candidate_digest)
@@ -1474,6 +1610,14 @@ def test_codename_cannot_be_changed_without_independent_policy_approval() -> Non
             assert expected in result.stderr, (case, result.stderr)
             assert requests == [], case
             assert not (work / "capsule.tar").exists(), case
+
+
+def test_release_sealing_rejects_local_candidate_metadata() -> None:
+    with fixture("local-as-released") as (work, _inventory, args, env, _requests, _remote):
+        result = run(args, env)
+        assert result.returncode == 1, result.stderr
+        assert "local candidate metadata is not publishable or released" in result.stderr
+        assert not Path(args[args.index("--output") + 1]).exists()
 
 
 def test_cli_seals_original_bytes_and_importer_accepts_authenticated_closure() -> None:

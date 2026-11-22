@@ -590,12 +590,13 @@ reviewed package must match the existing unique signed-index lookup, original
 URL, SHA-256 and Debian control identity. Nothing is installed, unpacked into
 a rootfs, executed from packages or re-signed.
 
-#### Unreleased RK3588 measurement candidate: host sealing only
+#### Unreleased RK3588 measurement candidate
 
 The host producer can seal one explicitly approved private bundle from
-`ci/kernel-release.py` (without `--bench-report`). This does **not** admit it
-at runtime. The current launcher policy and baked capsule reader reject this
-format; the guest, verifier, full build and release paths are unchanged.
+`ci/kernel-release.py` (without `--bench-report`). Sealing alone does **not**
+authorize runtime use. Only the explicit measurement path below can admit it
+with an independently approved policy, capsule digest and compatible guest
+base. Full image and release paths reject it.
 
 For this mode, replace `kernel_metadata` in the public policy with this
 `measurement_candidate` object, and put
@@ -639,6 +640,14 @@ launcher requires an independent policy and approved capsule digest. Both guests
 revalidate the five payloads; the verifier independently checks the installed
 kernel and lock. The lock and candidate verifier receipt record
 `measurement-candidate` and the exact deb digest, never `ceralive-kernel`.
+Contributors can produce a private bundle with
+[`--local-unpublishable`](kernel-release.md#2-create-the-local-candidate) without
+OS release store access. That mode intentionally skips the OS kernel floor.
+The sealer checks its status against the pinned producer receipt and kernel
+metadata. The host's `acceptance.json` records `publication: local-unpublishable`
+and `kernel_floor: skipped-local` for that kernel; neither this receipt nor
+measurement approval makes the kernel publishable. The guest keeps the same
+`measurement-candidate` protocol and does not need a new base.
 Released receipts keep their existing fields. A local path or environment
 variable is not approval. Full image and release entry points reject sealed
 candidate input before signer selection or APT access, even when the same version
@@ -648,8 +657,9 @@ Approve each operational step separately:
 
 1. Choose a private bundle location and a dedicated runner or quiet build
    window. Do not publish the bundle as a public Actions artifact.
-2. Review the new guest seed, then approve the rebuilt guest base and its
-   digest. This code change does not update any running base.
+2. Confirm the approved guest base supports sealed measurement candidates.
+   If it does not, review the new guest seed and approve the rebuilt base
+   digest before use. Local candidate mode does not change the guest seed.
 3. Reseal the approved bundle and source checkout, then review and approve
    the new capsule digest independently of the base approval.
 

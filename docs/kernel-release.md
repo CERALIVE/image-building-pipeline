@@ -208,9 +208,10 @@ python3 ci/kernel-release.py rk3588 \
 | `family` (positional) | Family to build, for example `rk3588`. |
 | `--candidate-run-id N` | Required positive decimal local candidate ID. It is not, and does not claim to be, an Actions run. |
 | `--channel beta\|stable` | Channel recorded in the authorization inputs. Default `beta`. |
-| `--os-releases DIR` | Required authenticated snapshot of published OS kernel sidecars across boards and channels, used for the floor. An empty directory claims no OS kernel publication. |
+| `--os-releases DIR` | Required for a normal candidate. Authenticated snapshot of published OS kernel sidecars across boards and channels, used for the floor. An empty directory claims no OS kernel publication. |
+| `--local-unpublishable` | Contributor build for sealed measurement only. Use instead of `--os-releases`, never with `--publish` or `--bench-report`. |
 | `--output-dir DIR` | Optional repo-local bundle store. Default `mkosi/build/kernel-releases`. |
-| `--bench-report FILE` | Optional report bound to this candidate; see step 4. |
+| `--bench-report FILE` | Optional report bound to a normal candidate; not accepted with `--local-unpublishable`. See step 4. |
 | `--publish` | Refuses outside the exact approved workflow context; see step 5. |
 
 The command refuses, before any build, when `DRY_RUN` has any value other than
@@ -228,6 +229,18 @@ authorization: full-image and release jobs still require the exact signed
 first-party APT kernel and reject sealed candidate input even if that kernel is
 available.
 
+Contributors without access to the OS release store can run
+`python3 ci/kernel-release.py rk3588 --candidate-run-id 12345 --local-unpublishable`.
+This still runs the kernel build, local tag and both-board gates, but
+intentionally skips the OS floor and marks the bundle `local-unpublishable`.
+If `CERALIVE_KERNEL_HISTORY_DIR` points to a local GitHub Release metadata
+snapshot, it also checks that history; otherwise the receipt records that check
+as skipped and the producer does not fall back to `gh`. This is not an offline
+build mode: pinned source, build tools, and firmware still need their usual
+inputs. A local bundle is not eligible for GitHub Release, APT, or OS
+publication or promotion. Make a new candidate through the approved workflow
+for release.
+
 `--published` and `--floor` read published kernel versions and their metadata
 through `gh`. Set `CERALIVE_KERNEL_HISTORY_DIR` to a local directory of
 `<version>/` metadata directories to read them from disk instead.
@@ -236,16 +249,16 @@ through `gh`. Set `CERALIVE_KERNEL_HISTORY_DIR` to a local directory of
 
 1. `ci/check-release-variant.sh --variant default`: the production variant, never a debug sibling.
 2. `ci/check-kernel-version-monotonic.py --candidate`: the version is at least the newest local `kernel/v*` tag (published versions join that set when `CERALIVE_KERNEL_HISTORY_DIR` is set), and a lower one is refused. An equal version is admitted only when its identity is unchanged: an equal version that is already published must keep its released family fingerprint against the current inputs, and an equal tag with no Release admits its first publication.
-3. `--published`: the version exceeds every published kernel.
-4. `--floor --os-releases DIR`: the candidate is not below the highest published kernel or OS kernel sidecar version (`os_kernel_below_floor`).
+3. `--published`: the version exceeds every published kernel. In local mode this checks the supplied local history snapshot only; without one, both history checks use an empty private history and the published-history check is recorded as skipped.
+4. Normal mode only: `--floor --os-releases DIR` rejects a candidate below the highest published kernel or OS kernel sidecar version (`os_kernel_below_floor`).
 5. `./build <family> --kernel-only`: compile, then validate every board of the family (4-axis package checks, config survival, DTB and boot-artifact staging, pinned Bluetooth/UHID firmware closure).
-6. Post-build admission on the snapshot: strict metadata parse, exactly one production archive, `sha256sum --check`, all-family `validated_boards`, recomputed family fingerprint, then `--candidate --artifact`, `--published` and `--floor` again, and an unchanged source HEAD and status.
+6. Post-build admission on the snapshot: strict metadata parse, exactly one production archive, `sha256sum --check`, all-family `validated_boards`, recomputed family fingerprint, then `--candidate --artifact` and `--published` again. Normal mode repeats the OS floor check; local mode skips it both times. Source HEAD and status must be unchanged.
 
 The bundle lands in `mkosi/build/kernel-releases/<version>/` and holds:
 
-- The five builder outputs: the arm64 `.deb`, `kernel-artifact.json`, `resolved.config`, `built-modules.txt` and the original `SHA256SUMS`.
-- `candidate.json`: family, commit, candidate ID, observed floor and `publication: "blocked-pending-owner"`.
-- `publish-authorization.inputs.json`: apt-worker's eleven authorization field names. `publish_run_id` and `run_attempt` are `null`, and `bench_report_sha256` is `null` unless a report was supplied. This is an input record, not an authorization.
+- The arm64 `.deb`, `kernel-artifact.json`, `resolved.config`, `built-modules.txt` and `SHA256SUMS`. A normal bundle keeps all five byte for byte. A local bundle adds the local status fields to `kernel-artifact.json` and regenerates `SHA256SUMS`; the other three files are unchanged. Pin the final bundle bytes for sealing.
+- `candidate.json`: family, commit and candidate ID. Normal mode records the observed floor and `publication: "blocked-pending-owner"`. Local mode records `publication: "local-unpublishable"`, `kernel_floor: "skipped-local"` and `github_release_history` (`checked-local-snapshot` or `skipped-local`); the same three fields appear in its artifact metadata.
+- `publish-authorization.inputs.json`: apt-worker's eleven authorization field names. Normal mode records `mode: "apt-publish"` and the bench-report digest if supplied. Local mode records `mode: "local-unpublishable"` and no report. `publish_run_id` and `run_attempt` are `null` in both modes. Neither record authorizes publication.
 - `BUNDLE.SHA256SUMS`: digests of every file above.
 
 Files are made read-only and the version directory is installed create-only,

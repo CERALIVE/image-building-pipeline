@@ -732,7 +732,7 @@ def fixture_launcher(root: pathlib.Path, mode: str, signum: signal.Signals) -> N
         if pair:
             # This lifecycle fixture substitutes the signed input and measured artifacts.
             patches.enter_context(patch.multiple(
-                image_vm, released_evidence=lambda *_args: SimpleNamespace(),
+                image_vm, released_evidence=lambda *_args: image_vm.ReleaseEvidence(("", "", ""), "", {}),
                 verify_released_receipts=lambda *_args: dict.fromkeys(("rootfs_a", "rootfs_b"), "reserve")))
         if mode == "ignore":
             patches.enter_context(fixture_wait_bounds(FIXTURE_PHASE_SECONDS))
@@ -1769,10 +1769,10 @@ def test_verifier_capsule_and_result_failures_leave_pair_unaccepted() -> None:
                         inject("capsule-unlink")
                     return real_unlink(path, *options, **kwargs)
 
-                def release_evidence(_file, _identity, _trust, _parent, _checkpoint) -> SimpleNamespace:
+                def release_evidence(_file, _identity, _trust, _parent, _checkpoint) -> image_vm.ReleaseEvidence:
                     if action == "unapproved-release":
                         raise StreamError("fixture could not authenticate released evidence")
-                    return SimpleNamespace()
+                    return image_vm.ReleaseEvidence(("", "", ""), "", {})
 
                 def execute(_base, directory, request, _cancellation, jobs):
                     payload = request["payload"]

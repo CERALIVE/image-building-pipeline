@@ -141,6 +141,24 @@ refresh() {
   publisher refresh --board "$b" --channel "$c" --expect-serial "$serial" --expect-etag "$etag"
 }
 assert() { check "$@"; }
+( umask 077
+  jq '. + {publication:"local-unpublishable",kernel_floor:"skipped-local",github_release_history:"skipped-local"}' \
+    "$CERALIVE_KERNEL_HISTORY_DIR/7.2.0-ceralive1/kernel-artifact.json" >"$tmp/kernel-artifact.json"
+)
+if publish 2026.10.1 beta >"$tmp/local-candidate.log" 2>&1; then
+  bad 'OS publisher accepted a marked local candidate'
+fi
+assert grep -Fq 'local candidate metadata is not publishable or released' "$tmp/local-candidate.log"
+assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.1"
+rm "$tmp/kernel-artifact.json"
+install -m 0600 "$tmp/lock.json" "$tmp/released-lock.json"
+jq '.packages[0].origin = "measurement-candidate"' "$tmp/released-lock.json" >"$tmp/lock.json"
+if publish 2026.10.1 beta >"$tmp/measurement-lock.log" 2>&1; then
+  bad 'OS publisher accepted a measurement candidate lock'
+fi
+assert grep -Fq 'kernel_not_on_apt' "$tmp/measurement-lock.log"
+assert test ! -e "$tmp/objects/releases/rock-5b-plus/2026.10.1"
+mv "$tmp/released-lock.json" "$tmp/lock.json"
 check publish 2026.10.1 beta
 base="$tmp/objects/releases/rock-5b-plus/2026.10.1"
 assert test -f "$base/channels/beta"

@@ -10,16 +10,52 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Final
+from typing import Final, TypedDict
 
 VERSION: Final = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-ceralive[1-9][0-9]*")
 PACKAGE: Final = re.compile(r"linux-image-[0-9]+\.[0-9]+\.[0-9]+-ceralive-rk3588")
 SHA256: Final = re.compile(r"[0-9a-f]{64}")
 REPOSITORY: Final = "CERALIVE/image-building-pipeline"
+LOCAL_PUBLICATION: Final = "local-unpublishable"
+LOCAL_STATUS_KEYS: Final = frozenset(("publication", "kernel_floor", "github_release_history"))
 
 
 class KernelReleaseError(Exception):
     """A release input or its authenticated transport violated the contract."""
+
+
+class LocalStatus(TypedDict):
+    publication: str
+    kernel_floor: str
+    github_release_history: str
+
+
+def read_kernel_json(path: Path) -> dict:
+    def unique(pairs: list[tuple[str, object]]) -> dict:
+        row = dict(pairs)
+        if len(row) != len(pairs):
+            raise KernelReleaseError("duplicate kernel metadata JSON key")
+        return row
+
+    row = json.loads(path.read_bytes(), object_pairs_hook=unique)
+    if type(row) is not dict:
+        raise KernelReleaseError("invalid kernel metadata JSON object")
+    return row
+
+
+def local_status(row: dict, *, measurement: bool = False) -> LocalStatus | None:
+    """Reject local-only metadata unless its complete state is admitted for measurement."""
+    keys = LOCAL_STATUS_KEYS & row.keys()
+    if not keys:
+        return None
+    if not measurement:
+        raise KernelReleaseError("local candidate metadata is not publishable or released")
+    if (keys != LOCAL_STATUS_KEYS or row["publication"] != LOCAL_PUBLICATION
+            or row["kernel_floor"] != "skipped-local"
+            or row["github_release_history"] not in ("skipped-local", "checked-local-snapshot")):
+        raise KernelReleaseError("invalid local candidate metadata status")
+    return LocalStatus(publication=row["publication"], kernel_floor=row["kernel_floor"],
+                       github_release_history=row["github_release_history"])
 
 
 def command(args: list[str], cwd: Path | None = None) -> str:
@@ -148,9 +184,10 @@ def metadata(selected: str, dest: Path) -> KernelArtifact:
     return verified_metadata(selected, dest)
 
 
-def verified_metadata(selected: str, dest: Path) -> KernelArtifact:
+def verified_metadata(selected: str, dest: Path, *, measurement: bool = False) -> KernelArtifact:
     """Verify the existing four metadata files without acquiring replacement bytes."""
     names = ("kernel-artifact.json", "resolved.config", "built-modules.txt", "SHA256SUMS")
+    local_status(read_kernel_json(dest / "kernel-artifact.json"), measurement=measurement)
     record = artifact(dest / "kernel-artifact.json")
     if record.identity.version != selected:
         raise KernelReleaseError("kernel release metadata version mismatch")
