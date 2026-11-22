@@ -1749,6 +1749,7 @@ def test_sealed_reviewed_pinned_source_has_one_path_identity() -> None:
             ({"urls": (asset + "?",)}, "reviewed-url-invalid"),
             ({"sha256": "f" * 64}, "reviewed-object-missing"),
             ({"length": len(data) + 1}, "reviewed-length-mismatch"),
+            ({"kind": "deb"}, "reviewed-kind-mismatch"),
         ):
             row = asdict(InputObject(digest, len(data), "pinned-source", (asset,))) | change
             try:
@@ -1766,6 +1767,8 @@ def test_payload_failure_receipt_only_keeps_known_verifier_codes() -> None:
     assert payload_failure_diagnostic("traceback /private/path\nVERIFY_PAYLOADS reviewed-url-mismatch\n") == (
         "reviewed-url-mismatch")
     assert payload_failure_diagnostic("VERIFY_PAYLOADS reviewed-url-mismatch https://secret.invalid/k\n") == (
+        "unexpected-verifier-failure")
+    assert payload_failure_diagnostic("VERIFY_PAYLOADS attacker-controlled-code\n") == (
         "unexpected-verifier-failure")
     assert payload_failure_diagnostic("Traceback: /private/key\n") == "unexpected-verifier-failure"
 
