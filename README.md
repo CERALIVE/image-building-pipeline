@@ -894,13 +894,11 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.11.2 (tag commit `31b06d5`) using its exact
-per-architecture Debian versions, `2026.11.2-20261110T235721.31b06d5` (amd64) and
-`2026.11.2-20261110T235725.31b06d5` (arm64), confirmed against release asset names
-and the refreshed catalog. It retains the unified device update orchestrator.
-The owner selected this UI version for future images alongside sender `srtla=4.2.0`.
-APT serving and hardware were not checked for these pins.
-See the [combined pin receipt](docs/first-party-pin-currency.md#srtla-and-ceraui-pin-receipt--2026-11-12).
+CeraUI is pinned to stable release v2026.11.4 (tag commit `500ab9e`) using its exact
+per-architecture Debian versions, `2026.11.4-20261122T210926.500ab9e` (amd64) and
+`2026.11.4-20261122T210830.500ab9e` (arm64), confirmed against the signed stable APT
+indexes and release assets. It retains the unified device update orchestrator.
+See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt-2026-11-22).
 This pin update does not build or qualify an image, or authorize an OS release.
 Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
@@ -1262,7 +1260,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.11.2 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.11.4 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images

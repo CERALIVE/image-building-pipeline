@@ -371,6 +371,34 @@ the physical-device reconnect path is not qualified. The CeraUI PR pinning this
 sender in its own CI is separate. No image was built or flashed, and APT serving,
 installation and hardware were not checked for this combined pin change.
 
+## CeraUI pin receipt (2026-11-22)
+
+The image selects stable [CeraUI v2026.11.4](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4),
+published 2026-11-22T21:12:28Z at tag commit
+`500ab9ef24d39abb2d02947475a38c0b1b8334c9`.
+
+| Architecture | Exact Debian version | Signed index SHA-256 = GitHub asset digest |
+|---|---|---|
+| arm64 | `2026.11.4-20261122T210830.500ab9e` | `9a98b5cf8fce80c7267aeb75bdf29fcaa8aa8475ea16f8a1cfd0acbea6014efe` |
+| amd64 | `2026.11.4-20261122T210926.500ab9e` | `6934a8aa341925c8391d94dff13802a2a9e184dd3a64560fb785b58092b8d8a4` |
+
+After [stable reindex run 45070806957](https://github.com/CERALIVE/apt-worker/actions/runs/45070806957),
+the workstation's read-only mTLS reader fetched `InRelease` and `Packages.gz`
+for both stable architectures. Both signatures verified with archive key
+`3BD975960D38C74A5F06A8044F6501E14003A6B3`. The compressed and decompressed
+indexes matched their signed sizes and SHA-256 hashes, and each listed one
+exact `ceralive-device` entry matching the corresponding release asset digest.
+
+The authenticated `python3 ci/check-first-party-pins.py --refresh` generated the
+catalog without manual edits. It exited 1 before the bump because only the old
+CeraUI tag and both Debian pins were stale. The package contract asserts all
+three new values. No other first-party pin changed.
+
+This verifies the repository's signed package listings, not downloaded Debian
+payloads or packages installed into a candidate. No image was built, booted or
+flashed, and hardware was not checked. The stock USB73 drop-in from #320 is
+already on the base branch and unchanged by this pin.
+
 ## Intentional rollback
 
 Edit `manifests/first-party-pin-overrides.json` in the **same reviewed PR** as

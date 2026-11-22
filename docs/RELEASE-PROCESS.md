@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.11.2's unified update orchestrator.
+channel publisher and pins stable CeraUI v2026.11.4's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -279,19 +279,16 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects stable CeraUI **v2026.11.2**
-(tag commit `31b06d54ff2e338805d84602a292e9dc95d8de2e`), published
-2026-11-10T23:58:58Z. The exact Debian versions are
-`2026.11.2-20261110T235725.31b06d5` (arm64) and
-`2026.11.2-20261110T235721.31b06d5` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.11.2`. Release asset names and the authenticated release
-catalog confirm these versions.
-APT serving, installation and hardware were not checked for this pin. See the
-[pin receipt](first-party-pin-currency.md#srtla-and-ceraui-pin-receipt--2026-11-12).
-The catalog refresh and owner-selected CeraUI bump accompany `srtla=4.2.0`.
-Pinning is not
-image qualification or OS stable/beta authorization; OS 2026.10.97 remains
-private-drill only and channel pointers are unchanged.
+The current image pin selects stable CeraUI **v2026.11.4**
+(tag commit `500ab9ef24d39abb2d02947475a38c0b1b8334c9`), published
+2026-11-22T21:12:28Z. The exact Debian versions are
+`2026.11.4-20261122T210830.500ab9e` (arm64) and
+`2026.11.4-20261122T210926.500ab9e` (amd64), with repo-local provenance
+`CeraUI.pin: v2026.11.4`. The signed stable APT indexes list these exact versions
+with SHA-256 digests matching the release assets. See the
+[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt-2026-11-22).
+Pinning is not image qualification or OS stable/beta authorization; OS
+2026.10.97 remains private-drill only and channel pointers are unchanged.
 
 Keep `ceralive-apt-credentials=1.0.1` and registry tag
 `apt-credentials-v1.0.1`: this release is served on stable and the boards use it
