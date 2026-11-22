@@ -2705,31 +2705,42 @@ function driven against BOTH kernels' real ID_PATHs, with over-match legs).
 **Userspace Wi-Fi names survive matching `.link` rules** [EXISTS: source/host
 fixtures; candidate build and board qualification separate].
 Both the WLAN path rule and the generic `Type=wlan` fallback retain their
-existing matches and `Name=wlan0`, with `NamePolicy=keep` first. On systemd 257,
-assignment types 3 (user) and 4 (renamed) keep their current name even when a
-virtual leg shares its parent's path; the rule still matches. Kernel assignments
-1/2 retain the previous physical naming result. A physical interface already
-given its final name in initramfs keeps that same name during rootfs coldplug.
-The unique `20-ceralive-usb-wlan.link` runs after the existing `10-` WLAN rule and
-before stock USB73/default99. It adds `Type=wlan` to USB73's existing
-`Path=*-usb-*` and `Property=ID_NET_NAME_MAC=*` matches, with
-`NamePolicy=keep mac`. Stock USB73 is untouched: USB Ethernet adapters and
-ECM/RNDIS modems keep its MAC naming even on assignment-type-4 replay.
-Do not scope USB73 itself with a drop-in: that would move non-WLAN devices to
-another first-match policy. A physical Wi-Fi interface pre-named differently in initramfs would also keep
-that name, whereas the old WLAN rule re-renamed it to wlan0. The N-3 fixture
-records both outcomes. Candidate acceptance therefore requires built-initrd and
-early-boot proof that no Wi-Fi driver loads there and no physical card reaches
-rootfs pre-named; this is unverified until that evidence exists.
-Stock `99-default.link` already begins with keep. These policies require
-NamePolicy processing enabled (the image default); `net.ifnames=0` disables it
+existing matches and `Name=wlan0`, with `NamePolicy=keep` first. On systemd 257
+`add` replay, assignment types 3 (user) and 4 (renamed) keep their current name
+even when a virtual leg shares its parent's path; the rule still matches.
+Kernel assignments 1/2 retain the previous physical naming result. A physical
+interface already given its final name in initramfs keeps that same name during
+rootfs coldplug.
+When stock `73-usb-net-by-mac.link` wins, its
+`73-usb-net-by-mac.link.d/10-ceralive-keep.conf` drop-in sets only
+`NamePolicy=keep mac`. This replaces the standalone USB WLAN rule from #269
+without changing USB73's `Path=*-usb-*` or `Property=ID_NET_NAME_MAC=*` matches.
+USB Wi-Fi, Ethernet and ECM/RNDIS modems still get the same MAC-derived names
+when USB73 first sees a kernel-assigned name. Replay with the settled MAC name
+leaves it unchanged. The drop-in intentionally narrows #269's `add`-replay
+contract: when USB73 wins for a physical USB Ethernet, ECM or RNDIS device
+pre-named `uplink0`, `modem0` or `rndis0` (assignment type 4), #269 asserted
+that replay restored the MAC-derived name; the fixture now asserts that USB73
+keeps the pre-existing name. This is a source/fixture counterexample, not an
+observed board regression. The exact-image rebuild and retest on both boards
+(plan row 38) must record the actual physical names before any publication.
+
+The N-3 fixture covers `add` replay of a physical Wi-Fi interface pre-named
+in initramfs. Before #269, replay selected `wlan0` only when the existing `10-`
+WLAN rule won. Stock USB73, when it won instead, selected the MAC-derived name;
+stock `99-default.link` already began with `keep` and kept userspace names.
+Candidate acceptance requires built-initrd and early-boot proof that no Wi-Fi
+driver loads there and no physical card reaches rootfs with a different
+pre-assigned name. These policies require NamePolicy processing enabled
+(the image default); `net.ifnames=0` disables it
 and is outside this contract. No manifests, aliases, profile bindings,
 provisioning selectors, permissions or udev rules change. The production-writer
 fixtures in `tests/interface-naming-path-match.test.sh` compare exact old/new
 physical names on Rock, Orange and x86, cover USB Ethernet/ECM/RNDIS assignments
 1/2/4 (including a renamed value different from its MAC name), and preserve
-fresh/legacy `clap-*` and other userspace Wi-Fi names. x86 remains fixture-only; real systemd-257 rename and
-coldplug behavior require the separate two-board candidate gate.
+fresh/legacy `clap-*` and other userspace Wi-Fi names. x86 initrd coverage is
+source and fixtures only. Real systemd-257 rename and coldplug behavior require
+the separate two-board candidate gate.
 
 **The SoC HDMI-RX driver is named `rk_hdmirx` on the vendor BSP and
 `snps_hdmirx` on mainline — and the symlink rule only ever shipped in DEAD

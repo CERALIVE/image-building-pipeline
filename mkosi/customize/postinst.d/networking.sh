@@ -232,13 +232,9 @@ Name=wlan0
 EOF
   fi
 
-  # Scope keep to WLAN; stock USB73 must still MAC-name Ethernet/modem replays.
-  cat >/etc/systemd/network/20-ceralive-usb-wlan.link <<'EOF'
-[Match]
-Path=*-usb-*
-Property=ID_NET_NAME_MAC=*
-Type=wlan
-
+  # Keep userspace names without changing the stock USB matches or MAC fallback.
+  mkdir -p /etc/systemd/network/73-usb-net-by-mac.link.d
+  cat >/etc/systemd/network/73-usb-net-by-mac.link.d/10-ceralive-keep.conf <<'EOF'
 [Link]
 NamePolicy=keep mac
 EOF

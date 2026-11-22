@@ -200,9 +200,7 @@ import yaml
 
 pipeline, work = map(Path, sys.argv[1:])
 usb = "73-usb-net-by-mac.link"
-usb_wlan = "20-ceralive-usb-wlan.link"
 default = "99-default.link"
-assert "10-ceralive-wlan0.link" < usb_wlan < usb < default
 stock = {
     usb: "[Match]\nPath=*-usb-*\nProperty=ID_NET_NAME_MAC=*\n[Link]\nNamePolicy=mac\n",
     default: "[Match]\nOriginalName=*\n[Link]\n"
@@ -236,9 +234,10 @@ def parse(text: str) -> configparser.ConfigParser:
     return policy
 
 
-def resulting_name(policies: dict[str, str], device: dict[str, str | int]) -> tuple[str, str]:
-    for filename, text in sorted(policies.items()):
-        policy = parse(text)
+def resulting_name(
+    policies: dict[str, configparser.ConfigParser], device: dict[str, str | int]
+) -> tuple[str, str]:
+    for filename, policy in sorted(policies.items()):
         match = policy["Match"]
         if "Path" in match and not any(
             fnmatch.fnmatchcase(str(device["id_path"]), token) for token in match["Path"].split()
@@ -281,8 +280,8 @@ install_interface_naming
     if "wlan0" not in paths:
         old["10-ceralive-wlan0.link"] = "[Match]\nType=wlan\n\n[Link]\nName=wlan0\n"
     emitted = {path.name: path.read_text() for path in network.glob("*.link")}
-    check(emitted.keys() == old.keys() | {usb_wlan},
-          f"I-PHYSICAL-NAMES {board}: changed link file set")
+    check(emitted.keys() == old.keys(),
+          f"I-PHYSICAL-NAMES {board}: expected only existing link files; got {sorted(emitted)}")
     for filename, text in old.items():
         actual = parse(emitted[filename])
         baseline = parse(text)
@@ -292,32 +291,43 @@ install_interface_naming
         check(dict(actual["Match"]) == dict(baseline["Match"])
               and dict(actual["Link"]) == dict(baseline["Link"]),
               f"I-PHYSICAL-NAMES {board}: changed physical match/name policy in {filename}")
-    current = stock | emitted
-    dropins = sorted(network.glob(f"{usb}.d/*.conf"))
-    check(dropins == [], f"I-PHYSICAL-NAMES {board}: stock USB73 must have no image drop-in")
-    wlan_policy = parse(emitted[usb_wlan])
-    check(dict(wlan_policy["Match"]) ==
-          {"Path": "*-usb-*", "Property": "ID_NET_NAME_MAC=*", "Type": "wlan"}
-          and dict(wlan_policy["Link"]) == {"NamePolicy": "keep mac"},
-          f"I-USER-NO-RENAME {board}: USB keep must be WLAN-only before stock USB73")
-    previous = stock | old
-    # Non-WLAN USB replays must retain stock USB73's MAC policy, even at type 4.
+    previous = {filename: parse(text) for filename, text in (stock | old).items()}
+    current = {filename: parse(text) for filename, text in (stock | emitted).items()}
+    dropin = network / f"{usb}.d/10-ceralive-keep.conf"
+    dropins = sorted(network.glob("*.link.d/*.conf"))
+    check(dropins == [dropin],
+          f"I-USER-NO-RENAME {board}: expected one drop-in on stock USB73")
+    if dropin in dropins:
+        text = dropin.read_text()
+        override = parse(text)
+        check(override.sections() == ["Link"] and not override.defaults()
+              and dict(override["Link"]) == {"NamePolicy": "keep mac"},
+              f"I-USER-NO-RENAME {board}: USB73 drop-in must only set NamePolicy=keep mac")
+        # Apply the emitted drop-in to the packaged rule without changing its matches.
+        current[usb].read_string(text)
+    # On add replay of a physical USB NIC pre-named at type 4, #269 expected
+    # (usb, mac); this drop-in requires (usb, renamed) for uplink0/modem0/rndis0.
+    # This is a source/fixture counterexample, not an observed board regression.
+    # Row 38 must rebuild and retest the exact images on both boards and record
+    # the actual names before publication. Kernel names and settled MAC names
+    # below must still produce the same MAC-derived name.
     for label, path, mac, renamed in (
         ("USB Ethernet", "platform-xhci-usb-0:3:1.0", "enx001122334455", "uplink0"),
         ("USB ECM modem", "platform-xhci-usb-0:4:1.0", "enx001122334466", "modem0"),
         ("USB RNDIS modem", "platform-xhci-usb-0:5:1.0", "enx001122334477", "rndis0"),
     ):
-        for assign, current_name in ((1, "eth9"), (2, "enp0s1u3"), (4, mac), (4, renamed)):
+        for assign, current_name, expected_name in (
+            (1, "eth9", mac), (2, "enp0s1u3", mac), (4, mac, mac), (4, renamed, renamed),
+        ):
             device = dict(id_path=path, type="ether", name=current_name,
                           mac=mac, path="enp0s1u3", assign=assign)
-            expected = (usb, mac)
             before = resulting_name(previous, device)
             after = resulting_name(current, device)
-            check(before == expected,
+            check(before == (usb, mac),
                   f"I-PHYSICAL-NAMES {board} {label}: fixture missed stock USB73: {before}")
-            check(after == expected,
+            check(after == (usb, expected_name),
                   f"I-PHYSICAL-NAMES {board} {label} type={assign} current={current_name}: "
-                  f"old={before} new={after}, expected={expected}")
+                  f"old={before} new={after}, expected={(usb, expected_name)}")
             print(f"I-PHYSICAL-NAMES {board} {label} type={assign} current={current_name}: "
                   f"old={before} new={after}")
     # Include onboard vendor/mainline, second PCIe, USB MAC and missing-MAC paths.
@@ -339,8 +349,8 @@ install_interface_naming
             device["assign"] = assign
             before = resulting_name(previous, device)
             after = resulting_name(current, device)
-            expected_winner = usb_wlan if kind == "wlan" and before[0] == usb else before[0]
-            check(after == (expected_winner, before[1]),
+            expected_winner = before[0]
+            check(after == before,
                   f"I-PHYSICAL-NAMES {board} type={assign} {path}: {before} != {after}")
             print(f"I-PHYSICAL-NAMES {board} type={assign} {path}: {after}")
         if kind == "wlan":
