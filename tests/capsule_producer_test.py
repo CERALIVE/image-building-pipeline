@@ -1720,6 +1720,56 @@ def test_cli_seals_original_bytes_and_importer_accepts_authenticated_closure() -
         assert (work / "capsule.tar").read_bytes() == original
 
 
+def test_sealed_reviewed_pinned_source_has_one_path_identity() -> None:
+    """Exercise the actual producer and imported payloads, including negative verification."""
+    from image_capsule import InputObject, verify_reviewed_objects
+
+    with fixture() as (work, reviewed, args, env, requests, remote):
+        path = work / "asset.deb"
+        data = b"locally reviewed pinned source bytes"
+        path.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        asset = "https://releases.example/tag/v1%2Bboard/asset%2bboard;flavor.deb"
+        reviewed["objects"].append({"sha256": digest, "length": len(data), "kind": "pinned-source",
+                                    "urls": [asset], "path": str(path)})
+        (work / "reviewed.json").write_text(json.dumps(reviewed))
+        result = run(args, env)
+        assert result.returncode == 0, result.stderr
+        capsule = unpack(work / "capsule.tar", work / "imported",
+                         Identity("test", "rock-5b-plus", "a" * 40, 1234, result.stdout.strip()))
+        pinned = next(row for row in capsule.objects if row.sha256 == digest)
+        assert pinned.urls == ("https://releases.example/tag/v1+board/asset+board;flavor.deb",)
+        assert len(requests) == len(remote)
+        verify_reviewed_objects([InputObject(digest, len(data), "pinned-source", (asset,))], capsule.objects)
+        for change, expected in (
+            ({"urls": (asset.replace("%2b", "%252B"),)}, "reviewed-url-mismatch"),
+            ({"urls": (asset.replace(";", "%3B"),)}, "reviewed-url-mismatch"),
+            ({"urls": (asset.replace("/asset", "%2Fasset"),)}, "reviewed-url-invalid"),
+            ({"urls": (asset + "?access=canary",)}, "reviewed-url-invalid"),
+            ({"urls": (asset + "?",)}, "reviewed-url-invalid"),
+            ({"sha256": "f" * 64}, "reviewed-object-missing"),
+            ({"length": len(data) + 1}, "reviewed-length-mismatch"),
+        ):
+            row = asdict(InputObject(digest, len(data), "pinned-source", (asset,))) | change
+            try:
+                verify_reviewed_objects([InputObject(**row)], capsule.objects)
+            except StreamError as exc:
+                assert str(exc) == expected
+            else:
+                raise AssertionError(f"accepted changed {tuple(change)}: {expected}")
+
+
+def test_payload_failure_receipt_only_keeps_known_verifier_codes() -> None:
+    """Never copy arbitrary stderr or details into an audit receipt."""
+    from image_capsule import payload_failure_diagnostic
+
+    assert payload_failure_diagnostic("traceback /private/path\nVERIFY_PAYLOADS reviewed-url-mismatch\n") == (
+        "reviewed-url-mismatch")
+    assert payload_failure_diagnostic("VERIFY_PAYLOADS reviewed-url-mismatch https://secret.invalid/k\n") == (
+        "unexpected-verifier-failure")
+    assert payload_failure_diagnostic("Traceback: /private/key\n") == "unexpected-verifier-failure"
+
+
 def test_signature_index_package_control_ambiguity_and_expiry_fail_closed() -> None:
     for case, expected in (
         ("signature", "signature/index/identity verification rejected"),

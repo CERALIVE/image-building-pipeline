@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import stat
 import tarfile
-from typing import BinaryIO, Callable, Final
+from typing import BinaryIO, Callable, Final, Iterable
 
 from image_candidate_policy import Approval, FIELD, INPUT_LIMIT, KIND, parse_approval
 from image_stream import Identity, StreamError, exact_json, list_directory, unique_object
@@ -63,6 +63,43 @@ def original_url(value: str) -> str:
         return canonical_url(value)
     except InputURLError as exc:
         raise StreamError(str(exc)) from exc
+
+
+PAYLOAD_FAILURE_CODES: Final = frozenset({
+    "reviewed-object-missing", "reviewed-length-mismatch", "reviewed-kind-mismatch",
+    "reviewed-url-invalid", "reviewed-url-mismatch", "archive-rejected",
+    "archive-or-filesystem-error", "builder-rejected", "repository-binding-mismatch",
+    "repository-authentication-failed", "source-bundle-mismatch", "receipt-input-invalid",
+})
+
+
+def payload_failure_diagnostic(stderr: str) -> str:
+    """Keep only a verifier-owned, scrubbed failure code in the receipt."""
+    for line in stderr.splitlines():
+        code = line.removeprefix("VERIFY_PAYLOADS ")
+        if code != line and code in PAYLOAD_FAILURE_CODES:
+            return code
+    return "unexpected-verifier-failure"
+
+
+def verify_reviewed_objects(reviewed: Iterable[InputObject], sealed: Iterable[InputObject]) -> None:
+    """Require every approved object without rejecting producer-added receipts."""
+    archived = {row.sha256: row for row in sealed}
+    for row in reviewed:
+        match = archived.get(row.sha256)
+        if match is None:
+            raise StreamError("reviewed-object-missing")
+        if row.length != match.length:
+            raise StreamError("reviewed-length-mismatch")
+        if row.kind != match.kind:
+            raise StreamError("reviewed-kind-mismatch")
+        try:
+            reviewed_urls = tuple(map(original_url, row.urls))
+            sealed_urls = tuple(map(original_url, match.urls))
+        except StreamError as exc:
+            raise StreamError("reviewed-url-invalid") from exc
+        if reviewed_urls != sealed_urls:
+            raise StreamError("reviewed-url-mismatch")
 
 
 def unpack(capsule: Path, directory: Path, expected: Identity, *,
