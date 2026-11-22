@@ -2705,26 +2705,34 @@ function driven against BOTH kernels' real ID_PATHs, with over-match legs).
 **Userspace Wi-Fi names survive matching `.link` rules** [EXISTS: source/host
 fixtures; candidate build and board qualification separate].
 Both the WLAN path rule and the generic `Type=wlan` fallback retain their
-existing matches and `Name=wlan0`, with `NamePolicy=keep` first. On systemd 257,
-assignment types 3 (user) and 4 (renamed) keep their current name even when a
-virtual leg shares its parent's path; the rule still matches. Kernel assignments
-1/2 retain the previous physical naming result. A physical interface already
-given its final name in initramfs keeps that same name during rootfs coldplug.
+existing matches and `Name=wlan0`, with `NamePolicy=keep` first. On systemd 257
+`add` replay, assignment types 3 (user) and 4 (renamed) keep their current name
+even when a virtual leg shares its parent's path; the rule still matches.
+Kernel assignments 1/2 retain the previous physical naming result. A physical
+interface already given its final name in initramfs keeps that same name during
+rootfs coldplug.
 When stock `73-usb-net-by-mac.link` wins, its
 `73-usb-net-by-mac.link.d/10-ceralive-keep.conf` drop-in sets only
 `NamePolicy=keep mac`. This replaces the standalone USB WLAN rule from #269
 without changing USB73's `Path=*-usb-*` or `Property=ID_NET_NAME_MAC=*` matches.
 USB Wi-Fi, Ethernet and ECM/RNDIS modems still get the same MAC-derived names
 when USB73 first sees a kernel-assigned name. Replay with the settled MAC name
-leaves it unchanged; if userspace assigned a different name before replay,
-`keep` now preserves it rather than restoring the MAC name. A physical Wi-Fi
-interface pre-named differently in initramfs would likewise keep that name,
-whereas the old WLAN rule re-renamed it to wlan0. The N-3 fixture
-records both outcomes. Candidate acceptance therefore requires built-initrd and
-early-boot proof that no Wi-Fi driver loads there and no physical card reaches
-rootfs pre-named; this is unverified until that evidence exists.
-Stock `99-default.link` already begins with keep. These policies require
-NamePolicy processing enabled (the image default); `net.ifnames=0` disables it
+leaves it unchanged. The drop-in intentionally narrows #269's `add`-replay
+contract: when USB73 wins for a physical USB Ethernet, ECM or RNDIS device
+pre-named `uplink0`, `modem0` or `rndis0` (assignment type 4), #269 asserted
+that replay restored the MAC-derived name; the fixture now asserts that USB73
+keeps the pre-existing name. This is a source/fixture counterexample, not an
+observed board regression. The exact-image rebuild and retest on both boards
+(plan row 38) must record the actual physical names before any publication.
+
+The N-3 fixture covers `add` replay of a physical Wi-Fi interface pre-named
+in initramfs. Before #269, replay selected `wlan0` only when the existing `10-`
+WLAN rule won. Stock USB73, when it won instead, selected the MAC-derived name;
+stock `99-default.link` already began with `keep` and kept userspace names.
+Candidate acceptance requires built-initrd and early-boot proof that no Wi-Fi
+driver loads there and no physical card reaches rootfs with a different
+pre-assigned name. These policies require NamePolicy processing enabled
+(the image default); `net.ifnames=0` disables it
 and is outside this contract. No manifests, aliases, profile bindings,
 provisioning selectors, permissions or udev rules change. The production-writer
 fixtures in `tests/interface-naming-path-match.test.sh` compare exact old/new

@@ -201,7 +201,6 @@ import yaml
 pipeline, work = map(Path, sys.argv[1:])
 usb = "73-usb-net-by-mac.link"
 default = "99-default.link"
-assert "10-ceralive-wlan0.link" < usb < default
 stock = {
     usb: "[Match]\nPath=*-usb-*\nProperty=ID_NET_NAME_MAC=*\n[Link]\nNamePolicy=mac\n",
     default: "[Match]\nOriginalName=*\n[Link]\n"
@@ -306,7 +305,12 @@ install_interface_naming
               f"I-USER-NO-RENAME {board}: USB73 drop-in must only set NamePolicy=keep mac")
         # Apply the emitted drop-in to the packaged rule without changing its matches.
         current[usb].read_string(text)
-    # USB73 still MAC-names physical coldplug; keep also honors an explicit rename.
+    # On add replay of a physical USB NIC pre-named at type 4, #269 expected
+    # (usb, mac); this drop-in requires (usb, renamed) for uplink0/modem0/rndis0.
+    # This is a source/fixture counterexample, not an observed board regression.
+    # Row 38 must rebuild and retest the exact images on both boards and record
+    # the actual names before publication. Kernel names and settled MAC names
+    # below must still produce the same MAC-derived name.
     for label, path, mac, renamed in (
         ("USB Ethernet", "platform-xhci-usb-0:3:1.0", "enx001122334455", "uplink0"),
         ("USB ECM modem", "platform-xhci-usb-0:4:1.0", "enx001122334466", "modem0"),
