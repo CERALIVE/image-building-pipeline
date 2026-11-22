@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 from tempfile import TemporaryDirectory
 from urllib.parse import unquote
 
@@ -15,6 +14,7 @@ from image_capsule import original_url
 from image_policy import ArchivePolicy
 from image_stream import StreamError
 from image_transport import SEALED
+from vm_process import run as run_gate
 
 
 # Match the source order in mkosi/runtime/sealed-apt-policy.sh, including
@@ -27,6 +27,7 @@ SUITES = (
 PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*")
 VERSION = re.compile(r"[A-Za-z0-9.+:~_-]+")
 URI = re.compile(r"'([^']+)'\s+(\S+)\s+(\d+)(?:\s+\S+)?\s*")
+BINARY_INDEX = re.compile(r"main/binary-arm64/Packages\.(?:gz|xz)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,26 +50,29 @@ class PackagePin:
     length: int
 
 
-def replay_repositories(policies: dict[str, ArchivePolicy]) -> tuple[tuple[str, str, str], ...]:
+def replay_repositories(policies: dict[str, ArchivePolicy], *,
+                        candidate_sealing: bool) -> tuple[tuple[str, str, str], ...]:
     """Recognize the complete production Debian set, even under other labels."""
     by_suite = {}
-    labels = {name for name, _, _ in SUITES}
+    marked_binary = False
     for name, origin, suite in SUITES:
+        if name in policies:
+            marked_binary |= (policies[name].origin == origin
+                              and BINARY_INDEX.fullmatch(policies[name].index_path) is not None)
         matches = [key for key, repo in policies.items()
                    if (repo.origin, repo.codename or repo.suite) == (origin, suite)
-                   and re.fullmatch(r"main/binary-arm64/Packages\.(?:gz|xz)", repo.index_path)]
+                   and BINARY_INDEX.fullmatch(repo.index_path)]
         if len(matches) > 1:
             raise StreamError("ambiguous Debian APT replay suite")
         if matches:
             by_suite[suite] = (matches[0], origin, suite)
-    # A transport-only policy may omit Debian image inputs altogether.
-    source = policies["debian-source"]
-    image_source = source.index_path.startswith("main/source/Sources.")
-    if not image_source and not labels.intersection(policies) and len(by_suite) < len(SUITES):
-        return ()
-    if len(by_suite) != len(SUITES):
+    if len(by_suite) == len(SUITES):
+        return tuple(by_suite.values())
+    # A Sources index can supply RAUC sources without any Debian image binaries.
+    has_source = policies["debian-source"].index_path.startswith("main/source/Sources.")
+    if marked_binary or by_suite.keys() - {"trixie"} or (has_source and (candidate_sealing or by_suite)):
         raise StreamError("Debian APT replay requires trixie, updates and security indices")
-    return tuple(by_suite.values())
+    return ()
 
 
 def rows_for(index: ReplayIndex, names: set[str]) -> Iterator[dict[str, str]]:
@@ -130,8 +134,8 @@ def solve(indices: list[ReplayIndex], scratch: Path, apt_get: Path, file_method:
                "TMPDIR": temporary, "APT_CONFIG": str(apt_conf)}
 
         def apt(*args: str) -> str:
-            result = subprocess.run([str(apt_get), *args], env=env, cwd=work,
-                                    capture_output=True, text=True, timeout=90)
+            result = run_gate([str(apt_get), *args], env=env, cwd=work, check=False,
+                              capture_output=True, text=True, timeout=90)
             if result.returncode:
                 raise StreamError(f"native offline APT {args[0]} failed (exit {result.returncode})")
             return result.stdout

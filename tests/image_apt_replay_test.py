@@ -91,6 +91,25 @@ def reject_remote_keyring_before_any_fetch() -> None:
         assert requests == [] and not (work / "capsule.tar").exists()
 
 
+def reject_incomplete_trixie_binary_set_before_any_fetch() -> None:
+    """A partial trixie binary policy cannot bypass replay by renaming its rows."""
+    with fixture("replay-stale") as (work, inventory, args, env, requests, _remote):
+        apt, method = apt_tools()
+        policy_path = work / "policy.json"
+        policy = json.loads(policy_path.read_text())
+        for repos in (inventory["repositories"], policy["repositories"]):
+            del repos["debian-updates"]
+            repos["base"] = repos.pop("debian-trixie")
+            repos["security"] = repos.pop("debian-security")
+        policy_path.write_text(json.dumps(policy))
+        (work / "reviewed.json").write_text(json.dumps(inventory))
+        args[args.index("--client-identity-config") + 1] = str(work / "unavailable-identity")
+        result = run([*args, "--apt-get", str(apt), "--apt-file-method", str(method)], env)
+        assert result.returncode == 1 and "requires trixie, updates and security indices" in result.stderr, (
+            result.stdout, result.stderr, requests)
+        assert requests == [] and not (work / "capsule.tar").exists()
+
+
 def reject_reviewed_package_missing_from_plan() -> None:
     """A virtual name resolved to an already-reviewed provider is not a concrete pin."""
     main = "https://deb.debian.org/debian"
@@ -161,5 +180,6 @@ if __name__ == "__main__":
     regression()
     reject_before_identity_config()
     reject_remote_keyring_before_any_fetch()
+    reject_incomplete_trixie_binary_set_before_any_fetch()
     reject_reviewed_package_missing_from_plan()
     regenerate_then_verify_in_another_directory()

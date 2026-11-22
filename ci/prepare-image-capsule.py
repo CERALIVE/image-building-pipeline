@@ -41,7 +41,7 @@ def prepare(args: argparse.Namespace) -> str:
     candidate = select_candidate(policy_record, reviewed, args.inventory.parent)
     policy = parse_policy({key: value for key, value in policy_record.items() if key != CANDIDATE_FIELD},
                           (), candidate_sealing=candidate is not None)
-    replay = replay_repositories(policy.repositories)
+    replay = replay_repositories(policy.repositories, candidate_sealing=candidate is not None)
     if args.replay_metadata is not None and not replay:
         raise StreamError("no production Debian repositories to replay")
     clients = {} if replay else transport_clients(args)
