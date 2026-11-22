@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-11-19T18:14:22.657521+00:00",
+  "checked_at": "2026-11-22T22:51:35.991708+00:00",
   "releases": [
     {
       "component": "CeraUI",
-      "tag": "v2026.11.2",
-      "published_at": "2026-11-10T23:58:58Z",
+      "tag": "v2026.11.4",
+      "published_at": "2026-11-22T21:12:28Z",
       "packages": {
-        "ceralive-device[amd64]": "2026.11.2-20261110T235721.31b06d5",
-        "ceralive-device[arm64]": "2026.11.2-20261110T235725.31b06d5"
+        "ceralive-device[arm64]": "2026.11.4-20261122T210830.500ab9e",
+        "ceralive-device[amd64]": "2026.11.4-20261122T210926.500ab9e"
       }
     },
     {

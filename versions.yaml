@@ -115,12 +115,13 @@ CeraUI:
   # v2026.10.0: released update-system fixes; package installation is not image qualification.
   # v2026.11.1: refreshes a stale healthy-state record before a kernel stage.
   # v2026.11.2: update consent, kernel-stage failure reporting and hotspot UI fixes.
-  pin: v2026.11.2
-  # Device deb: ceralive-device 2026.11.2-20261110T235721.31b06d5 (amd64) /
-  #   2026.11.2-20261110T235725.31b06d5 (arm64); see first-party-deb-versions.txt.
-  # Tag commit: 31b06d54ff2e338805d84602a292e9dc95d8de2e.
-  # Versions confirmed against the release assets and refreshed release catalog.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.2
+  # v2026.11.4: hotspot radio identity safety and software update progress fixes.
+  pin: v2026.11.4
+  # Device deb: ceralive-device 2026.11.4-20261122T210926.500ab9e (amd64) /
+  #   2026.11.4-20261122T210830.500ab9e (arm64); see first-party-deb-versions.txt.
+  # Tag commit: 500ab9ef24d39abb2d02947475a38c0b1b8334c9.
+  # Versions confirmed against the signed stable APT indexes and release assets.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4
   # Historical receipt for 2026.11.1 follows (not the active artifact):
   # Device deb: ceralive-device 2026.11.1-20261106T235637.77fae5e (amd64) /
   #   2026.11.1-20261106T235641.77fae5e (arm64); see first-party-deb-versions.txt.
