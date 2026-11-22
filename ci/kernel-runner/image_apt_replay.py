@@ -9,9 +9,9 @@ import re
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 
-from image_capsule import digest_file, original_url
+from image_capsule import original_url
 from image_policy import ArchivePolicy
 from image_stream import StreamError
 from image_transport import SEALED
@@ -207,8 +207,9 @@ def solve(indices: list[ReplayIndex], scratch: Path, apt_get: Path, file_method:
 
 
 def verify_selection(plan: dict[str, PackagePin], selection: dict[str, PackagePin]) -> None:
-    """Every solved package must match an exact reviewed identity and route."""
-    different = sorted(name for name, pin in plan.items() if selection.get(name) != pin)
+    """The reviewed and solved closures must have exactly the same pins."""
+    different = sorted(name for name in plan.keys() | selection.keys()
+                       if plan.get(name) != selection.get(name))
     if different:
         raise StreamError("offline APT replay differs from reviewed selection: " + ", ".join(different[:20]))
 
@@ -219,7 +220,7 @@ def replay_selection(indices: list[ReplayIndex], scratch: Path,
     """Solve both the empty bootstrap and all reviewed public binary roots."""
     bootstrap = solve(indices, scratch, apt_get, file_method, ["?essential", "base-files"])
     closure = solve(indices, scratch, apt_get, file_method, sorted(selection))
-    verify_selection(bootstrap, closure)
+    verify_selection(bootstrap, {name: closure[name] for name in bootstrap if name in closure})
     return closure
 
 
@@ -242,15 +243,10 @@ def selected_pins(packages: list[dict], objects: dict[str, dict],
 def authenticated_indices(data: Path, scratch: Path, reviewed: dict,
                           policies: dict[str, ArchivePolicy],
                           repositories: tuple[tuple[str, str, str], ...]) -> list[ReplayIndex]:
-    """Reuse the stock prefetch signature, Release identity and digest checks."""
+    """Authenticate the staged and digest-checked public metadata."""
     rows = {name: reviewed["repositories"][name] for name, _, _ in repositories}
     objects = {item["sha256"]: item for item in reviewed["objects"]}
     ids = metadata_ids(rows)
-    for digest in ids:
-        path = data / digest
-        item = objects[digest]
-        if path.stat().st_size != item["length"] or digest_file(path) != digest:
-            raise StreamError("Debian replay metadata differs from the reviewed digest or size")
     (data / "inventory.json").write_text(json.dumps(
         {"repositories": rows, "objects": [objects[digest] for digest in sorted(ids)]}))
     (data / "trust.json").write_text(json.dumps(

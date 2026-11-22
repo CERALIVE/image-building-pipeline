@@ -223,7 +223,13 @@ def prepare(args: argparse.Namespace) -> str:
         public = set()
         if replay:
             repo_names = {name for name, _, _ in replay}
-            public = metadata_ids({name: reviewed["repositories"][name] for name in repo_names})
+            replay_rows = {name: reviewed["repositories"][name] for name in repo_names}
+            keyrings = {row["keyring"] for row in replay_rows.values()}
+            if any("path" not in objects[digest] or objects[digest]["urls"] for digest in keyrings):
+                raise StreamError("Debian APT replay keyring must be local")
+            public = metadata_ids(replay_rows)
+            if any(allowed[digest][0] not in repo_names for digest in public - keyrings):
+                raise StreamError("Debian APT replay requires public Debian metadata routes")
             # The public archives and local keyrings are checked before the
             # first-party identity config is even opened.
             for digest in sorted(public):
@@ -232,7 +238,7 @@ def prepare(args: argparse.Namespace) -> str:
             selected = selected_pins(list(packages.values()), objects, repo_names)
             plan = replay_selection(indices, work, selected, args.apt_get, args.apt_file_method)
             if args.write_replayed_inventory:
-                output = refreshed_inventory(reviewed, selected, plan)
+                output = refreshed_inventory(reviewed, selected, plan, args.inventory.parent)
                 verify_selection(plan, selected_pins(output["packages"],
                                  {row["sha256"]: row for row in output["objects"]}, repo_names))
                 staged_inventory = work / "reviewed.json"
@@ -342,18 +348,28 @@ def prepare(args: argparse.Namespace) -> str:
         return digest
 
 
-def refreshed_inventory(reviewed: dict, selected: dict, plan: dict) -> dict:
+def refreshed_inventory(reviewed: dict, selected: dict, plan: dict, input_directory: Path) -> dict:
     """Replace only the replayed Debian binary rows, preserving other inputs."""
     replaced = {pin.sha256 for pin in selected.values()}
     packages = [row for row in reviewed["packages"] if row["sha256"] not in replaced]
-    objects = [row for row in reviewed["objects"] if row["sha256"] not in replaced]
+    objects = []
+    for row in reviewed["objects"]:
+        if row["sha256"] in replaced:
+            continue
+        if "path" in row and not Path(row["path"]).is_absolute():
+            row = row | {"path": str(input_directory.absolute() / row["path"])}
+        objects.append(row)
     for pin in plan.values():
         packages.append({field: getattr(pin, field) for field in
                          ("repository", "name", "version", "arch", "sha256")})
         objects.append({"sha256": pin.sha256, "length": pin.length, "kind": "deb", "urls": [pin.url]})
     if len({row["sha256"] for row in objects}) != len(objects):
         raise StreamError("replayed Debian object collides with another reviewed input")
-    return reviewed | {"packages": packages, "objects": objects}
+    output = reviewed | {"packages": packages, "objects": objects}
+    if CANDIDATE_FIELD in output:
+        bundle = Path(output[CANDIDATE_FIELD]["bundle"])
+        output[CANDIDATE_FIELD] = {"bundle": str(input_directory.absolute() / bundle)}
+    return output
 
 
 def main() -> None:

@@ -689,12 +689,14 @@ use the digest-named public metadata objects retained by discovery. This mode
 does not fetch metadata or packages. Add `--write-replayed-inventory` to write
 an **unapproved** corrected inventory. Without it the gate only checks the
 provided selection and writes nothing. Use an output directory of mode 0700;
-preserve or make absolute any relative local ingredient paths before moving
-the rewritten inventory. Review all version and same-byte URL changes. The
-normal producer repeats the gate on current pinned bytes before opening the
-identity mapping. Missing native APT tools, Debian indices or signatures fail
-closed. `--apt-get` and `--apt-file-method` can locate a trusted native APT
-installation outside the system prefix.
+the rewritten inventory preserves the destinations of relative local paths.
+Review all version and same-byte URL changes. The normal producer stages only
+local Debian keyrings and approved public Debian metadata before replay. The
+full replay must match the reviewed package set exactly, not just the pins
+that APT still selects. Missing native APT tools, Debian indices or signatures
+fail closed before the identity mapping opens. `--apt-get` and
+`--apt-file-method` can locate a trusted native APT installation outside the
+system prefix.
 
 ```sh
 python3 ci/prepare-image-capsule.py \
