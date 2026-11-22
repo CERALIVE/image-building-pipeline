@@ -693,8 +693,9 @@ the rewritten inventory preserves the destinations of relative local paths.
 Review all version and same-byte URL changes. The normal producer stages only
 local Debian keyrings and approved public Debian metadata before replay. The
 full replay must match the reviewed package set exactly, not just the pins
-that APT still selects. The replay uses the three trixie binary indices;
-the separate RAUC Sources index does not count as a binary index. Missing
+that APT still selects. Declaring any trixie binary archive requires all
+three (base, updates, and security), regardless of its inventory label.
+The separate RAUC Sources index does not count as a binary index. Missing
 replay tools, required indices or signatures fail closed before the identity
 mapping opens. `--apt-get` and
 `--apt-file-method` can locate a trusted native APT installation outside the

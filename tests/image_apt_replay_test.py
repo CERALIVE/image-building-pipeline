@@ -97,17 +97,18 @@ def reject_incomplete_trixie_binary_set_before_any_fetch() -> None:
         apt, method = apt_tools()
         policy_path = work / "policy.json"
         policy = json.loads(policy_path.read_text())
-        for repos in (inventory["repositories"], policy["repositories"]):
-            del repos["debian-updates"]
-            repos["base"] = repos.pop("debian-trixie")
-            repos["security"] = repos.pop("debian-security")
-        policy_path.write_text(json.dumps(policy))
-        (work / "reviewed.json").write_text(json.dumps(inventory))
         args[args.index("--client-identity-config") + 1] = str(work / "unavailable-identity")
-        result = run([*args, "--apt-get", str(apt), "--apt-file-method", str(method)], env)
-        assert result.returncode == 1 and "requires trixie, updates and security indices" in result.stderr, (
-            result.stdout, result.stderr, requests)
-        assert requests == [] and not (work / "capsule.tar").exists()
+        for missing in (("debian-updates",), ("debian-updates", "debian-security")):
+            for record, path in ((inventory, work / "reviewed.json"), (policy, policy_path)):
+                repos = {name: row for name, row in record["repositories"].items() if name not in missing}
+                repos["base"] = repos.pop("debian-trixie")
+                if "debian-security" in repos:
+                    repos["security"] = repos.pop("debian-security")
+                path.write_text(json.dumps(record | {"repositories": repos}))
+            result = run([*args, "--apt-get", str(apt), "--apt-file-method", str(method)], env)
+            assert result.returncode == 1 and "requires trixie, updates and security indices" in result.stderr, (
+                missing, result.stdout, result.stderr, requests)
+            assert requests == [] and not (work / "capsule.tar").exists()
 
 
 def reject_reviewed_package_missing_from_plan() -> None:

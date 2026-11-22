@@ -52,7 +52,7 @@ class PackagePin:
 
 def replay_repositories(policies: dict[str, ArchivePolicy], *,
                         candidate_sealing: bool) -> tuple[tuple[str, str, str], ...]:
-    """Recognize the complete production Debian set, even under other labels."""
+    """Require the complete trixie binary set when any trixie binary route is declared."""
     by_suite = {}
     marked_binary = False
     for name, origin, suite in SUITES:
@@ -61,16 +61,18 @@ def replay_repositories(policies: dict[str, ArchivePolicy], *,
                               and BINARY_INDEX.fullmatch(policies[name].index_path) is not None)
         matches = [key for key, repo in policies.items()
                    if (repo.origin, repo.codename or repo.suite) == (origin, suite)
-                   and BINARY_INDEX.fullmatch(repo.index_path)]
+                   and not repo.index_path.startswith("main/source/Sources.")]
         if len(matches) > 1:
             raise StreamError("ambiguous Debian APT replay suite")
         if matches:
+            if not BINARY_INDEX.fullmatch(policies[matches[0]].index_path):
+                raise StreamError("Debian APT replay requires the exact ARM64 binary index")
             by_suite[suite] = (matches[0], origin, suite)
     if len(by_suite) == len(SUITES):
         return tuple(by_suite.values())
     # A Sources index can supply RAUC sources without any Debian image binaries.
     has_source = policies["debian-source"].index_path.startswith("main/source/Sources.")
-    if marked_binary or by_suite.keys() - {"trixie"} or (has_source and (candidate_sealing or by_suite)):
+    if marked_binary or by_suite or (has_source and candidate_sealing):
         raise StreamError("Debian APT replay requires trixie, updates and security indices")
     return ()
 
