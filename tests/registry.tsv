@@ -48,6 +48,8 @@ tests/rootfs_measurement_test.py	tool	unit	invoked-by-suite	shipping-content pur
 tests/parity_noexec_test.py	tool	unit	invoked-by-suite	noexec X_OK syscall-denial parity regression driven by image-route.bats
 tests/bootstrap_metadata_test.py	tool	unit	invoked-by-suite	original bootstrap metadata authentication and validity driven by image-route.bats
 tests/capsule-producer.bats	bats	unit	default-bats	host package prefetch with throwaway TLS credentials and original archive signatures
+tests/image-apt-replay.bats	bats	unit	default-bats	native offline APT selection and exact package route replay
+tests/image_apt_replay_test.py	tool	unit	invoked-by-suite	native APT replay fixture driven by image-apt-replay.bats
 tests/capsule_transport_fixture.py	helper	support	invoked-by-suite	loopback transport fixture shared by the capsule producer tests
 tests/capsule_transport_policy_test.py	tool	unit	invoked-by-suite	capsule transport policy driven by capsule-producer.bats
 tests/capsule_producer_test.py	tool	unit	invoked-by-suite	local HTTPS capsule producer boundaries driven by capsule-producer.bats

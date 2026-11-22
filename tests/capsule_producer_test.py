@@ -821,16 +821,43 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
                    ("debian-source", "https://deb.debian.org/debian")]
         if case.startswith("codename") or case == "packages-xz":
             origins.append(("debian-binary", "https://deb.debian.org/debian"))
+        if case == "replay-stale":
+            origins.extend((("debian-trixie", "https://deb.debian.org/debian"),
+                            ("debian-updates", "https://deb.debian.org/debian"),
+                            ("debian-security", "https://deb.debian.org/debian-security")))
         for name, origin in origins:
             suite = "trixie" if case.startswith("codename") and name == "debian-binary" else "stable"
             if case == "packages-xz" and name == "debian-binary":
                 suite = "stable-updates"
+            replay_suite = {"debian-trixie": "trixie", "debian-updates": "trixie-updates",
+                            "debian-security": "trixie-security"}.get(name)
+            if replay_suite:
+                suite = replay_suite
             base = origin + "/dists/" + suite
             if name == "firstparty":
                 base += "/binary-arm64"
             index_path = "Packages.gz" if name == "firstparty" else "main/binary-arm64/Packages.gz"
             index_bytes = b"Package: source-fixture\n"
-            if name != "debian-source":
+            if replay_suite:
+                index_bytes = b""
+                debs = {
+                    "debian-trixie": (("base-files", "1", "Essential: yes\nDepends: libssl3t64\n", True),
+                                     ("libssl3t64", "3.5.9-1~deb13u1", "", False)),
+                    "debian-updates": (),
+                    "debian-security": (("libssl3t64", "3.5.7-1~deb13u3", "", True),),
+                }
+                for pkg, version, extra, selected in debs[name]:
+                    filename = f"pool/{pkg}_{version}_arm64.deb"
+                    body = f"{name} {pkg} {version}\n".encode()
+                    digest = hashlib.sha256(body).hexdigest()
+                    index_bytes += (f"Package: {pkg}\nVersion: {version}\nArchitecture: arm64\n"
+                                    f"Filename: {filename}\nSize: {len(body)}\nSHA256: {digest}\n"
+                                    f"{extra}\n").encode()
+                    if selected:
+                        store(body, "deb", origin + "/" + filename)
+                        packages.append({"repository": name, "name": pkg, "version": version,
+                                         "arch": "arm64", "sha256": digest})
+            elif name != "debian-source":
                 version = {"firstparty": "1.0", "bsp": "1.1", "debian-binary": "1.2"}[name]
                 package = deb("9.0" if case == "control-version" and name == "firstparty" else version,
                               "amd64" if case == "control-arch" and name == "firstparty" else "arm64")
