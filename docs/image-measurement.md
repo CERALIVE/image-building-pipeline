@@ -539,9 +539,16 @@ or prove that the submitted dependency closure is complete.
 
 `python3 ci/prepare-image-capsule.py` supplies the host-side producer. Running
 authenticated prefetch still requires separate owner authorization. It takes
-an **explicit reviewed complete closure**, not board-manifest seeds. The normal
-image installation dependency solver remains in mkosi/APT; this producer does
-not invoke it, discover dependencies or claim the submitted closure is complete.
+an **explicit reviewed complete closure**, not board-manifest seeds. For the
+production trixie input set it first verifies the three signed Debian binary
+indices, then replays native APT against those bytes in an empty ARM64 state.
+APT can use only the local file transport. The replay checks the mkosi
+bootstrap (`?essential` and `base-files`) and a solve rooted at the reviewed
+Debian package names, including the exact original package URL, SHA-256 and
+size from each signed stanza. A stale or unserved selection fails before
+opening the client identity mapping or requesting first-party metadata.
+The replay does not claim that the later runtime, BSP, first-party or source
+transactions are complete. The image installation solver remains in mkosi.
 Include every bootstrap, BSP and first-party dependency selected for this board,
 plus the already prepared public source bundle, public trust, pinned sources,
 released kernel metadata and builder archives described above. An omitted
@@ -677,12 +684,37 @@ python3 ci/prepare-image-capsule.py \
   --output private-capsules/rock-5b-plus.tar
 ```
 
+To verify or regenerate the Debian selection without credentials or sealing,
+use the digest-named public metadata objects retained by discovery. This mode
+does not fetch metadata or packages. Add `--write-replayed-inventory` to write
+an **unapproved** corrected inventory. Without it the gate only checks the
+provided selection and writes nothing. Use an output directory of mode 0700;
+the rewritten inventory preserves the destinations of relative local paths.
+Review all version and same-byte URL changes. The normal producer stages only
+local Debian keyrings and approved public Debian metadata before replay. The
+full replay must match the reviewed package set exactly, not just the pins
+that APT still selects. Declaring any trixie binary archive requires all
+three (base, updates, and security), regardless of its inventory label.
+The separate RAUC Sources index does not count as a binary index. Missing
+replay tools, required indices or signatures fail closed before the identity
+mapping opens. `--apt-get` and
+`--apt-file-method` can locate a trusted native APT installation outside the
+system prefix.
+
+```sh
+python3 ci/prepare-image-capsule.py \
+  --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
+  --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
+  --replay-metadata "${IMAGE_PUBLIC_DISCOVERY:?}/objects" \
+  --write-replayed-inventory --output private-capsules/reviewed.json
+```
+
 With the config form, only the mapping filename appears in the command line.
 The certificate and key paths stay out of both the Python and curl argument
 vectors and environments. For compatibility, `--client-identity ORIGIN
 CERT_PATH KEY_PATH` still works and prints a warning because it exposes both
-paths in Python's process arguments. Duplicate origins within or between
-the two forms are rejected before any GET.
+paths in Python's process arguments. Duplicate client origins are rejected
+before any authenticated GET.
 For each credentialed GET, the transport sends quoted `cert` and `key` config
 lines through a fresh pipe to `curl -K -`. Curl opens the files in place.
 Neither command writes a config file or includes the paths in logs, receipts

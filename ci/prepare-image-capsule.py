@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -19,24 +20,33 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
+from image_apt_replay import (authenticated_indices, metadata_ids, replay_repositories,
+                              replay_selection, selected_pins, verify_selection)
 from image_candidate import FIELD as CANDIDATE_FIELD, KIND as CANDIDATE_KIND
 from image_candidate import check_sealed_candidate_archive, select_candidate, stage_candidate
 from kernel_release import KernelReleaseError, local_status, read_kernel_json
-from image_policy import parse_policy, read_policy
+from image_policy import archive_policies, parse_policy, read_policy
 from image_stream import Identity, StreamError
 from image_transport import (INDEX_LIMIT, SEALED, TransportParser, copy_local, fetch, metadata_base,
                              read_json, shell, transport_clients)
 
 
 def prepare(args: argparse.Namespace) -> str:
-    clients = transport_clients(args)
+    if not 1 <= args.object_timeout <= 600:
+        raise StreamError("object timeout must be between 1 and 600 seconds")
     policy_record = read_policy(args.trust_policy)
     reviewed = read_json(args.inventory)
     if type(reviewed) is not dict:
         raise StreamError("invalid reviewed inventory fields")
     candidate = select_candidate(policy_record, reviewed, args.inventory.parent)
     policy = parse_policy({key: value for key, value in policy_record.items() if key != CANDIDATE_FIELD},
-                          clients.keys(), candidate_sealing=candidate is not None)
+                          (), candidate_sealing=candidate is not None)
+    replay = replay_repositories(policy.repositories, candidate_sealing=candidate is not None)
+    if args.replay_metadata is not None and not replay:
+        raise StreamError("no production Debian repositories to replay")
+    clients = {} if replay else transport_clients(args)
+    if clients:
+        archive_policies(policy_record["repositories"], clients.keys())
     required = {"schema", "source_commit", "epoch", "board", "source_bundle",
                 "device_root", "objects", "repositories", "packages"}
     if candidate:
@@ -52,7 +62,7 @@ def prepare(args: argparse.Namespace) -> str:
     if set(reviewed["repositories"]) != set(policy.repositories):
         raise StreamError("repositories differ from independently approved public policy")
 
-    # The approved inventory is explicit closure input; this command never runs APT.
+    # The inventory is an independent input; a solve never authorizes a new pin.
     objects = {}
     urls = set()
     for item in reviewed["objects"]:
@@ -172,12 +182,10 @@ def prepare(args: argparse.Namespace) -> str:
         data.mkdir(mode=0o700)
         env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "HOME": temporary,
                "TMPDIR": temporary, "CERALIVE_BUILD_PURPOSE": "rootfs-measurement"}
-        if candidate:
-            stage_candidate(candidate, work / "candidate", data, env)
         transfers = []
-        for digest, item in objects.items():
-            if item["kind"] == "deb":
-                continue
+
+        def stage(digest: str, *, cached: Path | None = None) -> None:
+            item = objects[digest]
             target = data / digest
             if "path" in item:
                 label = item["kind"]
@@ -185,6 +193,9 @@ def prepare(args: argparse.Namespace) -> str:
                 if not source.is_absolute():
                     source = args.inventory.parent / source
                 copy_local(source, target, item["length"])
+            elif cached is not None:
+                label = allowed[digest][1]
+                copy_local(cached / digest, target, item["length"])
             else:
                 name, role = allowed[digest]
                 label = f"{name} {role}"
@@ -208,6 +219,43 @@ def prepare(args: argparse.Namespace) -> str:
                     local_status(read_kernel_json(target))
                 except KernelReleaseError as error:
                     raise StreamError(str(error)) from error
+
+        public = set()
+        if replay:
+            repo_names = {name for name, _, _ in replay}
+            replay_rows = {name: reviewed["repositories"][name] for name in repo_names}
+            keyrings = {row["keyring"] for row in replay_rows.values()}
+            if any("path" not in objects[digest] or objects[digest]["urls"] for digest in keyrings):
+                raise StreamError("Debian APT replay keyring must be local")
+            public = metadata_ids(replay_rows)
+            if any(allowed[digest][0] not in repo_names for digest in public - keyrings):
+                raise StreamError("Debian APT replay requires public Debian metadata routes")
+            # The public archives and local keyrings are checked before the
+            # first-party identity config is even opened.
+            for digest in sorted(public):
+                stage(digest, cached=args.replay_metadata)
+            indices = authenticated_indices(data, work, reviewed, policy.repositories, replay)
+            selected = selected_pins(list(packages.values()), objects, repo_names)
+            plan = replay_selection(indices, work, selected, args.apt_get, args.apt_file_method)
+            if args.write_replayed_inventory:
+                output = refreshed_inventory(reviewed, selected, plan, args.inventory.parent)
+                verify_selection(plan, selected_pins(output["packages"],
+                                 {row["sha256"]: row for row in output["objects"]}, repo_names))
+                staged_inventory = work / "reviewed.json"
+                staged_inventory.write_text(json.dumps(output, indent=2) + "\n")
+                staged_inventory.chmod(0o600)
+                os.link(staged_inventory, destination)
+                return f"offline APT replay passed: {len(plan)} Debian packages; new inventory is unapproved"
+            verify_selection(plan, selected)
+            if args.replay_metadata is not None:
+                return f"offline APT replay passed: {len(plan)} Debian packages; no capsule written"
+            clients = transport_clients(args)
+            archive_policies(policy_record["repositories"], clients.keys())
+        if candidate:
+            stage_candidate(candidate, work / "candidate", data, env)
+        for digest, item in objects.items():
+            if digest not in public and item["kind"] != "deb":
+                stage(digest)
         rows = [{key: item[key] for key in ("sha256", "length", "kind", "urls")}
                 for item in objects.values()]
         inventory = {key: reviewed[key] for key in
@@ -300,6 +348,31 @@ def prepare(args: argparse.Namespace) -> str:
         return digest
 
 
+def refreshed_inventory(reviewed: dict, selected: dict, plan: dict, input_directory: Path) -> dict:
+    """Replace only the replayed Debian binary rows, preserving other inputs."""
+    input_directory = input_directory.resolve(strict=True)
+    replaced = {pin.sha256 for pin in selected.values()}
+    packages = [row for row in reviewed["packages"] if row["sha256"] not in replaced]
+    objects = []
+    for row in reviewed["objects"]:
+        if row["sha256"] in replaced:
+            continue
+        if "path" in row and not Path(row["path"]).is_absolute():
+            row = row | {"path": str(input_directory / row["path"])}
+        objects.append(row)
+    for pin in plan.values():
+        packages.append({field: getattr(pin, field) for field in
+                         ("repository", "name", "version", "arch", "sha256")})
+        objects.append({"sha256": pin.sha256, "length": pin.length, "kind": "deb", "urls": [pin.url]})
+    if len({row["sha256"] for row in objects}) != len(objects):
+        raise StreamError("replayed Debian object collides with another reviewed input")
+    output = reviewed | {"packages": packages, "objects": objects}
+    if CANDIDATE_FIELD in output:
+        bundle = Path(output[CANDIDATE_FIELD]["bundle"])
+        output[CANDIDATE_FIELD] = {"bundle": str(input_directory / bundle)}
+    return output
+
+
 def main() -> None:
     parser = TransportParser(description=__doc__)
     parser.add_argument("--inventory", required=True, type=Path)
@@ -307,7 +380,17 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--ca-file", help="explicit public HTTPS CA bundle; defaults to system trust")
     parser.add_argument("--object-timeout", type=int, default=120)
+    parser.add_argument("--replay-metadata", type=Path, metavar="DIR",
+                        help="verification only; use locally retained digest-named Debian metadata")
+    parser.add_argument("--write-replayed-inventory", action="store_true",
+                        help="write an unapproved corrected inventory to --output; no prefetch or sealing")
+    parser.add_argument("--apt-get", type=Path, default=Path(shutil.which("apt-get") or "/usr/bin/apt-get"))
+    parser.add_argument("--apt-file-method", type=Path, default=Path("/usr/lib/apt/methods/file"))
     args = parser.parse_args()
+    if args.write_replayed_inventory and args.replay_metadata is None:
+        parser.error("--write-replayed-inventory requires --replay-metadata")
+    if args.replay_metadata is not None and (args.client_identity or args.client_identity_config is not None):
+        parser.error("offline replay does not accept client identities")
     try:
         print(prepare(args))
     except (StreamError, SEALED["SealedError"]) as exc:

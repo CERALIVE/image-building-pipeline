@@ -821,16 +821,43 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
                    ("debian-source", "https://deb.debian.org/debian")]
         if case.startswith("codename") or case == "packages-xz":
             origins.append(("debian-binary", "https://deb.debian.org/debian"))
+        if case == "replay-stale":
+            origins.extend((("debian-trixie", "https://deb.debian.org/debian"),
+                            ("debian-updates", "https://deb.debian.org/debian"),
+                            ("debian-security", "https://deb.debian.org/debian-security")))
         for name, origin in origins:
-            suite = "trixie" if case.startswith("codename") and name == "debian-binary" else "stable"
+            suite = "bookworm" if case.startswith("codename") and name == "debian-binary" else "stable"
             if case == "packages-xz" and name == "debian-binary":
                 suite = "stable-updates"
+            replay_suite = {"debian-trixie": "trixie", "debian-updates": "trixie-updates",
+                            "debian-security": "trixie-security"}.get(name)
+            if replay_suite:
+                suite = replay_suite
             base = origin + "/dists/" + suite
             if name == "firstparty":
                 base += "/binary-arm64"
             index_path = "Packages.gz" if name == "firstparty" else "main/binary-arm64/Packages.gz"
             index_bytes = b"Package: source-fixture\n"
-            if name != "debian-source":
+            if replay_suite:
+                index_bytes = b""
+                debs = {
+                    "debian-trixie": (("base-files", "1", "Essential: yes\nDepends: libssl3t64\n", True),
+                                     ("libssl3t64", "3.5.9-1~deb13u1", "", False)),
+                    "debian-updates": (),
+                    "debian-security": (("libssl3t64", "3.5.7-1~deb13u3", "", True),),
+                }
+                for pkg, version, extra, selected in debs[name]:
+                    filename = f"pool/{pkg}_{version}_arm64.deb"
+                    body = f"{name} {pkg} {version}\n".encode()
+                    digest = hashlib.sha256(body).hexdigest()
+                    index_bytes += (f"Package: {pkg}\nVersion: {version}\nArchitecture: arm64\n"
+                                    f"Filename: {filename}\nSize: {len(body)}\nSHA256: {digest}\n"
+                                    f"{extra}\n").encode()
+                    if selected:
+                        store(body, "deb", origin + "/" + filename)
+                        packages.append({"repository": name, "name": pkg, "version": version,
+                                         "arch": "arm64", "sha256": digest})
+            elif name != "debian-source":
                 version = {"firstparty": "1.0", "bsp": "1.1", "debian-binary": "1.2"}[name]
                 package = deb("9.0" if case == "control-version" and name == "firstparty" else version,
                               "amd64" if case == "control-arch" and name == "firstparty" else "arm64")
@@ -852,21 +879,25 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
             now = datetime.now(timezone.utc)
             date = now - timedelta(days=2 if case == "expired" else 0, minutes=1)
             until = now + timedelta(days=-1 if case == "expired" else 1)
-            signed_suite = "stable" if case.startswith("codename") and name == "debian-binary" else suite
+            signed_suite = "oldstable" if case.startswith("codename") and name == "debian-binary" else suite
+            if replay_suite:
+                signed_suite = replay_suite.replace("trixie", "stable", 1)
             if name == "debian-binary" and case == "codename-suite-mismatch":
                 signed_suite = "testing"
             component = "contrib" if name == "debian-binary" and case == "codename-component" else "main"
             architecture = "amd64" if name == "debian-binary" and case == "codename-arch" else "arm64"
             release = (f"Origin: {'Debian' if name.startswith('debian-') else name}\nSuite: {signed_suite}\n"
                        f"Components: {component}\nArchitectures: {architecture}\nDate: {format_datetime(date)}\n")
+            if replay_suite:
+                release += f"Codename: {replay_suite}\n"
             if name == "debian-binary" and case != "codename-missing":
-                release += "Codename: " + ("bookworm" if case == "codename-mismatch" else "trixie") + "\n"
+                release += "Codename: " + ("trixie" if case == "codename-mismatch" else "bookworm") + "\n"
                 if case == "codename-duplicate":
-                    release += "Codename: trixie\n"
+                    release += "Codename: bookworm\n"
                 if case == "codename-extra-token":
-                    release = release.replace("Codename: trixie\n", "Codename: trixie bookworm\n")
+                    release = release.replace("Codename: bookworm\n", "Codename: bookworm trixie\n")
                 if case == "codename-duplicate-suite":
-                    release += "Suite: stable\n"
+                    release += "Suite: oldstable\n"
             if not (case == "debian-waiver" and name == "debian-source"):
                 release += f"Valid-Until: {format_datetime(until)}\n"
             release += f"SHA256:\n {index_digest} {len(compressed)} {index_path}\n"
@@ -877,8 +908,10 @@ def fixture(case: str = "valid", *, redirects: dict[str, tuple[int, str]] | None
             inrelease = store(signed, "apt-metadata", base + "/InRelease")
             repo = {"origin": origin, "keyring": keyring, "fingerprints": [fingerprint],
                     "suite": suite, "component": "main", "arch": "arm64", "index_path": index_path}
+            if replay_suite:
+                repo |= {"suite": signed_suite, "codename": replay_suite}
             if case.startswith("codename") and name == "debian-binary":
-                repo |= {"suite": "stable", "codename": "trixie"}
+                repo |= {"suite": "oldstable", "codename": "bookworm"}
             policies[name] = repo | {"max_age_seconds": 86400}
             repositories[name] = repo | {"inrelease": inrelease, "index": index}
         reviewed = {"schema": 1, "source_commit": "a" * 40, "epoch": 1234, "board": "rock-5b-plus",
@@ -1536,10 +1569,10 @@ def test_codename_path_accepts_original_signed_suite() -> None:
         assert result.returncode == 0, result.stderr
         capsule = unpack(work / "capsule.tar", work / "imported",
                          Identity("test", "rock-5b-plus", "a" * 40, 1234, result.stdout.strip()))
-        url = "https://deb.debian.org/debian/dists/trixie/InRelease"
+        url = "https://deb.debian.org/debian/dists/bookworm/InRelease"
         row = next(row for row in capsule.objects if url in row.urls)
         assert (capsule.directory / row.sha256).read_bytes() == remote[url]
-        assert b"Suite: stable\n" in remote[url] and b"Codename: trixie\n" in remote[url]
+        assert b"Suite: oldstable\n" in remote[url] and b"Codename: bookworm\n" in remote[url]
         assert {url for url, _authenticated in requests} == set(remote)
 
 
@@ -1592,7 +1625,7 @@ def test_codename_cannot_be_changed_without_independent_policy_approval() -> Non
     ):
         with fixture("codename") as (work, reviewed, args, env, requests, _remote):
             if case == "inventory":
-                reviewed["repositories"]["debian-binary"]["codename"] = "bookworm"
+                reviewed["repositories"]["debian-binary"]["codename"] = "trixie"
             elif case == "url":
                 digest = reviewed["repositories"]["debian-binary"]["inrelease"]
                 selected = next(row for row in reviewed["objects"] if row["sha256"] == digest)
