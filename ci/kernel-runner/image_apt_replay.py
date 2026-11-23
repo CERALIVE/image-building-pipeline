@@ -26,6 +26,7 @@ SUITES = (
 )
 PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*")
 VERSION = re.compile(r"[A-Za-z0-9.+:~_-]+")
+INSTALL_ROW = re.compile(rf"Inst (\S+)(?: \[({VERSION.pattern})\])? \((\S+) .+ \[(arm64|all)\]\)(?: .*)?")
 URI = re.compile(r"'([^']+)'\s+(\S+)\s+(\d+)(?:\s+\S+)?\s*")
 BINARY_INDEX = re.compile(r"main/binary-arm64/Packages\.(?:gz|xz)")
 MKOSI_APT_VERSION = "3.0.3"
@@ -247,10 +248,10 @@ def solve(indices: list[ReplayIndex], scratch: Path, apt_get: Path, file_method:
                 raise StreamError("runtime RAUC replay would remove installed packages")
             if not line.startswith("Inst "):
                 continue
-            match = re.fullmatch(r"Inst (\S+) \((\S+) .+ \[(arm64|all)\]\)(?: .*)?", line)
-            if not match:
+            match = INSTALL_ROW.fullmatch(line)
+            if not match or (runtime is None and match.group(2) is not None):
                 raise StreamError("unrecognized native APT selection row")
-            name, version, arch = match.groups()
+            name, _, version, arch = match.groups()
             if not PACKAGE.fullmatch(name) or not VERSION.fullmatch(version) or name in decisions:
                 raise StreamError("invalid or duplicate native APT selection")
             decisions[name] = (version, arch)
@@ -283,17 +284,24 @@ def solve(indices: list[ReplayIndex], scratch: Path, apt_get: Path, file_method:
         for (location, _), index in locations.items():
             prefix = unquote(location) + "/"
             names = {name for name, (uri, _) in planned.items() if uri.startswith(prefix)}
+            matched = set()
             for row in rows_for(index, names):
                 name = row["Package"]
                 filename = signed_filename(row)
                 if ((row["Version"], row["Architecture"]) != decisions[name]
                         or planned[name] != (prefix + unquote(filename), int(row["Size"]))):
                     continue
-                if name in result or not re.fullmatch(r"[0-9a-f]{64}", row["SHA256"]):
+                if name in matched or not re.fullmatch(r"[0-9a-f]{64}", row["SHA256"]):
                     raise StreamError("ambiguous or invalid signed Debian package row")
-                result[name] = PackagePin(index.repository, name, row["Version"], row["Architecture"],
-                                          original_url(index.origin + "/" + filename),
-                                          row["SHA256"], int(row["Size"]))
+                matched.add(name)
+                pin = PackagePin(index.repository, name, row["Version"], row["Architecture"],
+                                 original_url(index.origin + "/" + filename), row["SHA256"], int(row["Size"]))
+                if name in result:
+                    if runtime is None or replace(pin, repository=result[name].repository) != result[name]:
+                        raise StreamError("ambiguous or invalid signed Debian package row")
+                    # Two signed suites can publish the same bytes at one pool URI.
+                    continue
+                result[name] = pin
         if result.keys() != decisions.keys():
             raise StreamError("APT URI has no matching signed Debian package row")
         return result
