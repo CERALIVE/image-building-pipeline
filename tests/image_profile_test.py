@@ -1069,6 +1069,10 @@ os.execvp(sys.argv[1], sys.argv[1:])
                 streams.enter_context(launcher)
 
             def communicate(*, timeout: float | None) -> tuple[bytes, bytes]:
+                # Python 3.12 (the build VM) raises ValueError when communicate() meets a stdin the
+                # fixture already closed; 3.13+ accepts it. The close callback keeps its own reference.
+                if launcher.stdin is not None and launcher.stdin.closed:
+                    launcher.stdin = None
                 return launcher.communicate(
                     timeout=bounded_timeout(timeout, FIXTURE_PHASE_SECONDS, "launcher exit wait"))
 
@@ -2485,8 +2489,18 @@ for request in sys.stdin:
                     child.stdin.write(b"check\n")
                     child.stdin.flush()
                     assert select.select([child.stdout], [], [], 2)[0] and child.stdout.readline() == expected
+                real_stat = pathlib.Path.stat
+
+                def stat_guard(self, *args, **kwargs):
+                    # Python 3.12's Path.exists()/is_dir() and the open-time Path.lstat() all funnel
+                    # through stat(), so there only a following stat() of the journal is an existence
+                    # probe; 3.13+ keeps the strict no-stat guard.
+                    if sys.version_info >= (3, 13) or (self == journal and kwargs.get("follow_symlinks", True)):
+                        raise AssertionError("journal existence must use inventory")
+                    return real_stat(self, *args, **kwargs)
+
                 with patch.object(image_lifecycle, "list_directory", inventory, create=True), \
-                        patch.object(pathlib.Path, "stat", side_effect=AssertionError("journal existence must use inventory")):
+                        patch.object(pathlib.Path, "stat", stat_guard):
                     journal.write_text(json.dumps(row | {"launcher": image_lifecycle.process_identity(child.pid)}))
                     try:
                         reconcile(store)
