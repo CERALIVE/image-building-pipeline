@@ -20,8 +20,10 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci/kernel-runner"))
 from image_capsule import INPUT_LIMIT, KINDS, digest_file, object_id, original_url, unpack
-from image_apt_replay import (authenticated_indices, metadata_ids, replay_repositories,
-                              replay_selection, selected_pins, verify_selection)
+from image_apt_replay import (MKOSI_APT_VERSION, authenticated_indices, merge_runtime_fetches, metadata_ids,
+                              pinned_rauc_version, replay_repositories,
+                              replay_runtime_rauc, replay_selection, selected_pins,
+                              verify_runtime_fetches, verify_selection)
 from image_candidate import FIELD as CANDIDATE_FIELD, KIND as CANDIDATE_KIND
 from image_candidate import check_sealed_candidate_archive, select_candidate, stage_candidate
 from kernel_release import KernelReleaseError, local_status, read_kernel_json
@@ -44,6 +46,11 @@ def prepare(args: argparse.Namespace) -> str:
     replay = replay_repositories(policy.repositories, candidate_sealing=candidate is not None)
     if args.replay_metadata is not None and not replay:
         raise StreamError("no production Debian repositories to replay")
+    runtime_rauc = args.post_platform_status is not None and args.runtime_rauc_debs is not None
+    if (args.post_platform_status is None) != (args.runtime_rauc_debs is None) or (runtime_rauc and not replay):
+        raise StreamError("runtime RAUC replay requires post-platform status, built RAUC pair and Debian indexes")
+    if candidate and replay and not runtime_rauc:
+        raise StreamError("measurement candidate requires runtime RAUC replay inputs")
     clients = {} if replay else transport_clients(args)
     if clients:
         archive_policies(policy_record["repositories"], clients.keys())
@@ -83,7 +90,8 @@ def prepare(args: argparse.Namespace) -> str:
             if (not isinstance(item["path"], str) or item["kind"] == "deb"
                     or ".." in Path(item["path"]).parts):
                 raise StreamError("packages must be fetched from their signed repository")
-        elif len(names) != 1 or item["kind"] not in ("deb", "apt-metadata"):
+        elif (not names or item["kind"] not in ("deb", "apt-metadata")
+              or (len(names) != 1 and not (runtime_rauc and item["kind"] == "deb" and len(names) <= 3))):
             raise StreamError("only exact repository metadata and package GETs are permitted")
         if item["kind"] == "apt-metadata" and item["length"] > INDEX_LIMIT:
             raise StreamError("repository metadata exceeds the 256 MiB bound")
@@ -160,6 +168,8 @@ def prepare(args: argparse.Namespace) -> str:
         if (identity in identities or digest in packages or digest not in objects
                 or objects[digest]["kind"] != "deb"):
             raise StreamError("missing or ambiguous reviewed package")
+        if len(objects[digest]["urls"]) != 1 and package["repository"] not in {name for name, _, _ in replay}:
+            raise StreamError("package URL alternatives require signed Debian runtime replay")
         identities.add(identity)
         packages[digest] = package
     if {digest for digest, item in objects.items() if item["kind"] == "deb"} != set(packages):
@@ -237,6 +247,13 @@ def prepare(args: argparse.Namespace) -> str:
             indices = authenticated_indices(data, work, reviewed, policy.repositories, replay)
             selected = selected_pins(list(packages.values()), objects, repo_names)
             plan = replay_selection(indices, work, selected, args.apt_get, args.apt_file_method)
+            runtime_plan = {}
+            if runtime_rauc:
+                version = pinned_rauc_version(Path(__file__).resolve().parents[1])
+                runtime_plan = replay_runtime_rauc(indices, work, args.apt_get, args.apt_file_method,
+                                                   args.post_platform_status, tuple(args.runtime_rauc_debs), version,
+                                                   apt_version=MKOSI_APT_VERSION if candidate else None)
+            plan = merge_runtime_fetches(plan, runtime_plan)
             if args.write_replayed_inventory:
                 output = refreshed_inventory(reviewed, selected, plan, args.inventory.parent)
                 verify_selection(plan, selected_pins(output["packages"],
@@ -246,6 +263,7 @@ def prepare(args: argparse.Namespace) -> str:
                 staged_inventory.chmod(0o600)
                 os.link(staged_inventory, destination)
                 return f"offline APT replay passed: {len(plan)} Debian packages; new inventory is unapproved"
+            verify_runtime_fetches(runtime_plan, selected)
             verify_selection(plan, selected)
             if args.replay_metadata is not None:
                 return f"offline APT replay passed: {len(plan)} Debian packages; no capsule written"
@@ -294,7 +312,7 @@ def prepare(args: argparse.Namespace) -> str:
             url = original_url(bases[package["repository"]] + "/" + filename.removeprefix("./"))
             item = objects[digest]
             if (signed_digest != digest or version != package["version"] or arch != package["arch"]
-                    or int(size) != item["length"] or item["urls"] != [url]):
+                    or int(size) != item["length"] or item["urls"][0] != url):
                 raise StreamError("reviewed package differs from original signed index")
             target = data / digest
             transfer = fetch(url, target, item["length"], clients.get(repo.origin),
@@ -363,7 +381,8 @@ def refreshed_inventory(reviewed: dict, selected: dict, plan: dict, input_direct
     for pin in plan.values():
         packages.append({field: getattr(pin, field) for field in
                          ("repository", "name", "version", "arch", "sha256")})
-        objects.append({"sha256": pin.sha256, "length": pin.length, "kind": "deb", "urls": [pin.url]})
+        objects.append({"sha256": pin.sha256, "length": pin.length, "kind": "deb",
+                        "urls": [pin.url, *pin.aliases]})
     if len({row["sha256"] for row in objects}) != len(objects):
         raise StreamError("replayed Debian object collides with another reviewed input")
     output = reviewed | {"packages": packages, "objects": objects}
@@ -386,6 +405,9 @@ def main() -> None:
                         help="write an unapproved corrected inventory to --output; no prefetch or sealing")
     parser.add_argument("--apt-get", type=Path, default=Path(shutil.which("apt-get") or "/usr/bin/apt-get"))
     parser.add_argument("--apt-file-method", type=Path, default=Path("/usr/lib/apt/methods/file"))
+    parser.add_argument("--post-platform-status", type=Path, help="ARM64 dpkg status before runtime postinstall")
+    parser.add_argument("--runtime-rauc-debs", type=Path, nargs=2, metavar=("RAUC_DEB", "SERVICE_DEB"),
+                        help="control inputs from the pinned ARM64 RAUC build")
     args = parser.parse_args()
     if args.write_replayed_inventory and args.replay_metadata is None:
         parser.error("--write-replayed-inventory requires --replay-metadata")

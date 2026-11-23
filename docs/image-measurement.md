@@ -547,8 +547,19 @@ bootstrap (`?essential` and `base-files`) and a solve rooted at the reviewed
 Debian package names, including the exact original package URL, SHA-256 and
 size from each signed stanza. A stale or unserved selection fails before
 opening the client identity mapping or requesting first-party metadata.
-The replay does not claim that the later runtime, BSP, first-party or source
-transactions are complete. The image installation solver remains in mkosi.
+For a measurement candidate, also supply `--post-platform-status` (the
+reviewed pre-runtime ARM64 dpkg state) and `--runtime-rauc-debs` (the two
+packages from the pinned ARM64 RAUC builder, in `rauc`, `rauc-service` order).
+The gate replays `apt-get install -y --no-install-recommends rauc rauc-service`
+with the mkosi flat local repository priority and the authenticated Debian
+indices. It checks both the simulation and the non-downloading URI plan,
+then requires each Debian acquisition's exact signed package and canonical
+URL in the reviewed inventory. APT prints the primary URI but may also try
+alternate URIs. Include only the replay-derived alternatives whose signed
+records agree on version, architecture, size and SHA-256. Keep the status
+fixture with its provenance and use APT 3.0.3, as in the pinned mkosi builder (`--apt-get` and
+`--apt-file-method`). This does not cover the remaining runtime, BSP,
+first-party or source transactions. The image installation solver remains in mkosi.
 Include every bootstrap, BSP and first-party dependency selected for this board,
 plus the already prepared public source bundle, public trust, pinned sources,
 released kernel metadata and builder archives described above. An omitted
@@ -567,7 +578,8 @@ private signing material as local ingredients.
 
 Each package row has exactly `repository`, `name`, `version`, `arch` (`arm64`
 or `all`), and `sha256`, referring to one `deb` object. Every `deb` object needs
-one row and one exact original HTTPS URL; packages cannot use local paths.
+one row and one exact original HTTPS URL, with additional signed byte-identical
+URLs only when required by the RAUC replay. Packages cannot use local paths.
 For example, a reviewed package row has this shape:
 
 ```json
@@ -680,6 +692,9 @@ mkdir -m 700 private-capsules
 python3 ci/prepare-image-capsule.py \
   --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
   --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
+  --apt-get "${IMAGE_APT_GET:?}" --apt-file-method "${IMAGE_APT_FILE_METHOD:?}" \
+  --post-platform-status "${IMAGE_POST_PLATFORM_STATUS:?}" \
+  --runtime-rauc-debs "${IMAGE_RAUC_ARM64_DEB:?}" "${IMAGE_RAUC_SERVICE_DEB:?}" \
   --client-identity-config private-config/identities \
   --output private-capsules/rock-5b-plus.tar
 ```
@@ -713,6 +728,9 @@ code in a failure receipt, not verifier stderr, URLs, or paths.
 python3 ci/prepare-image-capsule.py \
   --inventory "${IMAGE_REVIEWED_INVENTORY:?}" \
   --trust-policy "${IMAGE_PUBLIC_POLICY:?}" \
+  --apt-get "${IMAGE_APT_GET:?}" --apt-file-method "${IMAGE_APT_FILE_METHOD:?}" \
+  --post-platform-status "${IMAGE_POST_PLATFORM_STATUS:?}" \
+  --runtime-rauc-debs "${IMAGE_RAUC_ARM64_DEB:?}" "${IMAGE_RAUC_SERVICE_DEB:?}" \
   --replay-metadata "${IMAGE_PUBLIC_DISCOVERY:?}/objects" \
   --write-replayed-inventory --output private-capsules/reviewed.json
 ```
