@@ -3273,20 +3273,26 @@ CONF
   [ "$status" -eq 0 ]
 }
 
-@test "pipewire: the HDMI-IN trigger guard rejects missing, early, repeated or broad events" {
+@test "pipewire: the HDMI-IN trigger guard rejects missing, early, repeated, broad or unbounded events" {
   local helper="$PIPELINE_DIR/mkosi/runtime/ceralive-audio-reprobe.sh"
   local fixture="$BATS_TEST_TMPDIR/reprobe.sh" mutation
   for mutation in \
     '/^if .*HDMIIN/,/^fi$/d' \
-    's/--action=change/--action=add/' \
-    's/--action=add/--action=swap/; s/--action=change/--action=add/; s/--action=swap/--action=change/' \
+    's/^  trigger change$/  trigger add/' \
+    's/^trigger add$/trigger change/; s/^  trigger change$/  trigger add/' \
+    '/^if .*HDMIIN/a\  trigger change' \
     '/^if .*HDMIIN/a\  udevadm trigger --action=change --subsystem-match=sound' \
+    '/^if .*HDMIIN/a\  card_name=card3' \
     's/^if .*HDMIIN.*$/if true; then/' \
     's/== "HDMIIN"/== "usbaudio"/' \
-    '/--action=change/,/die/s/ "--sysname-match=[^"]*"//' \
-    '/--action=change/,/die/s/"--sysname-match=[^"]*"/"--sysname-match=card*"/' \
-    '/--action=change/,/die/s/--subsystem-match=sound //' \
-    's/ || die "change trigger failed"//'; do
+    's/== "HDMIIN"/== HDMIIN*/' \
+    's/ "--sysname-match=[^"]*"//' \
+    's/"--sysname-match=[^"]*"/--sysname-match=card3/' \
+    's/"--sysname-match=[^"]*"/"--sysname-match=${card_name}*"/' \
+    's/ --subsystem-match=sound//' \
+    's/timeout --foreground/timeout/' \
+    's/ 9>&-//' \
+    's/ || die "$1 trigger failed"//'; do
     sed "$mutation" "$helper" >"$fixture"
     printf '%s\n' "$mutation"
     run cmp -s "$helper" "$fixture"
@@ -3294,8 +3300,13 @@ CONF
     run python3 "$BATS_TEST_DIRNAME/lib/hdmi-capture-contract.py" \
       "$fixture" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"udev triggers differ"* ]]
+    [[ "$output" == *"HDMI-IN reprobe differs"* ]]
   done
+  # A conf that names another card must not leave the helper's guard behind.
+  sed 's/alsa.id = "HDMIIN"/alsa.id = "Renamed"/' "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf" >"$fixture"
+  run python3 "$BATS_TEST_DIRNAME/lib/hdmi-capture-contract.py" "$helper" "$fixture"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HDMI-IN reprobe differs"* ]]
 }
 
 @test "pipewire: the profile rule reaches the image as part of the ONE headless fragment" {
