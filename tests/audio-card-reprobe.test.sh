@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Offline runtime boundary: only the selected card may receive remove/add events.
+# Offline runtime boundary: only the selected card may receive remove/add events,
+# and only HDMI-IN may receive a change event.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,8 +10,9 @@ source "${HERE}/lib/assertions.sh"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "${TMP}"' EXIT
-mkdir -p "${TMP}/bin" "${TMP}/sys/card0" "${TMP}/sys/card7" "${TMP}/run"
+mkdir -p "${TMP}/bin" "${TMP}/sys/card0" "${TMP}/sys/card3" "${TMP}/sys/card7" "${TMP}/run"
 printf 'Other\n' >"${TMP}/sys/card0/id"
+printf 'HDMIIN\n' >"${TMP}/sys/card3/id"
 printf 'Capture_1\n' >"${TMP}/sys/card7/id"
 cat >"${TMP}/bin/udevadm" <<'SH'
 #!/usr/bin/env bash
@@ -18,6 +20,7 @@ printf '%s\n' "$*" >>"${AUDIO_CALLS}"
 case "${AUDIO_STUB_MODE:-ok}" in
   fail-remove) [[ "$*" != *--action=remove* ]] ;;
   fail-add) [[ "$*" != *--action=add* ]] ;;
+  fail-change) [[ "$*" != *--action=change* ]] ;;
   misleading) printf 'success\n'; exit 1 ;;
   hung) exec tail -f /dev/null ;;
 esac
@@ -57,6 +60,26 @@ assert_eq "another card has an independent rate limit" 0 "$?"
 assert_eq "another card receives only its own remove/add" \
   $'trigger --action=remove --subsystem-match=sound --sysname-match=card0\ntrigger --action=add --subsystem-match=sound --sysname-match=card0' \
   "$(<"${TMP}/calls")"
+
+# PipeWire ignores a re-added card until a change event sets SOUND_INITIALIZED.
+hdmi_add=$'trigger --action=remove --subsystem-match=sound --sysname-match=card3\ntrigger --action=add --subsystem-match=sound --sysname-match=card3'
+hdmi_change="${hdmi_add}"$'\ntrigger --action=change --subsystem-match=sound --sysname-match=card3'
+reset_state
+run_helper HDMIIN
+assert_eq "HDMI-IN reprobe succeeds" 0 "$?"
+assert_eq "HDMI-IN gets exactly one change after its add" "${hdmi_change}" "$(<"${TMP}/calls")"
+
+reset_state
+MODE=fail-add
+run_helper HDMIIN
+[[ "$?" -ne 0 ]] && ok "HDMI-IN fail-add is a failure" || bad "HDMI-IN fail-add was reported as success"
+assert_eq "HDMI-IN never gets change after a failed add" "${hdmi_add}" "$(<"${TMP}/calls")"
+
+reset_state
+MODE=fail-change
+run_helper HDMIIN
+[[ "$?" -ne 0 ]] && ok "HDMI-IN fail-change is a failure" || bad "HDMI-IN fail-change was reported as success"
+assert_eq "HDMI-IN fail-change is sent once" "${hdmi_change}" "$(<"${TMP}/calls")"
 
 reset_state
 exec 8>"${TMP}/run/audio-reprobe-Capture_1.stamp.lock"

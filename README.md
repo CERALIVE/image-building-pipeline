@@ -1738,7 +1738,9 @@ is re-enumerated. The image installs the root-owned, mode-0755 helper
 `/usr/libexec/ceralive/ceralive-audio-reprobe` for the engine to request this when
 the operator selects a kernel card with no PipeWire node. It accepts only an exact
 ALSA card id, sends remove then add for that card, and limits attempts to one per
-card per 30 seconds, including failures. Each udev command has a one-second limit.
+card per 30 seconds, including failures. For `HDMIIN` alone it then sends one change
+event, because PipeWire ignores a card that udev has not marked `SOUND_INITIALIZED`,
+which only a change event sets. Each udev command has a one-second limit.
 The engine must still observe a usable node; helper success alone proves no audio.
 Host tests cover the helper and installation; boot-without-signal recovery on a
 physical receiver remains unqualified. The `pro-audio` floor that

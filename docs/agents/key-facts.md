@@ -5105,10 +5105,15 @@ The root-run installer gives it mode 0755. The coordinated engine caller request
 one re-enumeration only when a selected kernel card has no live PipeWire node.
 The helper accepts one `^[A-Za-z0-9_-]{1,32}$` id, matches it exactly against
 `/sys/class/sound/card*/id`, and sends sound remove/add events for that card alone.
+For `HDMIIN` only, one `change` event follows the add: systemd's `78-sound-card.rules`
+sets `SOUND_INITIALIZED` only on `change`, and PipeWire 1.4.2 skips a card without it.
+Other cards get no `change`, because CeraUI's rule renames a USB card id on that event.
+`tests/lib/hdmi-capture-contract.py` pins the order, guard and card scope.
 An exclusive nonblocking card lock and
 `/run/ceralive/audio-reprobe-<id>.stamp` enforce 30 seconds between attempts,
 including failed attempts. Malformed or future stamps refuse the request.
-Each udev command is bounded to one second; a failed remove never sends add.
+Each udev command is bounded to one second; a failed remove never sends add, and a
+failed add never sends change.
 `CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, and installer destination
 `CERALIVE_LIBEXEC_DIR` support offline fixtures. The helper and installer are
 host-tested; physical no-signal-boot recovery still needs receiver qualification.

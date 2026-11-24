@@ -3264,6 +3264,40 @@ CONF
   [ "$status" -ne 0 ]
 }
 
+@test "pipewire: the reprobe helper re-registers HDMI-IN with one change event after its add" {
+  # systemd's 78-sound-card.rules sets SOUND_INITIALIZED only on a card `change`, and
+  # PipeWire skips a card without it, so remove/add alone leaves HDMI-IN unregistered.
+  run python3 "$BATS_TEST_DIRNAME/lib/hdmi-capture-contract.py" \
+    "$PIPELINE_DIR/mkosi/runtime/ceralive-audio-reprobe.sh" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "pipewire: the HDMI-IN trigger guard rejects missing, early, repeated or broad events" {
+  local helper="$PIPELINE_DIR/mkosi/runtime/ceralive-audio-reprobe.sh"
+  local fixture="$BATS_TEST_TMPDIR/reprobe.sh" mutation
+  for mutation in \
+    '/^if .*HDMIIN/,/^fi$/d' \
+    's/--action=change/--action=add/' \
+    's/--action=add/--action=swap/; s/--action=change/--action=add/; s/--action=swap/--action=change/' \
+    '/^if .*HDMIIN/a\  udevadm trigger --action=change --subsystem-match=sound' \
+    's/^if .*HDMIIN.*$/if true; then/' \
+    's/== "HDMIIN"/== "usbaudio"/' \
+    '/--action=change/,/die/s/ "--sysname-match=[^"]*"//' \
+    '/--action=change/,/die/s/"--sysname-match=[^"]*"/"--sysname-match=card*"/' \
+    '/--action=change/,/die/s/--subsystem-match=sound //' \
+    's/ || die "change trigger failed"//'; do
+    sed "$mutation" "$helper" >"$fixture"
+    printf '%s\n' "$mutation"
+    run cmp -s "$helper" "$fixture"
+    [ "$status" -eq 1 ]
+    run python3 "$BATS_TEST_DIRNAME/lib/hdmi-capture-contract.py" \
+      "$fixture" "$(PW_RUNTIME_DIR)/10-ceralive-headless.conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"udev triggers differ"* ]]
+  done
+}
+
 @test "pipewire: the profile rule reaches the image as part of the ONE headless fragment" {
   # The fragment is deliberately singular (see the file's own header), so the profile
   # floor must ride in it rather than in a second drop-in that merges by filename.

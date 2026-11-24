@@ -38,3 +38,9 @@ timeout --signal=KILL 1s udevadm trigger --action=remove \
   --subsystem-match=sound "--sysname-match=${card_name}" || die "remove trigger failed"
 timeout --signal=KILL 1s udevadm trigger --action=add \
   --subsystem-match=sound "--sysname-match=${card_name}" || die "add trigger failed"
+# udev sets SOUND_INITIALIZED only on a card change event, and PipeWire skips a card
+# without it. HDMI-IN only: on a USB card a change event also reruns the id rename rule.
+if [[ "${id}" == "HDMIIN" ]]; then
+  timeout --signal=KILL 1s udevadm trigger --action=change \
+    --subsystem-match=sound "--sysname-match=${card_name}" || die "change trigger failed"
+fi
