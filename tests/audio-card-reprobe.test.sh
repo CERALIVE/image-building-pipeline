@@ -95,11 +95,19 @@ settings=(PATH="${TMP}/bin:$PATH" AUDIO_CALLS="${TMP}/calls"
 
 # The caller-shaped outer limit turns a missing inner limit into exit 137. Only a hang
 # runs against the real inner limit, so a busy host cannot fail the other cases.
+# No exit may leave a card lock behind; HELD is the one the test holds itself.
+LEAKED="" HELD=""
 run_helper() {
-  local limit=30s
+  local limit=30s lock result
   [[ "${MODE:-ok}" != @(hang-*|hung) ]] || limit=""
   env "${settings[@]}" AUDIO_STUB_MODE="${MODE:-ok}" AUDIO_LIMIT="${limit}" \
     /usr/bin/timeout --signal=KILL 10s "${helper[@]}" "$@" >"${TMP}/output" 2>&1
+  result=$?
+  for lock in "${TMP}/run/"*.lock; do
+    [[ ! -e "${lock}" || "${lock}" == "${HELD}" ]] || flock -n "${lock}" true \
+      || LEAKED+="${MODE:-ok} $* exit ${result}; "
+  done
+  return "${result}"
 }
 
 reset_state() {
@@ -129,7 +137,6 @@ assert_eq "selected card reprobe succeeds" 0 "$?"
 expected=$'trigger --action=remove --subsystem-match=sound --sysname-match=card7\ntrigger --action=add --subsystem-match=sound --sysname-match=card7'
 assert_eq "matching card gets remove then add only" "${expected}" "$(<"${TMP}/calls")"
 assert_eq "successful reprobe reports no error" "" "$(<"${TMP}/output")"
-assert_unlocked success Capture_1
 [[ -f "${TMP}/run/audio-reprobe-Capture_1.stamp" ]] \
   && ok "attempt creates the per-card volatile stamp" || bad "attempt stamp missing"
 assert_eq "stamp is private to root" 600 "$(stat -c %a "${TMP}/run/audio-reprobe-Capture_1.stamp")"
@@ -138,7 +145,6 @@ assert_eq "stamp is private to root" 600 "$(stat -c %a "${TMP}/run/audio-reprobe
 run_helper Capture_1
 [[ "$?" -ne 0 ]] && ok "immediate second attempt is refused" || bad "second attempt accepted"
 assert_eq "rate limit makes no udevadm call" "" "$(<"${TMP}/calls")"
-assert_unlocked "a rate-limited attempt" Capture_1
 run_helper Other
 assert_eq "another card has an independent rate limit" 0 "$?"
 assert_eq "another card receives only its own remove/add" \
@@ -151,7 +157,6 @@ run_helper HDMIIN
 assert_eq "HDMI-IN reprobe succeeds" 0 "$?"
 assert_eq "HDMI-IN gets exactly one change after its add" \
   "$(events card13 remove add change)" "$(<"${TMP}/calls")"
-assert_unlocked "an HDMI-IN reprobe" HDMIIN
 for other in card1:HDMIIN2 card10:XHDMIIN card11:hdmiin card12:HDMIINX card3:Decoy card4:HDMIIN_1; do
   reset_state
   run_helper "${other#*:}"
@@ -172,7 +177,6 @@ for step in "${commands[@]}"; do
     assert_eq "HDMI-IN ${MODE} is refused by the helper itself" 1 "$?"
     assert_eq "HDMI-IN ${MODE} sends nothing after it" \
       "$(events card13 "${sent[@]}")" "$(<"${TMP}/calls")"
-    assert_unlocked "HDMI-IN ${MODE}" HDMIIN
   done
 done
 
@@ -192,7 +196,6 @@ reset_state
 AUDIO_UPTIME_add=101.50 run_helper HDMIIN
 assert_eq "a spent budget is a failure" 1 "$?"
 assert_eq "a spent budget sends no change" "$(events card13 remove add)" "$(<"${TMP}/calls")"
-assert_unlocked "a spent budget" HDMIIN
 reset_state
 AUDIO_UPTIME_date=101.50 run_helper HDMIIN
 assert_eq "a budget spent before the triggers is a failure" 1 "$?"
@@ -271,13 +274,17 @@ done
 reset_state
 exec 8>"${TMP}/run/audio-reprobe-Capture_1.stamp.lock"
 flock -n 8
+HELD="${TMP}/run/audio-reprobe-Capture_1.stamp.lock"
 run_helper Capture_1
 result="$?"
 [[ "${result}" -ne 0 ]] && ok "concurrent attempt is refused" || bad "concurrent attempt accepted"
 assert_eq "concurrent attempt is refused without waiting for the lock" 1 "${result}"
 assert_eq "concurrent attempt triggers nothing" "" "$(<"${TMP}/calls")"
+flock -n "${HELD}" true
+assert_eq "a refused attempt leaves the other run's lock held" 1 "$?"
 flock -u 8
 exec 8>&-
+HELD=""
 
 for invalid in '../../x' '' 'a.b' 'a b' "$(printf 'a%.0s' {1..33})" 'Unknown' 'Suffixed' 'Partial'; do
   reset_state
@@ -312,7 +319,6 @@ for stamp in corrupt 999999999999 '1 '; do
   run_helper Capture_1
   [[ "$?" -ne 0 ]] && ok "malformed or future stamp refuses recovery" || bad "unsafe stamp accepted"
   assert_eq "unsafe stamp triggers nothing" "" "$(<"${TMP}/calls")"
-  assert_unlocked "an unsafe stamp" Capture_1
 done
 reset_state
 printf '1' >"${TMP}/run/audio-reprobe-Capture_1.stamp"
@@ -324,7 +330,6 @@ ln -s missing/stamp "${TMP}/run/audio-reprobe-Capture_1.stamp"
 run_helper Capture_1
 assert_eq "an unwritable stamp is a failure" 1 "$?"
 assert_eq "an unwritable stamp triggers nothing" "" "$(<"${TMP}/calls")"
-assert_unlocked "an unwritable stamp" Capture_1
 reset_state
 mkdir "${TMP}/run/audio-reprobe-Capture_1.stamp.lock"
 # A descriptor 9 from the caller must not stand in for the lock.
@@ -362,5 +367,6 @@ MODE=ok
 assert_eq "helper creates the shared run directory" 0 "$?"
 assert_eq "shared run directory is not made private" 755 "$(stat -c %a "${TMP}/run")"
 
+assert_eq "no helper exit leaves a card lock held" "" "${LEAKED}"
 printf 'audio-card-reprobe: %s passed, %s failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]
