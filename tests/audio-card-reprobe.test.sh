@@ -27,6 +27,7 @@ card12:HDMIINX
 card13:HDMIIN
 card3:Decoy
 card4:HDMIIN_1
+card5:Cam-aaaaaaaaaaaaaaaaaaaaaaaaaaaa
 card7:Capture_1
 card15:a.b
 card16:a b
@@ -60,7 +61,7 @@ case "${AUDIO_STUB_MODE:-ok}" in
   "hang-${point}") trap '' TERM; exec sleep 60 ;;
 esac
 case "${point}" in
-  date) printf '1700000000\n'; exit ;;
+  date) printf '%s\n' "${AUDIO_NOW:-1700000000}"; exit ;;
   mkdir | flock) exec "/usr/bin/${point}" "$@" ;;
 esac
 case "${AUDIO_STUB_MODE:-ok}" in
@@ -140,6 +141,7 @@ assert_eq "successful reprobe reports no error" "" "$(<"${TMP}/output")"
 [[ -f "${TMP}/run/audio-reprobe-Capture_1.stamp" ]] \
   && ok "attempt creates the per-card volatile stamp" || bad "attempt stamp missing"
 assert_eq "stamp is private to root" 600 "$(stat -c %a "${TMP}/run/audio-reprobe-Capture_1.stamp")"
+assert_eq "lock is private to root" 600 "$(stat -c %a "${TMP}/run/audio-reprobe-Capture_1.stamp.lock")"
 
 : >"${TMP}/calls"
 run_helper Capture_1
@@ -157,7 +159,8 @@ run_helper HDMIIN
 assert_eq "HDMI-IN reprobe succeeds" 0 "$?"
 assert_eq "HDMI-IN gets exactly one change after its add" \
   "$(events card13 remove add change)" "$(<"${TMP}/calls")"
-for other in card1:HDMIIN2 card10:XHDMIIN card11:hdmiin card12:HDMIINX card3:Decoy card4:HDMIIN_1; do
+for other in card1:HDMIIN2 card10:XHDMIIN card11:hdmiin card12:HDMIINX card3:Decoy card4:HDMIIN_1 \
+  card5:Cam-aaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
   reset_state
   run_helper "${other#*:}"
   assert_eq "${other#*:} reprobe succeeds" 0 "$?"
@@ -177,6 +180,8 @@ for step in "${commands[@]}"; do
     assert_eq "HDMI-IN ${MODE} is refused by the helper itself" 1 "$?"
     assert_eq "HDMI-IN ${MODE} sends nothing after it" \
       "$(events card13 "${sent[@]}")" "$(<"${TMP}/calls")"
+    [[ "${step}" != @(mkdir|date) ]] \
+      || assert_eq "HDMI-IN ${MODE} never opens the card lock" "" "$(ls -A "${TMP}/run")"
   done
 done
 
@@ -187,11 +192,31 @@ assert_eq "every command the helper runs is limited" \
   $'1.50s mkdir\n1.50s date\n1.50s flock\n1.50s udevadm\n1.50s udevadm\n1.50s udevadm' \
   "$(<"${TMP}/limits")"
 reset_state
-AUDIO_UPTIME_remove=100.60 AUDIO_UPTIME_add=101.20 run_helper HDMIIN
+AUDIO_UPTIME_mkdir=100.25 AUDIO_UPTIME_date=100.45 AUDIO_UPTIME_flock=100.70 \
+  AUDIO_UPTIME_remove=101.00 AUDIO_UPTIME_add=101.45 run_helper HDMIIN
 assert_eq "a slow reprobe inside the budget succeeds" 0 "$?"
 assert_eq "later commands get only what is left" \
-  $'1.50s mkdir\n1.50s date\n1.50s flock\n1.50s udevadm\n0.90s udevadm\n0.30s udevadm' \
+  $'1.50s mkdir\n1.25s date\n1.05s flock\n0.80s udevadm\n0.50s udevadm\n0.05s udevadm' \
   "$(<"${TMP}/limits")"
+reset_state
+rm -- "${TMP}/sys/card0/id"
+mkfifo "${TMP}/sys/card0/id"
+# The clock moves while the helper waits for the first card id.
+(
+  exec >"${TMP}/sys/card0/id"
+  printf '100.40 0.00\n' >"${TMP}/uptime"
+  printf 'Other\n'
+) &
+run_helper HDMIIN
+assert_eq "the card lookup draws on the budget too" "1.10s mkdir" "$(head -n 1 "${TMP}/limits")"
+kill "$!" 2>/dev/null
+wait "$!" 2>/dev/null
+rm -- "${TMP}/sys/card0/id"
+printf 'Other\n' >"${TMP}/sys/card0/id"
+reset_state
+printf '0.08 0.00\n' >"${TMP}/uptime"
+AUDIO_UPTIME_mkdir=0.09 run_helper HDMIIN
+assert_eq "clock digits are read as decimal" 0 "$?"
 reset_state
 AUDIO_UPTIME_add=101.50 run_helper HDMIIN
 assert_eq "a spent budget is a failure" 1 "$?"
@@ -206,6 +231,7 @@ run_helper HDMIIN
 assert_eq "an unreadable clock is a failure" 1 "$?"
 assert_eq "an unreadable clock is reported by the helper" 1 "$(grep -c '^audio-reprobe: ' "${TMP}/output")"
 assert_eq "an unreadable clock triggers nothing" "" "$(<"${TMP}/calls")"
+assert_eq "an unreadable clock runs and writes nothing" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
 reset_state
 rm -- "${TMP}/uptime"
 mkfifo "${TMP}/uptime"
@@ -228,7 +254,10 @@ assert_eq "the kernel's own clock format is accepted" 0 "$?"
 
 # start_blocked <step> <command...>: run it in the background until <step> is in flight.
 # Its whole process tree holds `alive`, so end of file there means nothing is left.
+# It also checks the card lock: a lock found free later proves nothing unless it was held.
 start_blocked() {
+  local held=0
+  [[ "$1" != @(remove|add|change) ]] || held=1
   reset_state
   rm -f -- "${TMP}/alive" "${TMP}/release"
   mkfifo "${TMP}/alive" "${TMP}/release"
@@ -241,6 +270,9 @@ start_blocked() {
   IFS= read -r -t 10 _ <&5
   assert_eq "$1 is in flight" 0 "$?"
   exec 6<"${TMP}/alive" 5>&-
+  # A shared request is refused only while another process holds the lock exclusively.
+  flock -n -s "${TMP}/run/audio-reprobe-HDMIIN.stamp.lock" true
+  assert_eq "card lock is held exclusively during $1 (0 no, 1 yes)" "${held}" "$?"
 }
 
 assert_drained() { # <label>
@@ -271,6 +303,29 @@ for step in "${commands[@]}"; do
   done
 done
 
+# A run that reaches the lock late must see the stamp of the run that overtook it.
+start_blocked flock /usr/bin/timeout --signal=KILL 30s "${helper[@]}" HDMIIN
+run_helper HDMIIN
+assert_eq "a run that overtakes a paused one succeeds" 0 "$?"
+assert_drained "the paused run"
+wait "${pid}"
+assert_eq "the overtaken run is refused" 1 "$?"
+assert_eq "the two runs send one reprobe" \
+  "$(events card13 remove add change)"$'\nlate flock' "$(<"${TMP}/calls")"
+
+# The stamp is 60 s old for the second run, so only the lock can refuse it.
+start_blocked remove /usr/bin/timeout --signal=KILL 30s "${helper[@]}" HDMIIN
+HELD="${TMP}/run/audio-reprobe-HDMIIN.stamp.lock"
+AUDIO_NOW=1700000060 run_helper HDMIIN
+assert_eq "a run that meets one in flight is refused" 1 "$?"
+assert_eq "a run that meets one in flight sends nothing" "$(events card13 remove)" "$(<"${TMP}/calls")"
+HELD=""
+assert_drained "the run in flight"
+wait "${pid}"
+assert_eq "the run in flight still succeeds" 0 "$?"
+assert_eq "the run in flight still sends its events" \
+  "$(events card13 remove)"$'\nlate remove\n'"$(events card13 add change)" "$(<"${TMP}/calls")"
+
 reset_state
 exec 8>"${TMP}/run/audio-reprobe-Capture_1.stamp.lock"
 flock -n 8
@@ -280,6 +335,7 @@ result="$?"
 [[ "${result}" -ne 0 ]] && ok "concurrent attempt is refused" || bad "concurrent attempt accepted"
 assert_eq "concurrent attempt is refused without waiting for the lock" 1 "${result}"
 assert_eq "concurrent attempt triggers nothing" "" "$(<"${TMP}/calls")"
+assert_eq "concurrent attempt records no stamp" audio-reprobe-Capture_1.stamp.lock "$(ls -A "${TMP}/run")"
 flock -n "${HELD}" true
 assert_eq "a refused attempt leaves the other run's lock held" 1 "$?"
 flock -u 8
@@ -291,11 +347,13 @@ for invalid in '../../x' '' 'a.b' 'a b' "$(printf 'a%.0s' {1..33})" 'Unknown' 'S
   run_helper "${invalid}"
   [[ "$?" -ne 0 ]] && ok "invalid or unknown id is refused" || bad "invalid id accepted"
   assert_eq "refused id makes no udevadm call" "" "$(<"${TMP}/calls")"
+  assert_eq "refused id runs and writes nothing" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
 done
 reset_state
 run_helper Capture_1 extra
 [[ "$?" -ne 0 ]] && ok "extra arguments are refused" || bad "extra argument accepted"
 assert_eq "extra argument makes no udevadm call" "" "$(<"${TMP}/calls")"
+assert_eq "extra argument runs and writes nothing" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
 
 for age in 29 30 31; do
   reset_state
@@ -313,7 +371,20 @@ for age in 29 30 31; do
   fi
 done
 
-for stamp in corrupt 999999999999 '1 '; do
+# The next run must read the stamp this one writes, and a refusal must not move it.
+reset_state
+run_helper Capture_1
+for age in 29:1 30:0; do
+  AUDIO_NOW="$((now + ${age%:*}))" run_helper Capture_1
+  assert_eq "${age%:*} s after the stamp it wrote, a run exits ${age#*:}" "${age#*:}" "$?"
+done
+reset_state
+printf '0%s\n' "$((now - 30))" >"${TMP}/run/audio-reprobe-Capture_1.stamp"
+run_helper Capture_1
+assert_eq "stamp digits are read as decimal" 0 "$?"
+
+# 2^64 + 1 would wrap to a stamp long expired.
+for stamp in corrupt 999999999999 '1 ' 18446744073709551617; do
   reset_state
   printf '%s\n' "${stamp}" >"${TMP}/run/audio-reprobe-Capture_1.stamp"
   run_helper Capture_1

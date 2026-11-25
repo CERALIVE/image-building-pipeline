@@ -3292,7 +3292,11 @@ CONF
     's/ --subsystem-match=sound//' \
     's/timeout --foreground/timeout/' \
     's/ 9>&-//' \
-    's/ || die "$1 trigger failed"//'; do
+    's/ || die "$1 trigger failed"//' \
+    '/^export LC_ALL=C$/d' \
+    's#:-/proc/uptime#:-/proc/other#' \
+    's#:-/sys/class/sound#:-/sys/class/other#' \
+    's#:-/run/ceralive#:-/run/other#'; do
     sed "$mutation" "$helper" >"$fixture"
     printf '%s\n' "$mutation"
     run cmp -s "$helper" "$fixture"
