@@ -310,6 +310,7 @@ assert_eq "a run that overtakes a paused one succeeds" 0 "$?"
 assert_drained "the paused run"
 wait "${pid}"
 assert_eq "the overtaken run is refused" 1 "$?"
+assert_unlocked "the overtaken run" HDMIIN
 assert_eq "the two runs send one reprobe" \
   "$(events card13 remove add change)"$'\nlate flock' "$(<"${TMP}/calls")"
 
@@ -323,6 +324,7 @@ HELD=""
 assert_drained "the run in flight"
 wait "${pid}"
 assert_eq "the run in flight still succeeds" 0 "$?"
+assert_unlocked "the run in flight" HDMIIN
 assert_eq "the run in flight still sends its events" \
   "$(events card13 remove)"$'\nlate remove\n'"$(events card13 add change)" "$(<"${TMP}/calls")"
 
@@ -451,6 +453,7 @@ rm -rf -- "${TMP}/run"
 MODE=ok
 (umask 022; run_helper Capture_1)
 assert_eq "helper creates the shared run directory" 0 "$?"
+assert_unlocked "creating the shared run directory" Capture_1
 assert_eq "shared run directory is not made private" 755 "$(stat -c %a "${TMP}/run")"
 
 assert_eq "no helper exit leaves a card lock held" "" "${LEAKED}"
