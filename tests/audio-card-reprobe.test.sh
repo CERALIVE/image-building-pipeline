@@ -38,9 +38,12 @@ CARDS
 mkdir "${TMP}/sys/card19" "${TMP}/sys/card2"
 printf 'Partial' >"${TMP}/sys/card2/id"
 
+# Every stub records what it is asked to do, even for a helper that cannot write files.
 cat >"${TMP}/bin/udevadm" <<'SH'
 #!/usr/bin/env bash
+ulimit -S -f hard
 point="${0##*/}"
+[[ -n "${AUDIO_LIMITED:-}" ]] || printf 'no limit %s %s\n' "${point}" "$*" >>"${AUDIO_LIMITS}"
 if [[ "${point}" == udevadm ]]; then
   point="${2#--action=}"
   printf '%s\n' "$*" >>"${AUDIO_CALLS}"
@@ -53,43 +56,53 @@ fi
 uptime="AUDIO_UPTIME_${point}"
 case "${!uptime:-}" in
   '') ;;
-  gone) rm -- "${CERALIVE_AUDIO_UPTIME}" ;;
+  gone) /usr/bin/rm -- "${CERALIVE_AUDIO_UPTIME}" ;;
   *) printf '%s 0.00\n' "${!uptime}" >"${CERALIVE_AUDIO_UPTIME}" ;;
 esac
 case "${AUDIO_STUB_MODE:-ok}" in
   "fail-${point}") exit 7 ;;
-  "hang-${point}") trap '' TERM; exec sleep 60 ;;
+  "hang-${point}") trap '' TERM; exec /usr/bin/sleep 60 ;;
 esac
 case "${point}" in
-  date) printf '%s\n' "${AUDIO_NOW:-1700000000}"; exit ;;
+  date) [[ "$*" == +%s ]] || exit 9; printf '%s\n' "${AUDIO_NOW:-1700000000}"; exit ;;
   mkdir | flock) exec "/usr/bin/${point}" "$@" ;;
 esac
 case "${AUDIO_STUB_MODE:-ok}" in
   misleading) printf 'success\n'; exit 1 ;;
-  hung) exec tail -f /dev/null ;;
+  hung) exec /usr/bin/tail -f /dev/null ;;
 esac
 SH
-# Logs each limit with its command; AUDIO_LIMIT replaces the limit, never the flags.
+# Logs each limit with its whole command; AUDIO_LIMIT replaces the limit, never the flags.
 cat >"${TMP}/bin/timeout" <<'SH'
 #!/usr/bin/env bash
-args=() limit="" command=""
+ulimit -S -f hard
+args=() line=""
 for arg in "$@"; do
-  if [[ -n "${limit}" ]]; then
-    : "${command:=${arg}}"
+  if [[ -n "${line}" ]]; then
+    line+=" ${arg}"
   elif [[ "${arg}" =~ ^[0-9.]+s$ ]]; then
-    limit="${arg}"
+    line="${arg}"
     arg="${AUDIO_LIMIT:-${arg}}"
   fi
   args+=("${arg}")
 done
-printf '%s %s\n' "${limit}" "${command}" >>"${AUDIO_LIMITS}"
-exec /usr/bin/timeout "${args[@]}"
+printf '%s\n' "${line}" >>"${AUDIO_LIMITS}"
+AUDIO_LIMITED=1 exec /usr/bin/timeout "${args[@]}"
 SH
 chmod +x "${TMP}/bin/udevadm" "${TMP}/bin/timeout"
 for command in mkdir date flock; do cp -- "${TMP}/bin/udevadm" "${TMP}/bin/${command}"; done
+# The helper's PATH holds only the stubs: a command of another name is recorded, then run.
+ln -s "${BASH}" "${TMP}/bin/bash"
+cat >"${TMP}/unlisted" <<'SH'
+command_not_found_handle() {
+  ulimit -S -f hard
+  printf 'no limit %s\n' "$*" >>"${AUDIO_LIMITS}"
+  /usr/bin/env "PATH=${PATH}:/usr/bin:/bin" "$@"
+}
+SH
 
 helper=(bash "${ROOT}/mkosi/runtime/ceralive-audio-reprobe.sh")
-settings=(PATH="${TMP}/bin:$PATH" AUDIO_CALLS="${TMP}/calls"
+settings=(PATH="${TMP}/bin" BASH_ENV="${TMP}/unlisted" AUDIO_CALLS="${TMP}/calls"
   AUDIO_LIMITS="${TMP}/limits" AUDIO_RELEASE="${TMP}/release"
   CERALIVE_AUDIO_SYSFS_ROOT="${TMP}/sys" CERALIVE_AUDIO_RUN_DIR="${TMP}/run"
   CERALIVE_AUDIO_UPTIME="${TMP}/uptime")
@@ -112,6 +125,7 @@ run_helper() {
 }
 
 reset_state() {
+  grep -s '^no limit' "${TMP}/limits" >>"${TMP}/unlimited"
   rm -rf -- "${TMP}/run"
   mkdir "${TMP}/run"
   : >"${TMP}/calls"
@@ -125,6 +139,12 @@ events() { # <card> <action...>
   for action in "${@:2}"; do
     printf 'trigger --action=%s --subsystem-match=sound --sysname-match=%s\n' "${action}" "$1"
   done
+}
+
+limits() { # <limit...>: one for each command of an HDMI-IN run, in order
+  printf '%s mkdir -p -- %s\n%s date +%%s\n%s flock -n 9\n' "$1" "${TMP}/run" "$2" "$3"
+  printf '%s udevadm %s\n' "$4" "$(events card13 remove)" "$5" "$(events card13 add)" \
+    "$6" "$(events card13 change)"
 }
 
 assert_unlocked() { # <label> <id>
@@ -189,15 +209,13 @@ done
 reset_state
 run_helper HDMIIN
 assert_eq "every command the helper runs is limited" \
-  $'1.50s mkdir\n1.50s date\n1.50s flock\n1.50s udevadm\n1.50s udevadm\n1.50s udevadm' \
-  "$(<"${TMP}/limits")"
+  "$(limits 1.50s 1.50s 1.50s 1.50s 1.50s 1.50s)" "$(<"${TMP}/limits")"
 reset_state
 AUDIO_UPTIME_mkdir=100.25 AUDIO_UPTIME_date=100.45 AUDIO_UPTIME_flock=100.70 \
   AUDIO_UPTIME_remove=101.00 AUDIO_UPTIME_add=101.45 run_helper HDMIIN
 assert_eq "a slow reprobe inside the budget succeeds" 0 "$?"
 assert_eq "later commands get only what is left" \
-  $'1.50s mkdir\n1.25s date\n1.05s flock\n0.80s udevadm\n0.50s udevadm\n0.05s udevadm' \
-  "$(<"${TMP}/limits")"
+  "$(limits 1.50s 1.25s 1.05s 0.80s 0.50s 0.05s)" "$(<"${TMP}/limits")"
 reset_state
 rm -- "${TMP}/sys/card0/id"
 mkfifo "${TMP}/sys/card0/id"
@@ -208,7 +226,8 @@ mkfifo "${TMP}/sys/card0/id"
   printf 'Other\n'
 ) &
 run_helper HDMIIN
-assert_eq "the card lookup draws on the budget too" "1.10s mkdir" "$(head -n 1 "${TMP}/limits")"
+assert_eq "the card lookup draws on the budget too" "1.10s mkdir -p -- ${TMP}/run" \
+  "$(head -n 1 "${TMP}/limits")"
 kill "$!" 2>/dev/null
 wait "$!" 2>/dev/null
 rm -- "${TMP}/sys/card0/id"
@@ -231,7 +250,7 @@ run_helper HDMIIN
 assert_eq "an unreadable clock is a failure" 1 "$?"
 assert_eq "an unreadable clock is reported by the helper" 1 "$(grep -c '^audio-reprobe: ' "${TMP}/output")"
 assert_eq "an unreadable clock triggers nothing" "" "$(<"${TMP}/calls")"
-assert_eq "an unreadable clock runs and writes nothing" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
+assert_eq "an unreadable clock runs nothing and leaves the run directory empty" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
 reset_state
 rm -- "${TMP}/uptime"
 mkfifo "${TMP}/uptime"
@@ -284,14 +303,17 @@ assert_drained() { # <label>
   assert_eq "no process is left after $1" 1 "${result}"
 }
 
+sent=()
 for step in "${commands[@]}"; do
+  [[ "${step}" != @(remove|add|change) ]] || sent+=("${step}")
   # An expired caller's timeout kills the process group it leads, itself included.
   start_blocked "${step}" /usr/bin/timeout --signal=KILL 30s "${helper[@]}" HDMIIN
   kill -KILL -- "-${pid}"
   wait "${pid}" 2>/dev/null
   assert_eq "caller kill during ${step} ends the run" 137 "$?"
   assert_drained "a caller kill during ${step}"
-  assert_eq "caller kill during ${step} leaves no late event" 0 "$(grep -c late "${TMP}/calls")"
+  assert_eq "caller kill during ${step} leaves no late event" \
+    "$(events card13 "${sent[@]}")" "$(<"${TMP}/calls")"
   assert_unlocked "a caller kill during ${step}" HDMIIN
   for signal in HUP:129 KILL:137 TERM:143; do
     start_blocked "${step}" "${helper[@]}" HDMIIN
@@ -300,6 +322,8 @@ for step in "${commands[@]}"; do
     assert_eq "SIG${signal%:*} during ${step} ends the helper" "${signal#*:}" "$?"
     assert_unlocked "SIG${signal%:*} during ${step}, with it still in flight" HDMIIN
     assert_drained "SIG${signal%:*} during ${step}"
+    assert_eq "SIG${signal%:*} during ${step} lets only that command finish" \
+      "$(events card13 "${sent[@]}"; printf 'late %s\n' "${step}")" "$(<"${TMP}/calls")"
   done
 done
 
@@ -349,13 +373,13 @@ for invalid in '../../x' '' 'a.b' 'a b' "$(printf 'a%.0s' {1..33})" 'Unknown' 'S
   run_helper "${invalid}"
   [[ "$?" -ne 0 ]] && ok "invalid or unknown id is refused" || bad "invalid id accepted"
   assert_eq "refused id makes no udevadm call" "" "$(<"${TMP}/calls")"
-  assert_eq "refused id runs and writes nothing" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
+  assert_eq "refused id runs nothing and leaves the run directory empty" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
 done
 reset_state
 run_helper Capture_1 extra
 [[ "$?" -ne 0 ]] && ok "extra arguments are refused" || bad "extra argument accepted"
 assert_eq "extra argument makes no udevadm call" "" "$(<"${TMP}/calls")"
-assert_eq "extra argument runs and writes nothing" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
+assert_eq "extra argument runs nothing and leaves the run directory empty" "" "$(<"${TMP}/limits")$(ls -A "${TMP}/run")"
 
 for age in 29 30 31; do
   reset_state
@@ -373,12 +397,13 @@ for age in 29 30 31; do
   fi
 done
 
-# The next run must read the stamp this one writes, and a refusal must not move it.
+# The next run must read the stamp this one writes. A refusal must not move it, and an
+# accepted run must renew it.
 reset_state
 run_helper Capture_1
-for age in 29:1 30:0; do
+for age in 29:1 30:0 59:1 60:0; do
   AUDIO_NOW="$((now + ${age%:*}))" run_helper Capture_1
-  assert_eq "${age%:*} s after the stamp it wrote, a run exits ${age#*:}" "${age#*:}" "$?"
+  assert_eq "${age%:*} s after the first run, a run exits ${age#*:}" "${age#*:}" "$?"
 done
 reset_state
 printf '0%s\n' "$((now - 30))" >"${TMP}/run/audio-reprobe-Capture_1.stamp"
@@ -405,7 +430,7 @@ assert_eq "an unwritable stamp is a failure" 1 "$?"
 assert_eq "an unwritable stamp triggers nothing" "" "$(<"${TMP}/calls")"
 reset_state
 # A file size limit of zero creates the stamp but fails its write, as a full /run does.
-(trap '' XFSZ; ulimit -f 0; run_helper HDMIIN)
+(trap '' XFSZ; ulimit -S -f 0; run_helper HDMIIN)
 assert_eq "a failed stamp write is a failure" 1 "$?"
 assert_eq "a failed stamp write triggers nothing" "" "$(<"${TMP}/calls")"
 assert_eq "a failed stamp write leaves an empty stamp" 0 "$(stat -c %s "${TMP}/run/audio-reprobe-HDMIIN.stamp")"
@@ -457,5 +482,7 @@ assert_unlocked "creating the shared run directory" Capture_1
 assert_eq "shared run directory is not made private" 755 "$(stat -c %a "${TMP}/run")"
 
 assert_eq "no helper exit leaves a card lock held" "" "${LEAKED}"
+reset_state
+assert_eq "no run starts a command without a limit" "" "$(<"${TMP}/unlimited")"
 printf 'audio-card-reprobe: %s passed, %s failed\n' "${PASS}" "${FAIL}"
 [[ "${FAIL}" -eq 0 ]]
