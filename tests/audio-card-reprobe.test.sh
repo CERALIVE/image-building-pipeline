@@ -46,7 +46,8 @@ point="${0##*/}"
 [[ -n "${AUDIO_LIMITED:-}" ]] || printf 'no limit %s %s\n' "${point}" "$*" >>"${AUDIO_LIMITS}"
 if [[ "${point}" == udevadm ]]; then
   point="${2#--action=}"
-  printf '%s\n' "$*" >>"${AUDIO_CALLS}"
+  printf -v argv '%q ' "$@"
+  printf '%s\n' "${argv% }" >>"${AUDIO_CALLS}"
 fi
 if [[ "${AUDIO_BLOCK_AT:-}" == "${point}" ]]; then
   printf 'ready\n' >&8
