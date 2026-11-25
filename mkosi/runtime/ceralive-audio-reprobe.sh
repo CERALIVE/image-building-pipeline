@@ -42,7 +42,8 @@ stamp="${run_dir}/audio-reprobe-${id}.stamp"
 now="$(bounded date +%s)" || die "cannot read current time"
 exec 9>"${stamp}.lock" || die "cannot open card lock"
 bounded flock -n 9 || die "card reprobe already running"
-if [[ -e "${stamp}" ]]; then
+# An empty stamp is a write that failed or was cut off. It sent nothing: not an attempt.
+if [[ -s "${stamp}" ]]; then
   IFS= read -r previous <"${stamp}" || die "cannot read attempt stamp"
   [[ "${previous}" =~ ^[0-9]{1,12}$ ]] || die "invalid attempt stamp"
   (( now - 10#${previous} >= 30 )) || die "card reprobe rate limited"

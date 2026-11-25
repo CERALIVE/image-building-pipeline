@@ -5111,13 +5111,15 @@ Other cards get no `change`, because CeraUI's rule renames a USB card id on that
 `tests/lib/hdmi-capture-contract.py` pins the order, guard and card scope.
 An exclusive nonblocking card lock and
 `/run/ceralive/audio-reprobe-<id>.stamp` enforce 30 seconds between attempts,
-including failed attempts. Malformed or future stamps refuse the request.
+including failed attempts. Malformed or future stamps refuse the request. An empty
+stamp does not: it is what a failed stamp write leaves, and no event was sent.
 Every command the helper runs shares one 1.5 s budget, read from `/proc/uptime`; the
 engine's 3 s also has to cover node discovery and the capture open. Each command runs
 under `timeout --foreground`, so it stays in the caller's process group and the
-caller's kill ends it. No udev command inherits the lock descriptor, so the lock is
-free as soon as the helper is gone. A failed remove never sends add, and a failed add
-never sends change.
+caller's kill ends it. No udev command inherits the lock descriptor, so a helper killed
+during a trigger leaves the lock free. `flock` has to inherit it, so a helper killed
+alone at that point can leave the lock held until that command's limit. A failed remove
+never sends add, and a failed add never sends change.
 `CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, `CERALIVE_AUDIO_UPTIME`, and
 installer destination
 `CERALIVE_LIBEXEC_DIR` support offline fixtures. The helper and installer are

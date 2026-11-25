@@ -331,6 +331,21 @@ run_helper Capture_1
 assert_eq "an unwritable stamp is a failure" 1 "$?"
 assert_eq "an unwritable stamp triggers nothing" "" "$(<"${TMP}/calls")"
 reset_state
+# A file size limit of zero creates the stamp but fails its write, as a full /run does.
+(trap '' XFSZ; ulimit -f 0; run_helper HDMIIN)
+assert_eq "a failed stamp write is a failure" 1 "$?"
+assert_eq "a failed stamp write triggers nothing" "" "$(<"${TMP}/calls")"
+assert_eq "a failed stamp write leaves an empty stamp" 0 "$(stat -c %s "${TMP}/run/audio-reprobe-HDMIIN.stamp")"
+assert_unlocked "a failed stamp write" HDMIIN
+run_helper HDMIIN
+assert_eq "an empty stamp does not refuse the next attempt" 0 "$?"
+assert_eq "the attempt after a failed stamp write sends its events" \
+  "$(events card13 remove add change)" "$(<"${TMP}/calls")"
+: >"${TMP}/calls"
+run_helper HDMIIN
+assert_eq "the attempt after a failed stamp write is rate limited again" 1 "$?"
+assert_eq "the rate limit after a failed stamp write sends nothing" "" "$(<"${TMP}/calls")"
+reset_state
 mkdir "${TMP}/run/audio-reprobe-Capture_1.stamp.lock"
 # A descriptor 9 from the caller must not stand in for the lock.
 run_helper Capture_1 9>"${TMP}/inherited"
