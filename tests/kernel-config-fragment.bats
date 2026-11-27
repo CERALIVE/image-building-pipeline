@@ -756,6 +756,9 @@ EOF
 }
 
 @test "closure manifests: required and forbidden never name the same symbol" {
+  # Compare identifiers in the same byte order on every host.
+  local LC_ALL=C
+  export LC_ALL
   local req="$PIPELINE_DIR/manifests/kernel/required-symbols.list"
   local forb="$PIPELINE_DIR/manifests/kernel/forbidden-symbols.list"
   local overlap
