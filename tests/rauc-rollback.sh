@@ -226,6 +226,7 @@ mock_run_healthcheck() {
    MOCK_RAUC_CALLS_FILE="${SIM}/rauc-calls" \
    MOCK_DPKG_AUDIT_FILE="${SIM}/dpkg-audit" \
    PATH="${SIM}/bin:${PATH}" \
+   CERALIVE_HEALTHCHECK_ASSESSMENT="${SIM}/health-assessment" \
    CERALIVE_HEALTHCHECK_CONF="${SIM}/data/ceralive/update.conf" \
    CERALIVE_HEALTHCHECK_MARKER="${SIM}/data/ceralive/.slot-marked-good" \
    CERALIVE_HEALTHCHECK_BOOT_ID_FILE="${SIM}/boot-id" \
@@ -244,7 +245,7 @@ mock_run_healthcheck() {
   CERASTREAM_BIN="${cerastream}" \
   SRTLA_SEND_BIN="${SIM}/bin/srtla_send" \
   BIN_PROBE_TIMEOUT=2 SRT_CONNECT_TIMEOUT=2 \
-   bash "${HEALTHCHECK_SH}" >"${SIM}/healthcheck.log" 2>&1
+   bash -c 'bash "$1" && bash "$1" --mark-good' bash "${HEALTHCHECK_SH}" >"${SIM}/healthcheck.log" 2>&1
 }
 
 # The bad-bundle verdict must not be an earlier fixture failure, nor may an
@@ -401,7 +402,7 @@ board_run_healthcheck() {
   if [[ "${MODE}" == "mock" ]]; then mock_run_healthcheck; return $?; fi
   # On device the unit auto-runs on boot; trigger it explicitly for a deterministic
   # result and propagate the unit's success/failure.
-  ssh_run "systemctl start ceralive-healthcheck.service" >/dev/null 2>&1
+  ssh_run "systemctl start ceralive-mark-good.service" >/dev/null 2>&1
   return $?
 }
 

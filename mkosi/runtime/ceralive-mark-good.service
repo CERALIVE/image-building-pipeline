@@ -1,0 +1,13 @@
+[Unit]
+Description=CeraLive confirm the healthy booted RAUC slot
+Requires=boot-complete.target
+After=boot-complete.target
+
+[Service]
+Type=oneshot
+# Keep boot-scoped markers and kernel confirmation together with RAUC success.
+ExecStart=/usr/local/bin/ceralive-healthcheck.sh --mark-good
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
