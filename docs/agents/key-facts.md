@@ -4396,6 +4396,34 @@ seeds the exact 0-byte-regular-file bug state, runs the real function, and prove
 the result is the stub symlink — resolves through it, is idempotent, and
 force-replaces a stale link). Wired into `run-tests`.
 
+**CeraUI's `revision`/`version` stamps follow the booted slot** [EXISTS]
+
+CeraUI reads `revision` (its commit) and `version` (its CalVer) from
+`/opt/ceralive`, which the `/data/ceralive` bind replaces on the device. Seeding
+`revision` once left the first image's commit on screen after every OTA, next to
+the new package version, and `version` was never seeded. The app layer
+(`mkosi.images/app/mkosi.postinst.chroot::keep_ceraui_build_stamps`) keeps both in
+`/usr/libexec/ceralive/ceraui-stamps/` with the `ceralive-device` version they came
+from (`package-version`). Each capture removes the old marker, then every old
+copy, and writes the new marker last, so a new marker only covers that capture's
+copies. Failures log a warning and the build goes on; a failed capture leaves no
+new marker, and if an old marker cannot be removed it stays and capture is
+skipped. `ceralive-migrate-data` links `/data/ceralive/{revision,version}` to the
+kept copies on every boot while the slot's installed `ceralive-device` is still
+that version. Both slots use the same link target, so otherwise (an in-place
+package upgrade) the links are removed, and each regular file is checked against
+the md5sums of the installed package instance (`dpkg-query --control-show
+ceralive-device md5sums`): the package's own file stays, a different one (a stale
+seed, another slot's upgrade) goes. A stale file with the same bytes stays, which
+is harmless. When dpkg cannot name one installed instance, or its md5sums have no
+single valid entry for the file, regular files are left alone and the row may
+still show an older stamp. With that metadata present, the row shows the
+installed build or falls back to the dpkg version. The boot side is non-fatal.
+Limit: rolling back to an image without this change leaves the links dangling
+there (its seed loop keeps an existing link), and CeraUI falls back to the dpkg
+version.
+Offline guard: `tests/ceraui-build-stamps.test.sh`.
+
 **Seven stock units must be MASKED (never merely disabled) — wait-online is not
 boot readiness for an appliance that may establish links later** [EXISTS]
 

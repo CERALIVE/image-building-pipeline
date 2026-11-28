@@ -136,6 +136,62 @@ if [ -d "$NM_CONN" ] && ! mountpoint -q "$NM_CONN"; then
     cp -a "$NM_CONN"/. "$DATA/nm/system-connections/" 2>/dev/null || true
 fi
 
+# CeraUI's build stamps (`revision` = its commit, `version` = its CalVer). CeraUI
+# reads them from its working dir, which the bind replaces with $DATA/ceralive, so
+# a copy seeded there once would name the first image's CeraUI forever, even after
+# OTAs. While the installed ceralive-device is the one this slot's image was built
+# with, link both to the copies its app layer kept
+# (mkosi.images/app/mkosi.postinst.chroot::keep_ceraui_build_stamps), replacing
+# any older file. Both slots use the same link target path, so a link is only
+# right on a slot whose installed package matches its kept copies.
+#
+# Otherwise (an in-place package upgrade on this slot, or no kept copies) links
+# to the kept copies are removed. A regular file is checked against the md5sums
+# of the installed package instance, as dpkg-query reports them: dpkg writes the
+# stamps through the bind, so a file that matches is the package's and stays,
+# and one that differs is a stale seed or another slot's and goes. When dpkg
+# cannot name one installed instance, or its md5sums lack a valid entry for the
+# file, regular files are left alone. Without stamps CeraUI shows the dpkg
+# version.
+# NON-FATAL: a problem here costs a version label, never the binds below.
+CERAUI_STAMPS=/usr/libexec/ceralive/ceraui-stamps
+installed="$(dpkg-query -W -f='${Version}' ceralive-device 2>/dev/null || true)"
+stamped_for="$(cat "$CERAUI_STAMPS/package-version" 2>/dev/null || true)"
+if [ -n "$installed" ] && [ "$installed" = "$stamped_for" ]; then
+    for name in revision version; do
+        src="$CERAUI_STAMPS/$name"
+        dest="$DATA/ceralive/$name"
+        [ -f "$src" ] || continue
+        [ "$(readlink "$dest" 2>/dev/null || true)" != "$src" ] || continue
+        log "pointing $dest at this slot's CeraUI $name stamp"
+        if ! { ln -sfn "$src" "$dest.stamp-link" && mv -fT "$dest.stamp-link" "$dest"; }; then
+            rm -f "$dest.stamp-link" 2>/dev/null || true
+            log "WARN: could not link $dest; CeraUI may show an older $name"
+        fi
+    done
+else
+    sums=""
+    if [ -n "$installed" ]; then
+        sums="$(dpkg-query --control-show ceralive-device md5sums 2>/dev/null || true)"
+    fi
+    for name in revision version; do
+        dest="$DATA/ceralive/$name"
+        case "$(readlink "$dest" 2>/dev/null || true)" in
+            "$CERAUI_STAMPS"/*)
+                log "removing $dest: this slot's kept stamps are not the installed ceralive-device's"
+                rm -f "$dest" 2>/dev/null || log "WARN: could not remove $dest; CeraUI may show another build's $name"
+                continue ;;
+        esac
+        [ -n "$sums" ] && [ -f "$dest" ] && [ ! -L "$dest" ] || continue
+        want="$(printf '%s\n' "$sums" | awk -v p="opt/ceralive/$name" '$2 == p { n++; d = $1 } END { if (n == 1) print d }' 2>/dev/null || true)"
+        printf '%s' "$want" | grep -Eqx '[0-9a-f]{32}' || continue
+        have="$(md5sum < "$dest" 2>/dev/null | awk '{ print $1 }' || true)"
+        [ -n "$have" ] && [ "$have" != "$want" ] || continue
+        log "removing $dest: it is not the installed ceralive-device's $name"
+        rm -f "$dest" 2>/dev/null || log "WARN: could not remove $dest; CeraUI may show another build's $name"
+    done
+fi
+
 # machine-id is NOT handled here. It used to be — an `[ -s ]` seed plus a
 # `mount --bind ... || true`, which accepted systemd's literal `uninitialized`
 # first-boot marker as a board identity and skipped its own bind whenever
