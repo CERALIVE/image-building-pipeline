@@ -373,7 +373,10 @@ installation and hardware were not checked for this combined pin change.
 
 ## CeraUI pin receipt (2026-11-22)
 
-The image selects stable [CeraUI v2026.11.4](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4),
+**Superseded.** See the [November 28 receipt](#ceraui-and-cerastream-pin-receipt-2026-11-28)
+for the current `ceralive-device` and `cerastream` pins.
+
+On November 22, the image selected stable [CeraUI v2026.11.4](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4),
 published 2026-11-22T21:12:28Z at tag commit
 `500ab9ef24d39abb2d02947475a38c0b1b8334c9`.
 
@@ -391,13 +394,44 @@ exact `ceralive-device` entry matching the corresponding release asset digest.
 
 The authenticated `python3 ci/check-first-party-pins.py --refresh` generated the
 catalog without manual edits. It exited 1 before the bump because only the old
-CeraUI tag and both Debian pins were stale. The package contract asserts all
-three new values. No other first-party pin changed.
+CeraUI tag and both Debian pins were stale. The package contract asserted all
+three values at the time. No other first-party pin changed in that refresh.
 
 This verifies the repository's signed package listings, not downloaded Debian
 payloads or packages installed into a candidate. No image was built, booted or
-flashed, and hardware was not checked. The stock USB73 drop-in from #320 is
-already on the base branch and unchanged by this pin.
+flashed, and hardware was not checked. The stock USB73 drop-in from #320 was
+already on the base branch and unchanged by that pin.
+
+## CeraUI and cerastream pin receipt (2026-11-28)
+
+The retained signed stable ARM64 index dated 2026-11-27 lists the new
+`ceralive-device` build but no longer lists
+`2026.11.4-20261122T210830.500ab9e`, blocking ROCK 5B+ Capsule 4.
+The archive key, Release identity, and signed index size and SHA-256 were
+verified offline. All 16 first-party selections match the retained index
+after the refresh. The digests of the four updated builds also match the
+published release assets.
+
+| Package | Architecture | Exact Debian version | SHA-256 |
+|---|---|---|---|
+| `ceralive-device` | arm64 | `2026.11.7-20261127T200436.3c400b3` | `9842f019a2d673f87eaae5d20546cd98c56857631fe2511ef0fdeab30f6b5448` |
+| `ceralive-device` | amd64 | `2026.11.7-20261127T200549.3c400b3` | `d477abe6511f277d06a132da0e5145f7dcddfd85ee3d0a91ecd0f8f3fb6f0e6b` |
+| `cerastream` | arm64 | `2026.11.1` | `0dd69ae9af5840e53bf184d69fee164a9dc23fcec8c9deab748b82005d86081f` |
+| `cerastream` | amd64 | `2026.11.1` | `5e6bc71b18f1192a0687e14d4811ec07becf896e318cc3f3c465bbdf582e0003` |
+
+The stable APT reindex receipts for [CeraUI](https://github.com/CERALIVE/apt-worker/actions/runs/46061678746)
+and [cerastream](https://github.com/CERALIVE/apt-worker/actions/runs/46019906928)
+verify serving on both architectures. For amd64 the proof is the publisher
+receipt, not an independently retained index. The offline package contract
+uses fixtures from these receipts to reject exact pins absent from the index.
+
+The authenticated GitHub catalog refresh flagged both old component pins.
+[CeraUI v2026.11.7](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.7)
+uses `@ceralive/cerastream` 2026.11.4 (schema 0.26.0) and calls out
+[cerastream v2026.11.1](https://github.com/CERALIVE/cerastream/releases/tag/v2026.11.1)
+for preview cleanup and journal severity. The engine retains IPC major 1
+and the existing native package dependencies. No kernel or platform pin
+changed. This verifies package selection, not a build, boot, or media test.
 
 ## Intentional rollback
 

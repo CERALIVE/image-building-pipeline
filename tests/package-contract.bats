@@ -859,8 +859,8 @@ PY
   [ "$output" = "$REPO_ROOT/versions.yaml" ]
 }
 
-@test "fetch-debs cerastream registry and both architectures select the sidecar-ownership release" {
-  local expected_engine_version="2026.9.8"
+@test "fetch-debs cerastream registry and both architectures select the preview-cleanup release" {
+  local expected_engine_version="2026.11.1"
   local arch engine_version
 
   [ "$(get_pin cerastream)" = "v${expected_engine_version}" ]
@@ -870,20 +870,46 @@ PY
   done
 }
 
-@test "fetch-debs CeraUI registry pin matches the concrete device package release" {
-  local expected_ceraui_pin="v2026.11.4"
-  local arch expected_device_version device_version
+@test "fetch-debs CeraUI registry and exact device pins match the served release on both architectures" {
+  local expected_ceraui_pin="v2026.11.7"
+  local arch expected_device_version device_version filename digest size index
 
-  [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
-  for arch in amd64 arm64; do
+  for arch in arm64 amd64; do
     case "$arch" in
-      amd64) expected_device_version="2026.11.4-20261122T210926.500ab9e" ;;
-      arm64) expected_device_version="2026.11.4-20261122T210830.500ab9e" ;;
+      arm64)
+        expected_device_version="2026.11.7-20261127T200436.3c400b3"
+        digest="9842f019a2d673f87eaae5d20546cd98c56857631fe2511ef0fdeab30f6b5448"
+        size=108717304
+        ;;
+      amd64)
+        expected_device_version="2026.11.7-20261127T200549.3c400b3"
+        digest="d477abe6511f277d06a132da0e5145f7dcddfd85ee3d0a91ecd0f8f3fb6f0e6b"
+        size=108942096
+        ;;
     esac
+    # Model the decoded index from the reviewed serving receipt, not from the pin.
+    filename="./ceralive-device_${expected_device_version}_${arch}.deb"
+    index="$BATS_TEST_TMPDIR/Packages-$arch"
+    cat >"$index" <<EOF
+Package: ceralive-device
+Version: $expected_device_version
+Architecture: $arch
+Filename: $filename
+SHA256: $digest
+Size: $size
+EOF
     device_version="$(ARCH="$arch" bash -c 'source "$1" >/dev/null; first_party_pinned_version ceralive-device' _ "$FETCH_DEBS")"
+    run env ARCH="$arch" bash -e -c '
+      source "$1" >/dev/null
+      auth_lookup_package "$2" ceralive-device "$3" "$ARCH" identity ||
+        { printf "Unserved pin: ceralive-device:%s=%s\n" "$ARCH" "$3" >&2; exit 1; }
+    ' _ "$FETCH_DEBS" "$index" "$device_version"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$filename"$'\t'"$digest"$'\t'"$expected_device_version"$'\t'"$arch"$'\t'"$size" ]
     [ "$device_version" = "$expected_device_version" ]
     [[ "$device_version" == "${expected_ceraui_pin#v}-"* ]]
   done
+  [ "$(get_pin CeraUI)" = "$expected_ceraui_pin" ]
 }
 
 @test "fetch-debs srt pin ships libsrt1.5-ceralive bundling /usr/bin/srt-live-transmit" {
