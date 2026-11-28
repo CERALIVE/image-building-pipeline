@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
@@ -177,6 +178,91 @@ def regenerate_then_verify_in_another_directory() -> None:
             assert requests == [] and not verify_only.exists()
 
 
+def runtime_rauc_replays_target_dependencies_not_the_archive_rauc(
+        *, requires_upgrade: bool = False, shared_pool_url: bool = False) -> None:
+    """Replay the built pair over installed ARM64 state; retain the chosen signed URL."""
+    from image_apt_replay import merge_runtime_fetches, replay_runtime_rauc, verify_runtime_fetches
+
+    main = "https://deb.debian.org/debian"
+    secure = "https://deb.debian.org/debian-security"
+    version = "2.41.5-0+deb13u1"
+    fdisk = PackagePin("debian-security", "libfdisk1", version, "arm64",
+                       secure + f"/pool/updates/main/u/util-linux/libfdisk1_{version}_arm64.deb",
+                       "1" * 64, 321)
+    installed = PackagePin("debian-trixie", "libblkid1", version, "arm64",
+                           main + f"/pool/libblkid1_{version}_arm64.deb", "2" * 64, 123)
+    with TemporaryDirectory() as directory:
+        work = Path(directory)
+        packages = work / "trixie"
+        primary = replace(fdisk, repository="debian-trixie", url=main + f"/pool/libfdisk1_{version}_arm64.deb")
+        packages.write_text(stanza(installed) + stanza(primary, f"Depends: libblkid1 (= {version})\n") + stanza(PackagePin(
+            "debian-trixie", "rauc", "1.13-3", "arm64", main + "/pool/rauc_1.13-3_arm64.deb",
+            "3" * 64, 432), "Depends: absent-from-archive\n"))
+        security = work / "security"
+        security.write_text(stanza(fdisk, f"Depends: libblkid1 (= {version})\n"))
+        updates = work / "updates"
+        updates.write_text(stanza(primary, f"Depends: libblkid1 (= {version})\n"))
+        main_index = ReplayIndex("debian-trixie", main, "trixie", packages)
+        indices = [main_index, ReplayIndex("debian-security", secure, "trixie-security", security)]
+        if shared_pool_url:
+            indices.insert(1, ReplayIndex("debian-updates", main, "trixie-updates", updates))
+        status = work / "post-platform.status"
+        installed_version = "2.41.5-0" if requires_upgrade else version
+        status.write_text(f"Package: libblkid1\nStatus: install ok installed\n"
+                          f"Architecture: arm64\nVersion: {installed_version}\n\n")
+        built = []
+        for name, arch, depends in (("rauc", "arm64", "libfdisk1"), ("rauc-service", "all", "rauc")):
+            tree = work / name
+            (tree / "DEBIAN").mkdir(parents=True)
+            (tree / "DEBIAN").chmod(0o755)
+            (tree / "DEBIAN/control").write_text(
+                f"Package: {name}\nVersion: 1.15.2-1+ceralive.1\nArchitecture: {arch}\n"
+                f"Maintainer: Fixture <test@example.invalid>\nDescription: fixture\nDepends: {depends}\n")
+            output = work / f"{name}.deb"
+            subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(tree), str(output)], check=True)
+            built.append(output)
+        apt, method = apt_tools()
+        plan = replay_runtime_rauc(indices, work, apt, method, status, tuple(built), "1.15.2-1+ceralive.1")
+        expected = {"libfdisk1": replace(primary, aliases=(fdisk.url,))}
+        if requires_upgrade:
+            expected[installed.name] = installed
+        assert plan == expected, plan
+        if shared_pool_url:
+            updates.write_text(stanza(replace(primary, sha256="f" * 64), f"Depends: libblkid1 (= {version})\n"))
+            try:
+                replay_runtime_rauc(indices, work, apt, method, status, tuple(built), "1.15.2-1+ceralive.1")
+            except StreamError as exc:
+                assert str(exc) == "ambiguous or invalid signed Debian package row"
+            else:
+                raise AssertionError("runtime replay accepted different signed bytes at the same pool URL")
+            return
+        if requires_upgrade:
+            return
+        corrected = merge_runtime_fetches({primary.name: primary}, plan)
+        for pins in ({}, {primary.name: primary}, {primary.name: replace(corrected[primary.name], sha256="f" * 64)},
+                     {primary.name: replace(corrected[primary.name], length=99)},
+                     {primary.name: replace(corrected[primary.name], version="1")},
+                     {primary.name: replace(corrected[primary.name], arch="all")},
+                     {primary.name: replace(corrected[primary.name], aliases=(secure + "/pool/other.deb",))}):
+            try:
+                verify_runtime_fetches(plan, pins)
+            except StreamError as exc:
+                assert fdisk.url in str(exc), exc
+            else:
+                raise AssertionError("runtime replay accepted an unsealed or inexact acquisition")
+        verify_runtime_fetches(plan, {primary.name: replace(primary, aliases=(fdisk.url.replace("+", "%2b"),))})
+        security.write_text(stanza(replace(fdisk, sha256="f" * 64), f"Depends: libblkid1 (= {version})\n"))
+        try:
+            replay_runtime_rauc(
+                [ReplayIndex("debian-trixie", main, "trixie", packages),
+                 ReplayIndex("debian-security", secure, "trixie-security", security)],
+                work, apt, method, status, (built[0], built[1]), "1.15.2-1+ceralive.1")
+        except StreamError as exc:
+            assert "signed runtime archives disagree on package bytes: libfdisk1" in str(exc)
+        else:
+            raise AssertionError("runtime replay accepted conflicting bytes at an alternate URL")
+
+
 if __name__ == "__main__":
     regression()
     reject_before_identity_config()
@@ -184,3 +270,6 @@ if __name__ == "__main__":
     reject_incomplete_trixie_binary_set_before_any_fetch()
     reject_reviewed_package_missing_from_plan()
     regenerate_then_verify_in_another_directory()
+    runtime_rauc_replays_target_dependencies_not_the_archive_rauc()
+    runtime_rauc_replays_target_dependencies_not_the_archive_rauc(requires_upgrade=True)
+    runtime_rauc_replays_target_dependencies_not_the_archive_rauc(shared_pool_url=True)
