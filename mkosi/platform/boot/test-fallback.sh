@@ -196,7 +196,7 @@ assert_contains "decrements A counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "s
 assert_contains "decrements B counter (bootcount)" "${BOOT_DIR}/boot.scr.cmd" "setenv BOOT_B_LEFT \"\${cera_next}\""
 # The board's U-Boot has no CONFIG_CMD_SETEXPR, so an arithmetic decrement silently
 # no-ops and a dead slot retries forever. Executable proof: tests/boot-script-sanitize.test.sh.
-if grep -vE '^[[:space:]]*#' "${BOOT_DIR}/boot.scr.cmd" | grep -q 'setexpr'; then
+if grep -vE '^[[:space:]]*#' "${BOOT_DIR}/boot.scr.cmd" | grep -c 'setexpr' >/dev/null; then
   bad "boot.scr.cmd must not depend on setexpr (absent from this board's U-Boot)"
 else
   ok "boot.scr.cmd depends on no arithmetic command"

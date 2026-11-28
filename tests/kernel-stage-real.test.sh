@@ -153,12 +153,16 @@ for tuple in '7.2.0 2' '7.3.0 1'; do
   mkdir -p "${FIXTURE}/inspect"
   mount -o ro "${target_loop}" "${FIXTURE}/inspect"
   [[ "$(chroot "${FIXTURE}/inspect" dpkg-query -W -f='${Version}' "${TEST_PACKAGE}")" == "${TEST_VERSION}" ]]
-  chroot "${FIXTURE}/inspect" apt-mark showhold | grep -qxF "${TEST_PACKAGE}"
+  holds="$(chroot "${FIXTURE}/inspect" apt-mark showhold)"
+  grep -qxF "${TEST_PACKAGE}" <<<"${holds}"
   grep -qxF "Pin: version ${TEST_VERSION}" "${FIXTURE}/inspect/etc/apt/preferences.d/ceralive-kernel-freeze"
   grep -qxF 'Package: armbian-firmware-full' "${FIXTURE}/inspect/etc/apt/preferences.d/ceralive-kernel-freeze"
   if [[ "${base}" == 7.3.0 ]]; then
     [[ ! -e "${FIXTURE}/inspect/boot/vmlinuz-7.2.0-ceralive-rk3588" ]]
-    ! chroot "${FIXTURE}/inspect" apt-mark showhold | grep -qxF linux-image-7.2.0-ceralive-rk3588
+    if grep -qxF linux-image-7.2.0-ceralive-rk3588 <<<"${holds}"; then
+      printf 'FAIL real kernel stage: old kernel package remains held\n' >&2
+      exit 1
+    fi
   fi
   umount "${FIXTURE}/inspect"
   [[ "${before}" == "$(sha256sum "${FIXTURE}/boot.img")" ]]

@@ -221,7 +221,7 @@ check_gap_magic() {
 
 fit_has_property() {
   local fit="$1" node="$2" property="$3"
-  fdtget -p "${fit}" "${node}" 2>/dev/null | grep -Fxq "${property}"
+  fdtget -p "${fit}" "${node}" 2>/dev/null | grep -Fxc "${property}" >/dev/null
 }
 
 fit_u32_property() {
@@ -474,8 +474,8 @@ check_boot_partition() {
   recovery="${tmp}/recovery.scr"
   mcopy -i "${img}@@${boot_off}" ::/boot.scr "${script}" >/dev/null 2>&1 || valid=0
   mcopy -i "${img}@@${boot_off}" ::/recovery.scr "${recovery}" >/dev/null 2>&1 || valid=0
-  mkimage -l "${script}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
-  mkimage -l "${recovery}" 2>/dev/null | grep -q 'AArch64 Linux Script' || valid=0
+  mkimage -l "${script}" 2>/dev/null | grep -c 'AArch64 Linux Script' >/dev/null || valid=0
+  mkimage -l "${recovery}" 2>/dev/null | grep -c 'AArch64 Linux Script' >/dev/null || valid=0
   board_env="$(mtype -i "${img}@@${boot_off}" ::/cera_board.env 2>/dev/null || true)"
   grep -qx "board_id=${BOARD_IDENTITY_BOARD_ID}" <<<"${board_env}" || valid=0
   grep -qx "fdtfile=${BOARD_IDENTITY_DTB}" <<<"${board_env}" || valid=0
@@ -565,7 +565,7 @@ debugfs_dump_resolved() {
 # `ls -p /boot` (fields /inode/mode/uid/gid/name/size/, so $6 is the name).
 resolve_initrd_path() {
   local fsimg="$1" versioned
-  if debugfs -R "stat /boot/initrd.img" "${fsimg}" 2>/dev/null | grep -q '^Inode:'; then
+  if debugfs -R "stat /boot/initrd.img" "${fsimg}" 2>/dev/null | grep -c '^Inode:' >/dev/null; then
     printf '/boot/initrd.img\n'
     return 0
   fi
@@ -605,7 +605,7 @@ check_rootfs_populated() {
   local found=""
   local p
   for p in /usr/lib/systemd/systemd /sbin/init; do
-    if debugfs -R "stat ${p}" "${tmp}" 2>/dev/null | grep -q 'Inode:'; then
+    if debugfs -R "stat ${p}" "${tmp}" 2>/dev/null | grep -c 'Inode:' >/dev/null; then
       found="${p}"; break
     fi
   done
@@ -743,7 +743,7 @@ self_test() {
   printf '%s\n' "${out}"
   rm -rf "${tmp}"
   echo
-  if printf '%s\n' "${out}" | grep -q '^\[FAIL\] Gap magic:' && (( rc != 0 )); then
+  if grep -q '^\[FAIL\] Gap magic:' <<<"${out}" && (( rc != 0 )); then
     echo "NEGATIVE TEST PASS — zeroed gap was correctly REJECTED on the gap-magic check (gate is non-vacuous)."
     return 0
   fi

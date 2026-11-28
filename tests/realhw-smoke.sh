@@ -247,7 +247,7 @@ static_structure_check() {
   elif [[ "${img}" == *.tar ]]; then
     if tar -tf "${img}" >/dev/null 2>&1; then
       pass "tar archive listing OK"
-      if tar -tf "${img}" 2>/dev/null | grep -qE '(^|\./)(etc/passwd|var/lib/dpkg/status)$'; then
+      if tar -tf "${img}" 2>/dev/null | grep -cE '(^|\./)(etc/passwd|var/lib/dpkg/status)$' >/dev/null; then
         pass "tar contains a Debian rootfs (etc/passwd + dpkg status)"
       else
         warn "tar listing has no etc/passwd / dpkg status at the root — odd layout"
@@ -264,7 +264,7 @@ static_structure_check() {
     fi
     if sgdisk -p "${raw}" >/dev/null 2>&1 || sfdisk -l "${raw}" >/dev/null 2>&1; then
       pass "image has a readable partition table"
-      if sfdisk -l "${raw}" 2>/dev/null | grep -qiE 'linux|EFI|fat'; then
+      if sfdisk -l "${raw}" 2>/dev/null | grep -ciE 'linux|EFI|fat' >/dev/null; then
         pass "partition table declares a Linux/boot partition"
       else
         warn "partition table has no obvious Linux/boot partition"

@@ -143,7 +143,7 @@ CERA_DEFAULT_LOADADDR='' CERA_ABSENT_PATHS='/boot/initrd.img' \
 
 # Non-vacuity: the harness must be able to FAIL. If `setexpr` were reachable the
 # selector would be depending on a command this board does not have.
-if grep -vE '^[[:space:]]*#' "${BOOT_SCRIPT}" | grep -q 'setexpr'; then
+if grep -vE '^[[:space:]]*#' "${BOOT_SCRIPT}" | grep -c 'setexpr' >/dev/null; then
   printf 'FAIL: boot.scr.cmd still references setexpr (absent from this board U-Boot)\n' >&2
   exit 1
 fi

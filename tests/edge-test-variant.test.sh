@@ -512,7 +512,7 @@ fi
 
 # The guard must be a property check, not a name blocklist — otherwise the next
 # debug variant is unguarded on the day it is added.
-if grep -vE 'verdict_for|^#' "${GUARD}" | grep -qE '(==|=~|case).*edge-test'; then
+if grep -vE 'verdict_for|^#' "${GUARD}" | grep -cE '(==|=~|case).*edge-test' >/dev/null; then
   bad "the release guard matches edge-test by NAME instead of by property"
 else
   ok "the release guard decides by property, never by matching the edge-test name"
