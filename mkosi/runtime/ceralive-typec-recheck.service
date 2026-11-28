@@ -7,3 +7,9 @@ Type=oneshot
 Environment=CERALIVE_TYPEC_MODE=recheck
 ExecStart=/usr/local/sbin/ceralive-typec-policy
 TimeoutStartSec=60
+# Six starts a minute would otherwise journal three systemd info lines each
+# (about 1,100 entries an hour) while nothing changes. The policy script logs
+# its decisions at notice or above, so they still reach the journal, and any
+# untagged line (a shell or kernel error on stderr) defaults to notice too.
+LogLevelMax=notice
+SyslogLevel=notice

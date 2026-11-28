@@ -165,6 +165,10 @@ printf 'systemctl %s\n' "$*" >>"$HOSTNAME_CALLS"
 SH
   cat >"$bin/ip" <<'SH'
 #!/usr/bin/env bash
+if [[ "$*" = *"addr show"* && "${HOSTNAME_IP_SCENARIO:-online}" = fail ]]; then
+  printf 'Cannot open netlink socket: Permission denied\n' >&2
+  exit 1
+fi
 if [[ "$*" = *"addr show"* && "${HOSTNAME_IP_SCENARIO:-online}" != offline ]]; then
   iface="${HOSTNAME_LOCAL_IFACE:-eth0}"
   printf '2: %s    inet %s/24 brd 192.168.78.255 scope global %s\n' \

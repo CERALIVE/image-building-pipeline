@@ -3395,3 +3395,244 @@ CONF
   run grep -cE '^setup_pipewire_system_mode\(\) \{' "$POSTINST_LIB"
   [ "$output" -eq 1 ]
 }
+
+# ===========================================================================
+# Quiet polling units — a timer tick that changes nothing journals nothing.
+# The recheck (10 s) and hostname reconcile (30 s) units cap their journal at
+# notice; their scripts print decisions and failures at notice or above.
+# ===========================================================================
+
+@test "typec recheck: the unit caps its journal at notice" {
+  grep -Fxq 'LogLevelMax=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  # Untagged stderr (a shell or kernel error) defaults to notice under the cap.
+  grep -Fxq 'SyslogLevel=notice' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-recheck.service"
+  # The boot/udev policy unit keeps its default level.
+  ! grep -Fq 'LogLevelMax' "$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.service"
+}
+
+@test "typec policy: every line it prints carries notice or a higher priority" {
+  local root="$BATS_TEST_TMPDIR/rock" line
+  typec_rock_fixture "$root"
+
+  run run_typec_rock
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  while IFS= read -r line; do
+    [[ "$line" =~ ^\<[345]\>ceralive-typec-policy:\  ]]
+  done <<<"$output"
+  # The tag decides the priority.
+  run bash -c "source <(sed -n '/^log() {/,/^}/p' '$PIPELINE_DIR/mkosi/runtime/ceralive-typec-policy.sh'); log 'ERROR: x'; log 'WARNING: y'; log 'INFO: z'; log 'plain'"
+  [ "$output" = $'<3>ceralive-typec-policy: ERROR: x\n<4>ceralive-typec-policy: WARNING: y\n<5>ceralive-typec-policy: INFO: z\n<5>ceralive-typec-policy: plain' ]
+}
+
+@test "hostname reconcile: the 30 s unit caps its journal at notice; actions stay above it" {
+  local src="$PIPELINE_DIR/mkosi/customize/postinst.d/hostname.sh" unit
+  unit="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname-reconcile\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
+  [ -n "$unit" ]
+  grep -Fxq 'LogLevelMax=notice' <<<"$unit"
+  # The boot-time hostname unit keeps its default level.
+  local boot
+  boot="$(awk '/cat >\/etc\/systemd\/system\/ceralive-hostname\.service <</ { f=1; next } f && /^EOF$/ { exit } f { print }' "$src")"
+  [ -n "$boot" ]
+  ! grep -Fq 'LogLevelMax' <<<"$boot"
+  # Routine reconcile lines are tagged info, so a no-change tick is silent. That
+  # includes an offline box re-confirming an unchanged provisional identity and a
+  # short registration deferral; the behavioural tests below cover the rest.
+  grep -Fq "printf '<6>ceralive-set-hostname: identity already aligned at" "$src"
+  grep -Fq "printf '<6>ceralive-set-hostname: publication is still registering;" "$src"
+  grep -Fq "printf '<6>ceralive-set-hostname: provisional identity %s.local unchanged;" "$src"
+  # Anything untagged (a set -e exit from mkdir, chmod or the lock redirection,
+  # a tool's own stderr) defaults to notice, so the cap never hides a failure.
+  grep -Fxq 'SyslogLevel=notice' <<<"$unit"
+  # ... which means every line the helper itself prints must carry a tag.
+  ! grep -Eq "printf '(ceralive-set-hostname): " "$src"
+  # Changes and failures are notice or above.
+  local msg
+  for msg in 'completed pending consumer restart' \
+    'publication diverged' 'reconciled and established' 'conflicted; trying next' \
+    'has no stable owner' 'persisted provisional identity' 'cannot list network addresses' \
+    'has been registering for' 'cannot record when the deferral started'; do
+    grep -Eq "printf '<[345]>ceralive-set-hostname: [^']*${msg}" "$src"
+  done
+  grep -Fq "printf '<3>ceralive-set-hostname: %s\\n' \"\$*\" >&2" "$src"
+  # The end of a reported deferral is a notice, whichever path ends it.
+  grep -Fq "printf '<5>ceralive-set-hostname: %s\\n' \"\$1\"" "$src"
+  grep -Fq 'clear_registering_deferral "the registration deferral ended; no publishable LAN address"' "$src"
+}
+
+@test "hostname reconcile: a failed address query is reported, not taken for an empty result" {
+  local root="$BATS_TEST_TMPDIR/reconcile-ip-fails"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+
+  : >"$root/calls"
+  HOSTNAME_IP_SCENARIO=fail run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cannot open netlink socket"* ]]
+  [[ "$output" == *"<4>ceralive-set-hostname: cannot list network addresses"* ]]
+  [[ "$output" == *"<6>ceralive-set-hostname: provisional identity ceralive.local unchanged"* ]]
+  [[ "$output" != *"avahi-set-host-name"* ]]
+
+  # A query that works and finds nothing stays quiet.
+  HOSTNAME_IP_SCENARIO=offline run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"cannot list network addresses"* ]]
+  [[ "$output" == *"<6>ceralive-set-hostname: provisional identity ceralive.local unchanged"* ]]
+}
+
+@test "hostname reconcile: writing a provisional identity is a notice, re-confirming it is info" {
+  local root="$BATS_TEST_TMPDIR/reconcile-provisional"
+  make_hostname_fixture "$root"
+  HOSTNAME_IP_SCENARIO=offline run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<5>ceralive-set-hostname: persisted provisional identity ceralive.local"* ]]
+
+  HOSTNAME_IP_SCENARIO=offline run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<6>ceralive-set-hostname: provisional identity ceralive.local unchanged"* ]]
+  [[ "$output" != *"persisted provisional identity"* ]]
+}
+
+@test "hostname reconcile: a long registration deferral is reported once, then its end" {
+  local root="$BATS_TEST_TMPDIR/reconcile-registering-long"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  printf '1\n' >"$root/avahi/state"
+
+  printf '100.25 50.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<6>ceralive-set-hostname: publication is still registering; deferring"* ]]
+
+  printf '399.00 50.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"has been registering"* ]]
+
+  printf '400.00 50.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<4>ceralive-set-hostname: publication has been registering for 300 s; still deferring"* ]]
+
+  printf '430.00 50.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"has been registering"* ]]
+  [[ "$output" == *"<6>ceralive-set-hostname: publication is still registering; deferring"* ]]
+
+  printf '2\n' >"$root/avahi/state"
+  printf '460.00 50.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<5>ceralive-set-hostname: publication is no longer registering"* ]]
+  [[ "$output" == *"identity already aligned at ceralive.local"* ]]
+  [ ! -e "$root/run/registering-since" ]
+}
+
+@test "hostname reconcile: an unreadable clock is reported once, not every tick" {
+  local root="$BATS_TEST_TMPDIR/reconcile-registering-noclock"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  printf '1\n' >"$root/avahi/state"
+  printf 'bogus\n' >"$root/uptime"
+
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<5>ceralive-set-hostname: publication is still registering; cannot read $root/uptime"* ]]
+
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"cannot read"* ]]
+  [[ "$output" == *"<6>ceralive-set-hostname: publication is still registering; deferring"* ]]
+
+  # Once the clock reads again, timing starts over.
+  printf '100.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [ "$(cat "$root/run/registering-since")" = 100 ]
+}
+
+@test "hostname reconcile: an unwritable reported flag restarts the timer instead of warning every tick" {
+  [ "$(id -u)" -ne 0 ] || skip "file permissions do not stop root"
+  local root="$BATS_TEST_TMPDIR/reconcile-registering-roflag"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  printf '1\n' >"$root/avahi/state"
+  mkdir -p "$root/run"
+  printf '100\n' >"$root/run/registering-since"
+  chmod 0444 "$root/run/registering-since"
+
+  printf '400.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<4>ceralive-set-hostname: publication has been registering for 300 s"* ]]
+  [ ! -e "$root/run/registering-since" ]
+
+  printf '430.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"has been registering"* ]]
+  [ "$(cat "$root/run/registering-since")" = 430 ]
+}
+
+@test "hostname reconcile: a non-file at the deferral marker path is removed, not read" {
+  local root="$BATS_TEST_TMPDIR/reconcile-registering-fifo"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  printf '1\n' >"$root/avahi/state"
+  mkdir -p "$root/run"
+  mkfifo "$root/run/registering-since"
+
+  printf '100.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run timeout 20 bash -c 'source "$1"; run_hostname_script "$2" "" normal device "$2/shared" normal reconcile' _ "$PIPELINE_DIR/tests/manifest-helpers.bash" "$root"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<4>ceralive-set-hostname: removing unexpected non-file at $root/run/registering-since"* ]]
+  [ -f "$root/run/registering-since" ]
+  [ "$(cat "$root/run/registering-since")" = 100 ]
+}
+
+@test "hostname reconcile: a valid non-registering state clears an old deferral before a later failure" {
+  local root="$BATS_TEST_TMPDIR/reconcile-registering-stale"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  printf '1\n' >"$root/avahi/state"
+  printf '100.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [ -e "$root/run/registering-since" ]
+
+  # RUNNING, but the hostname read is malformed: the tick fails as before, and
+  # the old timer is gone.
+  printf '2\n' >"$root/avahi/state"
+  printf '200.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" multiline-name device "$root/shared" normal reconcile
+  [ "$status" -ne 0 ]
+  [ ! -e "$root/run/registering-since" ]
+
+  printf '1\n' >"$root/avahi/state"
+  printf '400.00 1.00\n' >"$root/uptime"
+  CERALIVE_UPTIME_FILE="$root/uptime" run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"has been registering"* ]]
+}
+
+@test "hostname reconcile: going offline ends a reported deferral without claiming publication state" {
+  local root="$BATS_TEST_TMPDIR/reconcile-registering-offline"
+  make_hostname_fixture "$root"
+  run run_hostname_script "$root"
+  [ "$status" -eq 0 ]
+  mkdir -p "$root/run"
+  printf '100 reported\n' >"$root/run/registering-since"
+
+  HOSTNAME_IP_SCENARIO=offline run run_hostname_script "$root" "" normal device "$root/shared" normal reconcile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<5>ceralive-set-hostname: the registration deferral ended; no publishable LAN address"* ]]
+  [[ "$output" != *"no longer registering"* ]]
+  [ ! -e "$root/run/registering-since" ]
+}
