@@ -23,7 +23,27 @@ from unittest import TestCase, main
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = [sys.executable, str(ROOT / "ci/container-engine.py")]
+# ci/container-engine.py relaxes its CI-job and display gates inside a disposable VM guest, which it
+# detects through this fw_cfg directory. The build VM has it and a laptop does not, so every run pins
+# the answer and the suite means the same thing everywhere.
+GUEST_PATH = "/sys/firmware/qemu_fw_cfg/by_name/opt/ceralive"
+PIN_GUEST = (
+    "import pathlib, runpy, sys\n"
+    "guest = sys.argv.pop(1) == 'guest'\n"
+    f"path = {GUEST_PATH!r}\n"
+    "is_dir = pathlib.Path.is_dir\n"
+    "pathlib.Path.is_dir = lambda self, *a, **k: guest if str(self) == path else is_dir(self, *a, **k)\n"
+    "sys.argv = sys.argv[1:]\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
+
+
+def engine_wrapper(guest: bool) -> list[str]:
+    return [sys.executable, "-c", PIN_GUEST, "guest" if guest else "host",
+            str(ROOT / "ci/container-engine.py")]
+
+
+WRAPPER = engine_wrapper(False)
 SOCKET = "unix:///var/run/docker.sock"
 SESSION = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY",
            "DBUS_SESSION_BUS_ADDRESS", "SSH_TTY")
@@ -244,6 +264,14 @@ elif args[2:4] == ['container', 'inspect']:
                                            Privileged=False, PidMode='', IpcMode='private', Devices=[]))]))
 """)
         fake.chmod(0o700)
+        # The repo's shell helpers launch the engine themselves; pin the VM answer for them too.
+        (root / "pin_guest.py").write_text(PIN_GUEST)
+        shim = root / "python3"
+        shim.write_text("#!/bin/bash\n"
+                        'if [[ "${1:-}" == */ci/container-engine.py ]]; then\n'
+                        f'  exec {sys.executable} {root}/pin_guest.py host "$@"\nfi\n'
+                        f'exec {sys.executable} "$@"\n')
+        shim.chmod(0o700)
         (root / "podman").symlink_to(fake)
         self.env = {"PATH": f"{root}:{os.defpath}", "FAKE_LOG": str(self.log),
                     "FAKE_CONTEXT": "default", "FAKE_ENDPOINT": SOCKET,
@@ -406,6 +434,21 @@ esac
 
     def headless_env(self) -> dict[str, str]:
         return {key: value for key, value in self.env.items() if key not in SESSION}
+
+    def test_disposable_guest_skips_job_and_display_gates_but_keeps_option_checks(self) -> None:
+        recipe = ["docker", "build", "-t", "fixture", "-f", str(ROOT / "ci/Dockerfile"), str(ROOT / "ci")]
+        env = {**self.headless_env(), "DISPLAY": ":0"}  # no CI job identity and a display
+        run = lambda wrapper, command: subprocess.run(  # noqa: E731
+            [*wrapper, *command], env=env, stdin=subprocess.DEVNULL, start_new_session=True,
+            capture_output=True, text=True, timeout=10)
+        host = run(engine_wrapper(False), recipe)
+        self.assertNotEqual(host.returncode, 0)
+        self.assertIn("use a prebuilt builder image", host.stderr)
+        guest = run(engine_wrapper(True), recipe)
+        self.assertEqual(guest.returncode, 0, guest.stderr)
+        unsafe = run(engine_wrapper(True), ["docker", "build", "--privileged", "-t", "fixture", "."])
+        self.assertNotEqual(unsafe.returncode, 0)
+        self.assertIn("unsupported", unsafe.stderr)
 
     def test_cold_build_refuses_terminal_desktop_untrusted_job_and_unsafe_options(self) -> None:
         command = [*WRAPPER, "docker", "build", "-t", "fixture", "."]
