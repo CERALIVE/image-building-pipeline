@@ -2,7 +2,7 @@
 
 How a CeraLive device image actually goes from a merged commit to a bundle a
 fielded device can install. The integration branch implements the signed image
-channel publisher and pins stable CeraUI v2026.11.4's unified update orchestrator.
+channel publisher and pins stable CeraUI's unified update orchestrator.
 **Qualification [PARTIAL]:** two-board update drills and released arm64 package
 installation are proven; full override-free candidate boot, multi-uplink failover
 and amd64 hardware remain separate, unverified gates. Build-time APT credential
@@ -279,14 +279,10 @@ versions are published and served on stable. That image pin selected
 repo-local registry. Both release downloads matched their SHA-256 sidecars;
 both bench boards installed the arm64 release through the product.
 
-The current image pin selects stable CeraUI **v2026.11.4**
-(tag commit `500ab9ef24d39abb2d02947475a38c0b1b8334c9`), published
-2026-11-22T21:12:28Z. The exact Debian versions are
-`2026.11.4-20261122T210830.500ab9e` (arm64) and
-`2026.11.4-20261122T210926.500ab9e` (amd64), with repo-local provenance
-`CeraUI.pin: v2026.11.4`. The signed stable APT indexes list these exact versions
-with SHA-256 digests matching the release assets. See the
-[pin receipt](first-party-pin-currency.md#ceraui-pin-receipt-2026-11-22).
+The current image pins select stable CeraUI **v2026.11.7** and its companion
+cerastream **v2026.11.1**. Their exact Debian versions and signed stable APT
+evidence are in the
+[pin receipt](first-party-pin-currency.md#ceraui-and-cerastream-pin-receipt-2026-11-28).
 Pinning is not image qualification or OS stable/beta authorization; OS
 2026.10.97 remains private-drill only and channel pointers are unchanged.
 

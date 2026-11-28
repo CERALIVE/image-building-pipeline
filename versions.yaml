@@ -64,12 +64,14 @@ cerastream:
   # an unauthorized attribution trailer (root ceralive AGENTS.md Rule C). It is
   # permanently immutable (cerastream's active, no-bypass tag-protection ruleset)
   # and stays on GitHub as a deprecated, superseded artifact — this pipeline no
-  # longer pins it. v2026.9.8 is a new release of the IDENTICAL corrected code
+  # longer pins it. v2026.9.8 was a new release of the IDENTICAL corrected code
   # (byte-identical tree, zero behavior change), tag v2026.9.8 ->
   # cbfae2f3b166203a73cfb14870eef7b5a3ecba94, confirmed serving on both
   # apt.ceralive.tv stable indexes. See ceralive/docs/RELIABILITY-FINDINGS.md C4.
-  pin: v2026.9.8
-  # Device deb: cerastream 2026.9.8 (amd64 + arm64); see first-party-deb-versions.txt.
+  # v2026.11.1 supplies the preview cleanup and journal severity fixes that
+  # accompany CeraUI v2026.11.7; the IPC major stays at cerastream-ipc/1.
+  pin: v2026.11.1
+  # Device deb: cerastream 2026.11.1 (amd64 + arm64); see first-party-deb-versions.txt.
   # Historical receipt for 2026.9.6 follows (not the active artifact):
   # Tag commit: b3eb2a0767687415401998353337c3413c09fda9.
   # Downloaded assets match the published SHA-256 sidecars:
@@ -116,12 +118,12 @@ CeraUI:
   # v2026.11.1: refreshes a stale healthy-state record before a kernel stage.
   # v2026.11.2: update consent, kernel-stage failure reporting and hotspot UI fixes.
   # v2026.11.4: hotspot radio identity safety and software update progress fixes.
-  pin: v2026.11.4
-  # Device deb: ceralive-device 2026.11.4-20261122T210926.500ab9e (amd64) /
-  #   2026.11.4-20261122T210830.500ab9e (arm64); see first-party-deb-versions.txt.
-  # Tag commit: 500ab9ef24d39abb2d02947475a38c0b1b8334c9.
-  # Versions confirmed against the signed stable APT indexes and release assets.
-  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4
+  pin: v2026.11.7
+  # Device deb: ceralive-device 2026.11.7-20261127T200549.3c400b3 (amd64) /
+  #   2026.11.7-20261127T200436.3c400b3 (arm64); see first-party-deb-versions.txt.
+  # Tag commit: 3c400b3d320d99749f795a704c06a9c7120dbe2c.
+  # Stable signed-index and release-asset evidence: docs/first-party-pin-currency.md.
+  # Published assets: https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.7
   # Historical receipt for 2026.11.1 follows (not the active artifact):
   # Device deb: ceralive-device 2026.11.1-20261106T235637.77fae5e (amd64) /
   #   2026.11.1-20261106T235641.77fae5e (arm64); see first-party-deb-versions.txt.

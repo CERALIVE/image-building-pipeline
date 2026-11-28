@@ -873,12 +873,9 @@ architecture, `package[amd64]=version` and `package[arm64]=version` override tha
 generic entry. Resolution remains exact: the selected version is matched against
 the GPG-verified architecture index before its `.deb` is downloaded.
 
-The engine pin is `cerastream=2026.9.8`. It retains the audio-meter,
-idle-preview and teardown ownership of 2026.9.6, plus capture standby
-continuity from 2026.9.7. The canonical `gstreamer1.0-libuvcsrc` dependency
-and earlier composition fixes remain. The independent checksum receipt for
-the earlier 2026.9.6 pin and the exact-version APT verification mechanism:
-[`Engine pin receipt`](docs/first-party-pin-currency.md#engine-pin-receipt--2026-09-21).
+The engine pin is `cerastream=2026.11.1`. It supplies CeraUI v2026.11.7's
+companion preview cleanup and journal severity fixes. The engine still
+provides `cerastream-ipc-1` and depends on `gstreamer1.0-libuvcsrc`.
 The RK3588 plugin pin is `1.14.4+ceralive.7`, retaining its platform-layer
 URL+SHA route; both the superseded `.6` fork row and the original Radxa row are
 kept commented above it as rollback levers. On top of `.6`'s compositor
@@ -894,11 +891,11 @@ Exact serving proof for the preceding `.6` plugin and `2026.9.4` engine pins:
 These are package-pin updates, not a claim that a new device image has been
 built, flashed or hardware-qualified.
 
-CeraUI is pinned to stable release v2026.11.4 (tag commit `500ab9e`) using its exact
-per-architecture Debian versions, `2026.11.4-20261122T210926.500ab9e` (amd64) and
-`2026.11.4-20261122T210830.500ab9e` (arm64), confirmed against the signed stable APT
+CeraUI is pinned to stable release v2026.11.7 (tag commit `3c400b3`) using its exact
+per-architecture Debian versions, `2026.11.7-20261127T200549.3c400b3` (amd64) and
+`2026.11.7-20261127T200436.3c400b3` (arm64), confirmed against the signed stable APT
 indexes and release assets. It retains the unified device update orchestrator.
-See the [CeraUI pin receipt](docs/first-party-pin-currency.md#ceraui-pin-receipt-2026-11-22).
+See the [CeraUI and cerastream pin receipt](docs/first-party-pin-currency.md#ceraui-and-cerastream-pin-receipt-2026-11-28).
 This pin update does not build or qualify an image, or authorize an OS release.
 Full override-free image boot, amd64 hardware and media
 qualification remain separate gates;
@@ -1260,7 +1257,7 @@ hardware gate ([`docs/DEFERRED.md`](docs/DEFERRED.md) item 11).
 
 ## Update Paths — unified orchestrator, image qualification [PARTIAL]
 
-The pinned stable CeraUI v2026.11.4 drives both APT package updates and RAUC OS
+The pinned stable CeraUI v2026.11.7 drives both APT package updates and RAUC OS
 updates on capability-bearing images. OS discovery uses signed channel manifests
 at `images.ceralive.tv/channels/<channel>/<board>.json`; the signed metadata
 selects the immutable release bytes, not a guessed bundle URL. Legacy images
