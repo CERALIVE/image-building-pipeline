@@ -296,17 +296,17 @@ HTML
 # Persist the user's network as a NM profile (credentials land ONLY in NM storage).
 # Fixed con-name → retries overwrite cleanly; counted by the provision trigger so the
 # portal stays down on the next boot once a profile exists (EC4).
+# stdout is the client socket here, so nmcli's "successfully added" line would go out
+# ahead of the HTTP status line. Discard stdout and keep stderr for the journal.
 write_user_profile() {
-  local ssid="$1" psk="$2"
+  local ssid="$1" psk="$2" err rc
+  local -a add=(connection add type wifi con-name "${USER_CON_NAME}" ifname "${AP_IFACE}"
+                ssid "${ssid}" autoconnect yes)
+  [ -n "${psk}" ] && add+=(wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${psk}")
   "${NMCLI}" connection delete "${USER_CON_NAME}" >/dev/null 2>&1 || true
-  if [ -n "${psk}" ]; then
-    "${NMCLI}" connection add type wifi con-name "${USER_CON_NAME}" ifname "${AP_IFACE}" \
-      ssid "${ssid}" autoconnect yes \
-      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${psk}"
-  else
-    "${NMCLI}" connection add type wifi con-name "${USER_CON_NAME}" ifname "${AP_IFACE}" \
-      ssid "${ssid}" autoconnect yes
-  fi
+  err="$("${NMCLI}" "${add[@]}" 2>&1 >/dev/null)"; rc=$?
+  [ "${rc}" -eq 0 ] || log "nmcli connection add failed (rc=${rc}): ${err}"
+  return "${rc}"
 }
 
 # Fire the detached handoff worker in its own transient unit so it survives this
