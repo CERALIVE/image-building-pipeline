@@ -373,7 +373,10 @@ installation and hardware were not checked for this combined pin change.
 
 ## CeraUI pin receipt (2026-11-22)
 
-The image selects stable [CeraUI v2026.11.4](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4),
+**Superseded.** See the [November 28 receipt](#ceraui-and-cerastream-pin-receipt-2026-11-28)
+for the current `ceralive-device` and `cerastream` pins.
+
+On November 22, the image selected stable [CeraUI v2026.11.4](https://github.com/CERALIVE/CeraUI/releases/tag/v2026.11.4),
 published 2026-11-22T21:12:28Z at tag commit
 `500ab9ef24d39abb2d02947475a38c0b1b8334c9`.
 
@@ -391,13 +394,13 @@ exact `ceralive-device` entry matching the corresponding release asset digest.
 
 The authenticated `python3 ci/check-first-party-pins.py --refresh` generated the
 catalog without manual edits. It exited 1 before the bump because only the old
-CeraUI tag and both Debian pins were stale. The package contract asserts all
-three new values. No other first-party pin changed.
+CeraUI tag and both Debian pins were stale. The package contract asserted all
+three values at the time. No other first-party pin changed in that refresh.
 
 This verifies the repository's signed package listings, not downloaded Debian
 payloads or packages installed into a candidate. No image was built, booted or
-flashed, and hardware was not checked. The stock USB73 drop-in from #320 is
-already on the base branch and unchanged by this pin.
+flashed, and hardware was not checked. The stock USB73 drop-in from #320 was
+already on the base branch and unchanged by that pin.
 
 ## CeraUI and cerastream pin receipt (2026-11-28)
 
