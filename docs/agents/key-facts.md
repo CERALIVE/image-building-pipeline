@@ -5105,11 +5105,23 @@ The root-run installer gives it mode 0755. The coordinated engine caller request
 one re-enumeration only when a selected kernel card has no live PipeWire node.
 The helper accepts one `^[A-Za-z0-9_-]{1,32}$` id, matches it exactly against
 `/sys/class/sound/card*/id`, and sends sound remove/add events for that card alone.
+For `HDMIIN` only, one `change` event follows the add: systemd's `78-sound-card.rules`
+sets `SOUND_INITIALIZED` only on `change`, and PipeWire 1.4.2 skips a card without it.
+Other cards get no `change`, because CeraUI's rule renames a USB card id on that event.
+`tests/lib/hdmi-capture-contract.py` pins the order, guard and card scope.
 An exclusive nonblocking card lock and
 `/run/ceralive/audio-reprobe-<id>.stamp` enforce 30 seconds between attempts,
-including failed attempts. Malformed or future stamps refuse the request.
-Each udev command is bounded to one second; a failed remove never sends add.
-`CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, and installer destination
+including failed attempts. Malformed or future stamps refuse the request. An empty
+stamp does not: it is what a failed stamp write leaves, and no event was sent.
+Every command the helper runs shares one 1.5 s budget, read from `/proc/uptime`; the
+engine's 3 s also has to cover node discovery and the capture open. Each command runs
+under `timeout --foreground`, so it stays in the caller's process group and the
+caller's kill ends it. No udev command inherits the lock descriptor, so a helper killed
+during a trigger leaves the lock free. `flock` has to inherit it, so a helper killed
+alone at that point can leave the lock held until that command's limit. A failed remove
+never sends add, and a failed add never sends change.
+`CERALIVE_AUDIO_SYSFS_ROOT`, `CERALIVE_AUDIO_RUN_DIR`, `CERALIVE_AUDIO_UPTIME`, and
+installer destination
 `CERALIVE_LIBEXEC_DIR` support offline fixtures. The helper and installer are
 host-tested; physical no-signal-boot recovery still needs receiver qualification.
 
