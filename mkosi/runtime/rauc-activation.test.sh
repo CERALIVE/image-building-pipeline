@@ -175,7 +175,14 @@ EOF
 mkdir -p "$TMP/root/etc/systemd/system/multi-user.target.wants"
 ln -s ../ceralive-rauc-activate.service "$TMP/root/etc/systemd/system/multi-user.target.wants/ceralive-rauc-activate.service"
 ln -s ../zz-activate-probe.service "$TMP/root/etc/systemd/system/multi-user.target.wants/zz-activate-probe.service"
-if ! systemd-analyze verify --root "$TMP/root" multi-user.target 2>&1 | grep -Fq 'Found ordering cycle'; then
+# Capture first: with pipefail, `| grep -q` can exit at the match while
+# systemd-analyze still writes its "deleted to break" line, and the SIGPIPE
+# (141) fails the pipeline even though the cycle was found.
+if ! probe_out="$(systemd-analyze verify --root "$TMP/root" multi-user.target 2>&1)"; then
+  printf '%s\n' "$probe_out"
+  fail 'ordering probe: systemd-analyze verify failed'
+fi
+if ! grep -Fq 'Found ordering cycle' <<<"$probe_out"; then
   fail 'ordering probe did not observe activation After=rauc.service'
 fi
 ok 'dynamic ordering probe: activation is after RAUC'
